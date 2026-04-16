@@ -1,0 +1,51 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # Pinned debug keystore gives a stable SHA-1 across releases. Trail
+      # doesn't need SHA-1 registration (no Google Sign-In / Firebase) but
+      # we keep the pattern so every APK signs with the same key and users
+      # can update without reinstalling.
+      - name: Restore debug keystore (stable signing SHA)
+        run: |
+          mkdir -p ~/.android
+          echo '${{ secrets.DEBUG_KEYSTORE_B64 }}' | base64 -d > ~/.android/debug.keystore
+
+      - run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Get version from pubspec
+        id: version
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | cut -d'+' -f1)
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "name=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Rename APK
+        run: mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/Trail-${{ steps.version.outputs.tag }}.apk
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.name }}
+          files: build/app/outputs/flutter-apk/Trail-${{ steps.version.outputs.tag }}.apk
+          fail_on_unmatched_files: true
