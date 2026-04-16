@@ -5,6 +5,7 @@ import '../../db/database.dart';
 import '../../db/ping_dao.dart';
 import '../../models/ping.dart';
 import '../location_service.dart';
+import 'scheduler_policy.dart';
 
 /// WorkManager scheduler for the 4h scheduled-ping cadence.
 ///
@@ -26,9 +27,11 @@ class WorkmanagerScheduler {
   static const tagRetry = 'trail:retry';
   static const tagBoot = 'trail:boot';
 
-  static const defaultCadence = Duration(hours: 4);
-  static const lowBatteryCadence = Duration(hours: 8);
-  static const retryDelay = Duration(minutes: 5);
+  // Cadence/retry thresholds live in SchedulerPolicy so they can be unit-
+  // tested without workmanager. Aliased here for public call-sites.
+  static const defaultCadence = SchedulerPolicy.defaultCadence;
+  static const lowBatteryCadence = SchedulerPolicy.lowBatteryCadence;
+  static const retryDelay = SchedulerPolicy.retryDelay;
 
   /// Registers the top-level [_callbackDispatcher] with the native plugin.
   /// Safe to call on every app launch — the plugin de-dupes.
@@ -49,7 +52,8 @@ class WorkmanagerScheduler {
       frequency: frequency,
       existingWorkPolicy: ExistingWorkPolicy.replace,
       constraints: Constraints(
-        networkType: NetworkType.notRequired,
+        // ignore: constant_identifier_names — workmanager enum uses snake_case
+        networkType: NetworkType.not_required,
         requiresBatteryNotLow: false,
         requiresCharging: false,
         requiresDeviceIdle: false,
@@ -123,34 +127,23 @@ Future<bool> _handleScheduled() async {
   final db = await TrailDatabase.open();
   try {
     final dao = PingDao(db);
-    final battery = snapshot.batteryPct ?? 100;
-    // <5% → skip entirely, log a marker so gap is visible.
-    if (battery > 0 && battery < 5) {
+    if (SchedulerPolicy.shouldSkipForLowBattery(snapshot.batteryPct)) {
       await dao.insert(Ping(
         timestampUtc: DateTime.now().toUtc(),
-        batteryPct: battery,
+        batteryPct: snapshot.batteryPct,
         networkState: snapshot.networkState,
         source: PingSource.noFix,
-        note: 'skipped_low_battery',
+        note: SchedulerPolicy.skipNote,
       ));
       return true;
     }
     await dao.insert(snapshot);
 
-    // Adjust next cadence based on battery.
-    if (battery > 0 && battery < 20) {
-      // Replace the periodic worker with an 8h cadence until the device is
-      // charged again. Next run above 20% will re-register at 4h.
-      await WorkmanagerScheduler.enqueuePeriodic(
-        frequency: WorkmanagerScheduler.lowBatteryCadence,
-      );
-    } else {
-      await WorkmanagerScheduler.enqueuePeriodic();
-    }
+    await WorkmanagerScheduler.enqueuePeriodic(
+      frequency: SchedulerPolicy.nextCadence(snapshot.batteryPct),
+    );
 
-    // Retry-once-after-5min on no-fix.
-    if (snapshot.source == PingSource.noFix &&
-        snapshot.note != 'skipped_low_battery') {
+    if (SchedulerPolicy.shouldRetry(snapshot)) {
       await WorkmanagerScheduler.enqueueRetry();
     }
     return true;
