@@ -11,36 +11,39 @@ import '../../models/ping.dart';
 /// Skips `no_fix` rows (by definition they lack coordinates and GPX requires
 /// lat/lon on `<wpt>`).
 class GpxExporter {
-  Future<String> export(List<Ping> pings) async {
+  Future<String> export(List<Ping> pings, {DateTime? now}) async {
     final dir = await getTemporaryDirectory();
     final ts = DateTime.now().toUtc().millisecondsSinceEpoch;
     final file = File(p.join(dir.path, 'trail_export_$ts.gpx'));
-    final sink = file.openWrite();
-    sink.writeln('<?xml version="1.0" encoding="UTF-8"?>');
-    sink.writeln(
-      '<gpx version="1.1" creator="Trail" '
-      'xmlns="http://www.topografix.com/GPX/1/1">',
-    );
-    sink.writeln('  <metadata>');
-    sink.writeln('    <name>Trail export</name>');
-    sink.writeln(
-      '    <time>${DateTime.now().toUtc().toIso8601String()}</time>',
-    );
-    sink.writeln('  </metadata>');
+    await file.writeAsString(build(pings, now: now));
+    return file.path;
+  }
+
+  /// Pure-in-memory GPX builder — exposed for testing and for callers that
+  /// want the XML without a temp file. [now] is injectable so the
+  /// `<metadata><time>` timestamp is deterministic in tests.
+  String build(List<Ping> pings, {DateTime? now}) {
+    final stamp = (now ?? DateTime.now()).toUtc().toIso8601String();
+    final buf = StringBuffer()
+      ..writeln('<?xml version="1.0" encoding="UTF-8"?>')
+      ..writeln('<gpx version="1.1" creator="Trail" '
+          'xmlns="http://www.topografix.com/GPX/1/1">')
+      ..writeln('  <metadata>')
+      ..writeln('    <name>Trail export</name>')
+      ..writeln('    <time>$stamp</time>')
+      ..writeln('  </metadata>');
     for (final pg in pings) {
       if (pg.lat == null || pg.lon == null) continue;
-      sink.writeln('  <wpt lat="${pg.lat}" lon="${pg.lon}">');
-      if (pg.altitude != null) sink.writeln('    <ele>${pg.altitude}</ele>');
-      sink.writeln('    <time>${pg.timestampUtc.toIso8601String()}</time>');
+      buf.writeln('  <wpt lat="${pg.lat}" lon="${pg.lon}">');
+      if (pg.altitude != null) buf.writeln('    <ele>${pg.altitude}</ele>');
+      buf.writeln('    <time>${pg.timestampUtc.toIso8601String()}</time>');
       final desc = _desc(pg);
-      if (desc.isNotEmpty) sink.writeln('    <desc>${_xml(desc)}</desc>');
-      sink.writeln('    <type>${pg.source.dbValue}</type>');
-      sink.writeln('  </wpt>');
+      if (desc.isNotEmpty) buf.writeln('    <desc>${_xml(desc)}</desc>');
+      buf.writeln('    <type>${pg.source.dbValue}</type>');
+      buf.writeln('  </wpt>');
     }
-    sink.writeln('</gpx>');
-    await sink.flush();
-    await sink.close();
-    return file.path;
+    buf.writeln('</gpx>');
+    return buf.toString();
   }
 
   String _desc(Ping p) {
