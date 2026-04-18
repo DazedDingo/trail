@@ -4,6 +4,29 @@ All notable changes to **Trail** (gps-pinger) are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.1.4+5] — 2026-04-18
+
+### Fixed
+
+- **Home screen dying on first launch with a truncated "database exception".**
+  All four home-screen providers (`recentPingsProvider`,
+  `lastSuccessfulPingProvider`, `heartbeatHealthyProvider`,
+  `pingCountProvider`) plus the export action each opened their own
+  `TrailDatabase.open()` in parallel. Four concurrent SQLCipher
+  connections on the same DB file raced Keystore-backed passphrase
+  derivation and the first-install `onCreate` schema, which surfaced as
+  a generic "database exception" with no actionable detail.
+
+  `TrailDatabase.shared()` now memoises a single `Future<Database>` for
+  the UI isolate — all providers await the same open. The WorkManager
+  background isolate still uses `open()` per-job; it runs in a separate
+  Dart VM and cannot share the UI handle.
+- **Diagnostic surface for DB errors.** The previous error branch on the
+  home screen was a single-line `Text('Failed to load: $e')` that
+  truncated the exception and had no copy path — field diagnosis was
+  impossible. Replaced with a `SelectableText` card that shows the full
+  exception + stack trace with a copy-to-clipboard action.
+
 ## [0.1.3+4] — 2026-04-18
 
 ### Fixed

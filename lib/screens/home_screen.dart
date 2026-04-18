@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
@@ -84,7 +85,7 @@ class HomeScreen extends ConsumerWidget {
                 children: pings.take(20).map((p) => _PingTile(ping: p)).toList(),
               ),
               loading: () => const Center(child: CircularProgressIndicator()),
-              error: (e, _) => Text('Failed to load: $e'),
+              error: (e, st) => _DbErrorCard(error: e, stack: st),
             ),
           ],
         ),
@@ -198,19 +199,65 @@ class _ExportRow extends ConsumerWidget {
   }
 
   Future<void> _export(BuildContext context, {required bool gpx}) async {
-    final db = await TrailDatabase.open();
-    try {
-      final all = await PingDao(db).all();
-      final path = gpx
-          ? await GpxExporter().export(all)
-          : await CsvExporter().export(all);
-      await Share.shareXFiles(
-        [XFile(path)],
-        subject: 'Trail export (${gpx ? "GPX" : "CSV"})',
-      );
-    } finally {
-      await db.close();
-    }
+    // Uses the UI-isolate shared handle — do NOT close; see TrailDatabase.
+    final db = await TrailDatabase.shared();
+    final all = await PingDao(db).all();
+    final path = gpx
+        ? await GpxExporter().export(all)
+        : await CsvExporter().export(all);
+    await Share.shareXFiles(
+      [XFile(path)],
+      subject: 'Trail export (${gpx ? "GPX" : "CSV"})',
+    );
+  }
+}
+
+/// Surfaces a DB load failure with copyable detail. The previous single-line
+/// `Text('Failed to load: $e')` truncated exception text off-screen, which
+/// made field diagnosis impossible when 0.1.3 hit a first-install DB race.
+class _DbErrorCard extends StatelessWidget {
+  final Object error;
+  final StackTrace stack;
+  const _DbErrorCard({required this.error, required this.stack});
+
+  @override
+  Widget build(BuildContext context) {
+    final detail = '$error\n\n$stack';
+    return Card(
+      color: Theme.of(context).colorScheme.errorContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.error_outline,
+                    color: Theme.of(context).colorScheme.error),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Failed to load pings',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Copy error',
+                  icon: const Icon(Icons.copy, size: 18),
+                  onPressed: () =>
+                      Clipboard.setData(ClipboardData(text: detail)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            SelectableText(
+              detail,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
