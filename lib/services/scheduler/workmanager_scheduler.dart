@@ -36,10 +36,7 @@ class WorkmanagerScheduler {
   /// Registers the top-level [_callbackDispatcher] with the native plugin.
   /// Safe to call on every app launch — the plugin de-dupes.
   static Future<void> initialize() async {
-    await Workmanager().initialize(
-      _callbackDispatcher,
-      isInDebugMode: false,
-    );
+    await Workmanager().initialize(_callbackDispatcher);
   }
 
   /// Enqueue / replace the baseline 4h periodic worker.
@@ -50,12 +47,11 @@ class WorkmanagerScheduler {
       periodicTaskName,
       periodicTaskName,
       frequency: frequency,
-      existingWorkPolicy: ExistingWorkPolicy.replace,
+      existingWorkPolicy: ExistingPeriodicWorkPolicy.update,
       constraints: Constraints(
         // Policy invariants live in SchedulerPolicy so they are test-
         // guarded — this config is the single biggest battery lever.
-        // ignore: constant_identifier_names — workmanager enum uses snake_case
-        networkType: NetworkType.not_required,
+        networkType: NetworkType.notRequired,
         requiresBatteryNotLow: SchedulerPolicy.requiresBatteryNotLow,
         requiresCharging: SchedulerPolicy.requiresCharging,
         requiresDeviceIdle: SchedulerPolicy.requiresDeviceIdle,
