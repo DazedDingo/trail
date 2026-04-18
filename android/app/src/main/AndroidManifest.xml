@@ -44,6 +44,14 @@
     <!-- Opt out of OEM aggressive doze so the 4h worker runs on time. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
 
+    <!-- local_auth biometric prompt (lock screen + onboarding bio test).
+         USE_BIOMETRIC covers API 28+; USE_FINGERPRINT is the legacy path
+         for API 23-27 — both are required for full coverage on minSdk 23.
+         Without these, LocalAuthentication.canCheckBiometrics returns
+         false and no fingerprint UI is ever offered. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
+    <uses-permission android:name="android.permission.USE_FINGERPRINT"/>
+
     <application
         android:label="Trail"
         android:name="${applicationName}"

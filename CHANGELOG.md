@@ -4,6 +4,26 @@ All notable changes to **Trail** (gps-pinger) are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.1.3+4] — 2026-04-18
+
+### Fixed
+
+- **Biometric unlock totally broken on the v0.1.2 APK.** Two canonical
+  `local_auth` setup misses, both shipping in the very first installable
+  build:
+  - `MainActivity` extended `FlutterActivity` instead of
+    `FlutterFragmentActivity`. The biometric prompt is rendered as a
+    Fragment and needs a FragmentActivity host — without it,
+    `authenticate()` throws and the lock screen reported a generic
+    "Authentication failed" with no fingerprint UI ever shown.
+  - `AndroidManifest.xml` was missing `USE_BIOMETRIC` (API 28+) and
+    `USE_FINGERPRINT` (legacy API 23-27). With those absent,
+    `canCheckBiometrics` returns `false`, which is what made the
+    onboarding "bio test" button silently fail and offered no scan path.
+
+  Both fixes are required — fixing one without the other still leaves
+  bio broken.
+
 ## [0.1.2+3] — 2026-04-18
 
 ### Fixed
