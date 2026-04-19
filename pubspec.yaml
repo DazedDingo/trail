@@ -16,6 +16,11 @@ dependencies:
 
   # Location + scheduling
   geolocator: ^13.0.1
+  # Reverse geocoding — uses Android's built-in Geocoder for an approx
+  # place name ("Cambridge, MA") alongside raw lat/lon on history screens.
+  # Offline-capable where the device has cached geocoder data; returns
+  # empty results (not errors) on no-network gaps.
+  geocoding: ^3.0.0
   # Pinned to ^0.9.0+3 — earlier 0.5.x referenced Flutter v1 embedding
   # (ShimPluginRegistry) which is gone in Flutter 3.41+ and broke CI.
   workmanager: ^0.9.0+3

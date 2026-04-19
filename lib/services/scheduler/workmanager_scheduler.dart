@@ -88,6 +88,34 @@ class WorkmanagerScheduler {
   static Future<void> cancelAll() async {
     await Workmanager().cancelAll();
   }
+
+  /// UI-isolate synchronous kick of the scheduled handler. Writes one row
+  /// using the same code path the 4h worker does — a manual diagnostic for
+  /// "is the pipeline broken or is the OS just throttling my worker?"
+  ///
+  /// Uses the UI isolate's shared DB handle (never open a second SQLCipher
+  /// connection here — that path races first-install key derivation, see
+  /// the 0.1.3 bug). Returns the row that landed, or `null` if low-battery
+  /// policy skipped the fix.
+  static Future<Ping?> runNow() async {
+    final location = LocationService();
+    final snapshot = await location.getScheduledPing();
+    final db = await TrailDatabase.shared();
+    final dao = PingDao(db);
+    if (SchedulerPolicy.shouldSkipForLowBattery(snapshot.batteryPct)) {
+      final skip = Ping(
+        timestampUtc: DateTime.now().toUtc(),
+        batteryPct: snapshot.batteryPct,
+        networkState: snapshot.networkState,
+        source: PingSource.noFix,
+        note: SchedulerPolicy.skipNote,
+      );
+      await dao.insert(skip);
+      return skip;
+    }
+    await dao.insert(snapshot);
+    return snapshot;
+  }
 }
 
 /// Top-level entry point for every background task.

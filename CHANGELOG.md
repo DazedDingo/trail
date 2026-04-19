@@ -4,6 +4,47 @@ All notable changes to **Trail** (gps-pinger) are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.1.5+6] — 2026-04-19
+
+### Fixed
+
+- **Upgrades required an uninstall first.** The release workflow was
+  running `echo '${{ secrets.DEBUG_KEYSTORE_B64 }}' | base64 -d > ~/.android/debug.keystore`,
+  but that secret was never set on `DazedDingo/gps-pinger` (it exists on
+  watchnext, which is the pattern this repo was forked from). An empty
+  secret produced an empty file, Flutter regenerated a fresh debug
+  keystore on each CI run, and every GitHub release was signed with a
+  different cert — so every upgrade hit `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
+
+  Pinned the keystore in-tree at `android/app/debug.keystore`, added an
+  explicit `signingConfigs.debug` in `build.gradle.kts` pointing at it,
+  and taught CI to verify the APK's SHA-1 matches the expected value
+  after build. `.gitignore` gains an `!android/app/debug.keystore`
+  negation so the wildcard doesn't silently hide it on future commits.
+  (One-time uninstall still needed to get off the last random keystore
+  — future upgrades install cleanly.)
+
+### Added
+
+- **Trail visualisation on Home.** A tile-free `CustomPaint` trail view
+  that projects recent ping coordinates into the available rect and
+  connects them with a path, latest fix highlighted. No internet / no
+  map tiles — consistent with Trail's offline-first constraint.
+- **Approximate location on the last-ping card.** Reverse geocoded via
+  Android's system Geocoder (works partially offline from cached data).
+  Renders as `Cambridge, MA` under the raw coordinates; silently omits
+  when the geocoder has nothing, so poor-coverage locations don't
+  render a misleading placeholder.
+- **Diagnostics in Settings.**
+  - "Run ping now" button exercises the scheduled handler end-to-end
+    from the UI isolate so a stale heartbeat can be debugged as
+    "pipeline broken" vs "phone throttling the worker" without adb.
+  - Live status pills for battery-optimisation, fine location, and
+    background location. Statuses re-read on resume so a grant/revoke
+    made in system settings is reflected without reopening the page.
+  - App version now shown at the bottom (matches the convention used
+    by the other DazedDingo apps).
+
 ## [0.1.4+5] — 2026-04-18
 
 ### Fixed

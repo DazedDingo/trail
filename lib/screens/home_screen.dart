@@ -11,6 +11,7 @@ import '../models/ping.dart';
 import '../providers/pings_provider.dart';
 import '../services/export/csv_exporter.dart';
 import '../services/export/gpx_exporter.dart';
+import '../widgets/trail_map.dart';
 
 /// The app's primary screen.
 ///
@@ -66,6 +67,20 @@ class HomeScreen extends ConsumerWidget {
             const SizedBox(height: 12),
             _ExportRow(),
             const SizedBox(height: 20),
+            Text(
+              'Trail',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            recent.when(
+              data: (pings) => TrailMap(pings: pings),
+              loading: () => const SizedBox(
+                height: 180,
+                child: Center(child: CircularProgressIndicator()),
+              ),
+              error: (_, __) => const SizedBox.shrink(),
+            ),
+            const SizedBox(height: 20),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -94,13 +109,13 @@ class HomeScreen extends ConsumerWidget {
   }
 }
 
-class _LastPingCard extends StatelessWidget {
+class _LastPingCard extends ConsumerWidget {
   final AsyncValue<Ping?> last;
   final AsyncValue<bool> healthy;
   const _LastPingCard({required this.last, required this.healthy});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final isHealthy = healthy.asData?.value ?? true;
     final p = last.asData?.value;
     return Card(
@@ -147,10 +162,54 @@ class _LastPingCard extends StatelessWidget {
                 '${p.accuracy != null ? "  ±${p.accuracy!.toStringAsFixed(0)}m" : ""}',
                 style: Theme.of(context).textTheme.bodyMedium,
               ),
+              _ApproxLocationLine(lat: p.lat!, lon: p.lon!),
             ],
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Reverse-geocoded city/region label under the raw coordinates.
+///
+/// Silent while loading (we'd rather the number pop in cold than the card
+/// flicker a "Resolving…" placeholder for 200ms). Silent on null too —
+/// offline with no cached geocoder data is a normal state, not an error.
+class _ApproxLocationLine extends ConsumerWidget {
+  final double lat;
+  final double lon;
+  const _ApproxLocationLine({required this.lat, required this.lon});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final label = ref.watch(approxLocationProvider((lat: lat, lon: lon)));
+    return label.when(
+      data: (name) {
+        if (name == null) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Row(
+            children: [
+              Icon(
+                Icons.place_outlined,
+                size: 14,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+              const SizedBox(width: 4),
+              Flexible(
+                child: Text(
+                  name,
+                  style: Theme.of(context).textTheme.bodySmall,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+      loading: () => const SizedBox.shrink(),
+      error: (_, __) => const SizedBox.shrink(),
     );
   }
 }
