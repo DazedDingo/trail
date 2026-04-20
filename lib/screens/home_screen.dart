@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
+import '../models/emergency_contact.dart';
 import '../models/ping.dart';
 import '../providers/contacts_provider.dart';
 import '../providers/home_location_provider.dart';
@@ -269,18 +270,15 @@ class _HomeDistanceLine extends ConsumerWidget {
   }
 }
 
-/// Prominent panic card on the home screen.
+/// Panic card on the home screen.
 ///
-/// Two actions, clearly separated:
-///   - **Panic now** (big button): one-shot high-accuracy fix + visible
-///     receipt + pre-filled SMS to configured emergency contacts.
-///   - **Continuous** (small button): opens native foreground service for
-///     the duration configured in Settings.
-///
-/// Both branches gracefully degrade — no contacts? Fix still writes,
-/// notification still fires, just no SMS hand-off. Native channel not
-/// wired (test / emulator without native plugin)? Continuous mode
-/// downgrades to a one-shot.
+/// De-emphasised by design (0.6.1+16): a single outlined hold-to-trigger
+/// button + a smaller continuous-mode action. The "big red button" of
+/// pre-0.6.1 fired on a single tap and was racking up accidental panics
+/// from pocket taps and UI mis-touches. Now the user must hold for
+/// [_holdDuration]; the progress ring fills during the hold so they can
+/// see it's armed. After fire, if `panicAutoSendProvider` is on, the SMS
+/// goes out *after* an additional 5-second on-screen undo grace.
 class _PanicButton extends ConsumerStatefulWidget {
   const _PanicButton();
 
@@ -288,8 +286,48 @@ class _PanicButton extends ConsumerStatefulWidget {
   ConsumerState<_PanicButton> createState() => _PanicButtonState();
 }
 
-class _PanicButtonState extends ConsumerState<_PanicButton> {
+class _PanicButtonState extends ConsumerState<_PanicButton>
+    with SingleTickerProviderStateMixin {
+  /// How long the user must hold before panic fires. 600 ms is the
+  /// sweet spot — long enough that a stray pocket-tap won't cross it,
+  /// short enough that in a real emergency the user doesn't feel the UI
+  /// is fighting them.
+  static const _holdDuration = Duration(milliseconds: 600);
+
+  /// Grace window between "panic logged" and "SMS sent" when auto-send
+  /// is on. Tuned to match Android's default SnackBar timeout so the
+  /// visual countdown and the send fire together.
+  static const _autoSendGrace = Duration(seconds: 5);
+
+  late final AnimationController _hold;
   bool _working = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _hold = AnimationController(vsync: this, duration: _holdDuration)
+      ..addStatusListener((status) {
+        if (status == AnimationStatus.completed && !_working) {
+          _panicNow();
+          _hold.reset();
+        }
+      });
+  }
+
+  @override
+  void dispose() {
+    _hold.dispose();
+    super.dispose();
+  }
+
+  void _startHold() {
+    if (_working) return;
+    _hold.forward(from: 0);
+  }
+
+  void _cancelHold() {
+    if (_hold.status == AnimationStatus.forward) _hold.reverse();
+  }
 
   Future<void> _panicNow() async {
     setState(() => _working = true);
@@ -314,8 +352,6 @@ class _PanicButtonState extends ConsumerState<_PanicButton> {
       return;
     }
 
-    // Attempt SMS hand-off. Contacts may be empty — surface that distinctly
-    // from a real failure so the user knows to configure them.
     final contacts = await ref.read(emergencyContactsProvider.future);
     if (!mounted) return;
     if (contacts.isEmpty) {
@@ -328,19 +364,85 @@ class _PanicButtonState extends ConsumerState<_PanicButton> {
       );
       return;
     }
-    final opened =
-        await PanicService.openPanicSms(contacts: contacts, ping: result);
+
+    final autoSend = await ref.read(panicAutoSendProvider.future);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
+    if (autoSend) {
+      await _shareWithUndoGrace(contacts: contacts, ping: result);
+    } else {
+      final opened =
+          await PanicService.openPanicSms(contacts: contacts, ping: result);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            opened
+                ? 'Panic logged + SMS app opened with ${contacts.length} '
+                    'contact${contacts.length == 1 ? "" : "s"}.'
+                : 'Panic logged. SMS hand-off failed — send manually.',
+          ),
+        ),
+      );
+    }
+  }
+
+  /// Auto-send path: show a 5-second undo SnackBar. If the user taps
+  /// Undo, cancel the pending send. If the SnackBar times out or is
+  /// dismissed any other way, fire the native SMS. Falls back to the
+  /// compose-intent path if the native send returns 0.
+  Future<void> _shareWithUndoGrace({
+    required List<EmergencyContact> contacts,
+    required Ping ping,
+  }) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final controller = messenger.showSnackBar(
       SnackBar(
+        duration: _autoSendGrace,
         content: Text(
-          opened
-              ? 'Panic logged + SMS app opened with ${contacts.length} contact'
-                  '${contacts.length == 1 ? "" : "s"}.'
-              : 'Panic logged. SMS hand-off failed — send manually.',
+          'Panic logged. Sending SMS to ${contacts.length} '
+          'contact${contacts.length == 1 ? "" : "s"} in '
+          '${_autoSendGrace.inSeconds}s…',
+        ),
+        action: SnackBarAction(
+          label: 'UNDO',
+          onPressed: () {/* closed reason = action */},
         ),
       ),
     );
+    final reason = await controller.closed;
+    if (!mounted) return;
+    if (reason == SnackBarClosedReason.action) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('SMS cancelled. Panic still logged.')),
+      );
+      return;
+    }
+    final sent =
+        await PanicService.autoSendSms(contacts: contacts, ping: ping);
+    if (!mounted) return;
+    if (sent > 0) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            'Panic SMS sent to $sent '
+            'contact${sent == 1 ? "" : "s"}.',
+          ),
+        ),
+      );
+    } else {
+      final opened =
+          await PanicService.openPanicSms(contacts: contacts, ping: ping);
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            opened
+                ? 'Auto-send unavailable — SMS app opened instead.'
+                : 'Panic logged. SMS send failed — send manually.',
+          ),
+        ),
+      );
+    }
   }
 
   Future<void> _startContinuous() async {
@@ -367,36 +469,74 @@ class _PanicButtonState extends ConsumerState<_PanicButton> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Card(
-      color: scheme.errorContainer.withValues(alpha: 0.4),
+      // Lighter tint than pre-0.6.1 so the card no longer dominates the
+      // screen. Red border still marks its intent.
+      color: scheme.errorContainer.withValues(alpha: 0.15),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: scheme.error.withValues(alpha: 0.6)),
+        side: BorderSide(color: scheme.error.withValues(alpha: 0.45)),
       ),
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            FilledButton.icon(
-              onPressed: _working ? null : _panicNow,
-              style: FilledButton.styleFrom(
-                backgroundColor: scheme.error,
-                foregroundColor: scheme.onError,
-                padding: const EdgeInsets.symmetric(vertical: 18),
-                textStyle: Theme.of(context).textTheme.titleMedium,
+            GestureDetector(
+              onLongPressStart: (_) => _startHold(),
+              onLongPressEnd: (_) => _cancelHold(),
+              onLongPressCancel: _cancelHold,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  OutlinedButton.icon(
+                    // Tap does nothing — the long-press gesture above is
+                    // the only arming path. Button exists for visual
+                    // affordance + to provide the disabled/working state.
+                    onPressed: _working ? null : () {},
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: scheme.error,
+                      side: BorderSide(color: scheme.error, width: 1.5),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                    icon: _working
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child:
+                                CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.warning_amber_rounded),
+                    label: Text(_working ? 'Logging…' : 'Hold to panic'),
+                  ),
+                  // Fill-progress overlay during hold. AnimatedBuilder on
+                  // the controller's value so the fraction tracks the
+                  // hold duration; ignored when idle.
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: AnimatedBuilder(
+                        animation: _hold,
+                        builder: (_, __) {
+                          if (_hold.value == 0) return const SizedBox.shrink();
+                          return FractionallySizedBox(
+                            alignment: Alignment.centerLeft,
+                            widthFactor: _hold.value,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color:
+                                    scheme.error.withValues(alpha: 0.18),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                ],
               ),
-              icon: _working
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white),
-                    )
-                  : const Icon(Icons.warning_amber_rounded),
-              label: Text(_working ? 'Logging…' : 'PANIC NOW'),
             ),
             const SizedBox(height: 8),
-            OutlinedButton.icon(
+            TextButton.icon(
               onPressed: _working ? null : _startContinuous,
               icon: const Icon(Icons.timer_outlined, size: 18),
               label: const Text('Start continuous panic'),

@@ -64,7 +64,7 @@ Battery conservation is an explicit design constraint. The app must be invisible
 - **Panic ping:** prominent in-app button, plus Android **quick-settings tile** AND **home-screen widget** for one-tap invocation without opening app
 - **Continuous mode:** after panic triggered, keep pinging every 1–2 min via foreground service with visible notification, for a **user-configurable duration (15 / 30 / 60 min)**, then auto-stop
 - **Panic receipt:** visible local notification "Panic ping logged at HH:MM — [coords]" (scheduled pings stay silent — too frequent to notify)
-- **Panic external share:** maintain a list of pre-configured emergency contacts in settings. On panic, open the **default SMS app pre-filled** with those recipients and message text (`PANIC at HH:MM — https://maps.google.com/?q=lat,lon`). User still taps "send" — no `SEND_SMS` permission used (Play Store scrutiny, and keeps user in control).
+- **Panic external share:** maintain a list of pre-configured emergency contacts in settings. Two modes, user's choice (0.6.1+16): **(a) default — compose intent:** open the default SMS app pre-filled with recipients + body (`PANIC at HH:MM — https://maps.google.com/?q=lat,lon`); user taps Send, no `SEND_SMS` permission. **(b) opt-in — auto-send:** Flutter fires `SmsManager.sendTextMessage` natively after a 5-second on-screen undo grace; requires `SEND_SMS` grant. Play-Store-scrutiny argument that shaped the original default is moot now that the app is sideload-only, but the compose flow remains the default so users who never flip the toggle are unchanged.
 - **Impact detection / auto-panic:** no (rejected — false positives, battery cost)
 - **Duress PIN:** no (rejected — overkill)
 

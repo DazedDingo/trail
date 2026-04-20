@@ -4,6 +4,41 @@ All notable changes to **Trail** (gps-pinger) are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.6.1+16] — 2026-04-20
+
+### Added
+
+- **Auto-send panic SMS** (opt-in, off by default). New native
+  `SmsManager.sendTextMessage` path on the `com.dazeddingo.trail/panic`
+  channel; Dart side at `PanicService.autoSendSms` handles the runtime
+  `SEND_SMS` grant + multipart split. The panic button now shows a
+  5-second undo SnackBar before the send fires, so an accidental panic
+  tap can still be cancelled; tapping "UNDO" keeps the ping logged but
+  blocks the SMS. Toggle lives at `Settings → Panic → Auto-send panic
+  SMS`; state persists via `panicAutoSendProvider` (same secure-storage
+  pattern as the continuous-duration tile). When the toggle is off,
+  the existing compose-intent flow (open SMS app → user taps Send) is
+  unchanged.
+
+### Changed
+
+- **Home-screen panic button de-emphasised.** Pre-0.6.1 was a bright
+  red `FilledButton` that fired on a single tap — too easy to
+  accidentally trigger from pocket taps or UI mis-touches. Now:
+  - **Hold-to-trigger** (600 ms). Long-press fills a progress overlay
+    across the button; releasing before the hold completes cancels
+    cleanly.
+  - **Outlined** red instead of filled, on a lighter card tint
+    (`errorContainer` alpha 0.15 ↓ from 0.4, border alpha 0.45 ↓ from
+    0.6). Still visually distinct, no longer dominates the screen.
+  - Continuous-panic action demoted from outlined-button to a
+    lower-emphasis TextButton below the main action.
+  - Label switched from "PANIC NOW" to "Hold to panic" so the gesture
+    is self-describing.
+- `AndroidManifest.xml` declares the new `SEND_SMS` permission. It's
+  a runtime-dangerous permission, so the system prompts on first
+  auto-send — users who never flip the toggle never see the dialog.
+
 ## [0.6.0+15] — 2026-04-20
 
 ### Added

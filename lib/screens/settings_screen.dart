@@ -208,6 +208,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             onTap: () => context.push('/contacts'),
           ),
           const _ContinuousDurationTile(),
+          const _AutoSendToggleTile(),
           const Divider(),
           const _SectionHeader('Home'),
           const _HomeLocationTile(),
@@ -522,6 +523,31 @@ class _HomeLocationTile extends ConsumerWidget {
 /// Duration picker for the continuous-panic foreground service. Defaults
 /// to 30 min; persisted via [panicDurationProvider] so the choice sticks
 /// across app restarts.
+/// Toggle for silent panic-SMS sending (0.6.1+16). When off, the panic
+/// button opens the user's SMS app pre-filled; when on, the SMS is sent
+/// natively via `SmsManager` after a 5-second on-screen undo grace.
+class _AutoSendToggleTile extends ConsumerWidget {
+  const _AutoSendToggleTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final state = ref.watch(panicAutoSendProvider);
+    final enabled = state.asData?.value ?? false;
+    return SwitchListTile(
+      secondary: const Icon(Icons.send_outlined),
+      title: const Text('Auto-send panic SMS'),
+      subtitle: const Text(
+        'Send the SMS automatically after a 5-second undo window. '
+        'Requires SEND_SMS permission. Off = opens your SMS app to confirm.',
+      ),
+      value: enabled,
+      onChanged: state.isLoading
+          ? null
+          : (v) => ref.read(panicAutoSendProvider.notifier).set(v),
+    );
+  }
+}
+
 class _ContinuousDurationTile extends ConsumerWidget {
   const _ContinuousDurationTile();
 

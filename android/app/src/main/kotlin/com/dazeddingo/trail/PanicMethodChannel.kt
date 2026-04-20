@@ -1,6 +1,8 @@
 package com.dazeddingo.trail
 
 import android.content.Context
+import android.os.Build
+import android.telephony.SmsManager
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
@@ -39,6 +41,53 @@ object PanicMethodChannel {
                         result.success(null)
                     } catch (t: Throwable) {
                         result.error("PANIC_STOP_FAILED", t.message, null)
+                    }
+                }
+                "sendSms" -> {
+                    // Silent panic-SMS send. Callers pass a recipient list
+                    // (E.164 strings) and one body; we loop per-recipient
+                    // because `sendTextMessage` is 1:1, and split long
+                    // bodies into multipart to survive GSM 7-bit limits.
+                    // Throwing here falls back to the user-taps-Send path
+                    // on the Dart side — safer than losing the alert.
+                    try {
+                        val recipients =
+                            call.argument<List<String>>("recipients").orEmpty()
+                        val body = call.argument<String>("body").orEmpty()
+                        if (recipients.isEmpty() || body.isEmpty()) {
+                            result.error(
+                                "PANIC_SMS_ARGS",
+                                "recipients and body are required",
+                                null,
+                            )
+                            return@setMethodCallHandler
+                        }
+                        val sms = if (Build.VERSION.SDK_INT >=
+                            Build.VERSION_CODES.S
+                        ) {
+                            context.getSystemService(SmsManager::class.java)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            SmsManager.getDefault()
+                        }
+                        var sent = 0
+                        for (phone in recipients) {
+                            if (phone.isBlank()) continue
+                            val parts = sms.divideMessage(body)
+                            if (parts.size > 1) {
+                                sms.sendMultipartTextMessage(
+                                    phone, null, parts, null, null,
+                                )
+                            } else {
+                                sms.sendTextMessage(
+                                    phone, null, body, null, null,
+                                )
+                            }
+                            sent += 1
+                        }
+                        result.success(sent)
+                    } catch (t: Throwable) {
+                        result.error("PANIC_SMS_FAILED", t.message, null)
                     }
                 }
                 "setContinuousDurationMinutes" -> {

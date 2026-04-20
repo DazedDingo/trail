@@ -1,5 +1,6 @@
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:workmanager/workmanager.dart';
 
@@ -79,6 +80,45 @@ class PanicService {
     if (uri == null) return false;
     final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
     return ok;
+  }
+
+  /// Silently send the panic SMS via native [SmsManager] — no user tap
+  /// required. Gated behind the `panicAutoSendProvider` toggle and always
+  /// called *after* the 5-second on-screen undo grace window elapses, so
+  /// an accidental panic tap can still be rescued. Requires `SEND_SMS`
+  /// permission; requests it at the call site if not already granted.
+  ///
+  /// Returns the number of recipients the native side reported as sent.
+  /// Returns `0` on any failure (missing permission, no plugin, native
+  /// error) — callers should fall back to [openPanicSms] so the user can
+  /// still ship the alert manually.
+  static Future<int> autoSendSms({
+    required List<EmergencyContact> contacts,
+    required Ping ping,
+  }) async {
+    if (contacts.isEmpty) return 0;
+    // Runtime permission — SEND_SMS is a dangerous permission, so even
+    // with the manifest declaration the user sees a system prompt the
+    // first time.
+    final status = await Permission.sms.request();
+    if (!status.isGranted) return 0;
+    final body = PanicShareBuilder.composeBody(ping: ping);
+    final recipients = contacts
+        .map((c) => c.phoneE164)
+        .where((p) => p.isNotEmpty)
+        .toList(growable: false);
+    if (recipients.isEmpty) return 0;
+    try {
+      final sent = await _channel.invokeMethod<int>(
+        'sendSms',
+        {'recipients': recipients, 'body': body},
+      );
+      return sent ?? 0;
+    } on MissingPluginException {
+      return 0;
+    } on PlatformException {
+      return 0;
+    }
   }
 
   /// Start the native continuous-panic foreground service for [duration].

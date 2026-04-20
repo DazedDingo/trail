@@ -8,6 +8,13 @@ import '../services/panic/panic_service.dart';
 /// passphrase — we don't want this leaking into backups unnecessarily.
 const _durationKey = 'trail_panic_duration_v1';
 
+/// Toggle for silent panic-SMS sending. When false (the default), the
+/// panic button opens the user's SMS app pre-filled and they tap Send.
+/// When true, the home-screen panic button shows a 5-second undo toast,
+/// then fires `SmsManager.sendTextMessage` natively. Persisted to secure
+/// storage so the user's choice survives restart.
+const _autoSendKey = 'trail_panic_auto_send_v1';
+
 final panicDurationProvider =
     AsyncNotifierProvider<PanicDurationNotifier, PanicDuration>(
   PanicDurationNotifier.new,
@@ -56,5 +63,38 @@ class PanicDurationNotifier extends AsyncNotifier<PanicDuration> {
       if (d.name == raw) return d;
     }
     return null;
+  }
+}
+
+final panicAutoSendProvider =
+    AsyncNotifierProvider<PanicAutoSendNotifier, bool>(
+  PanicAutoSendNotifier.new,
+);
+
+class PanicAutoSendNotifier extends AsyncNotifier<bool> {
+  static const _storage = FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+  );
+
+  @override
+  Future<bool> build() async {
+    try {
+      final raw = await _storage.read(key: _autoSendKey);
+      return raw == 'true';
+    } catch (_) {
+      // Transient secure-storage read failure — default to the safer off
+      // state rather than risk a silent-send on a flaky boot.
+      return false;
+    }
+  }
+
+  Future<void> set(bool enabled) async {
+    state = AsyncData(enabled);
+    try {
+      await _storage.write(key: _autoSendKey, value: enabled ? 'true' : 'false');
+    } catch (_) {
+      // In-memory state is still correct; user can retry from the
+      // Settings toggle. Never crash here.
+    }
   }
 }

@@ -29,6 +29,13 @@
          missed-heartbeat warnings). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
+    <!-- Auto-send panic SMS (0.6.1+16). Off by default — users opt in from
+         Settings → Panic → Auto-send SMS. When enabled, the Flutter side
+         fires this after a 5-second on-screen undo grace so an accidental
+         panic tap can still be rescued. We don't bundle this with the Play
+         Store SEND_SMS review pipeline because Trail is sideload-only. -->
+    <uses-permission android:name="android.permission.SEND_SMS"/>
+
     <!-- Wi-Fi SSID on Android 13+ requires NEARBY_WIFI_DEVICES in addition
          to fine location. We never trigger active scans (battery rule) —
          only `getConnectionInfo` reads. -->
