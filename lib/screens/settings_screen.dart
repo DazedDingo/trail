@@ -352,14 +352,14 @@ class _BackupTile extends ConsumerWidget {
   }
 }
 
-class _BackupSetupDialog extends StatefulWidget {
+class _BackupSetupDialog extends ConsumerStatefulWidget {
   const _BackupSetupDialog();
 
   @override
-  State<_BackupSetupDialog> createState() => _BackupSetupDialogState();
+  ConsumerState<_BackupSetupDialog> createState() => _BackupSetupDialogState();
 }
 
-class _BackupSetupDialogState extends State<_BackupSetupDialog> {
+class _BackupSetupDialogState extends ConsumerState<_BackupSetupDialog> {
   final _pass1 = TextEditingController();
   final _pass2 = TextEditingController();
   bool _obscured = true;
@@ -391,23 +391,32 @@ class _BackupSetupDialogState extends State<_BackupSetupDialog> {
     });
     try {
       final currentKey = await KeystoreKey.read();
+      final salt = await PassphraseService.generateAndPersistSalt();
+      final derived = PassphraseService.deriveKey(p1, salt);
       if (currentKey == null) {
         // Race: we're in keystore mode but no key yet. That means the
         // DB has never been opened on this install, so there's nothing
-        // to rekey — just generate the salt and store the derived key
-        // so the next open creates the DB encrypted with the derived
-        // key directly.
-        final salt = await PassphraseService.generateAndPersistSalt();
-        final derived = PassphraseService.deriveKey(p1, salt);
+        // to rekey — just store the derived key so the next open creates
+        // the DB encrypted with it directly.
+        await TrailDatabase.invalidateShared();
         await KeystoreKey.persist(derived);
-        TrailDatabase.invalidateShared();
       } else {
-        final salt = await PassphraseService.generateAndPersistSalt();
-        final derived = PassphraseService.deriveKey(p1, salt);
+        // Close the shared UI-isolate handle BEFORE rekey. sqflite's
+        // `singleInstance: true` default means `openDatabase(path, ...)`
+        // inside `rekey()` would otherwise return the exact handle the
+        // home-screen providers are holding — and rekey's `finally`
+        // close() would then tear it down under their feet. Closing
+        // first guarantees rekey opens a fresh handle it fully owns.
+        await TrailDatabase.invalidateShared();
         await TrailDatabase.rekey(currentKey: currentKey, newKey: derived);
         await KeystoreKey.persist(derived);
-        TrailDatabase.invalidateShared();
       }
+      // Providers that cached a Database reference via shared() now point
+      // at a closed handle — force them to re-fetch.
+      ref.invalidate(recentPingsProvider);
+      ref.invalidate(lastSuccessfulPingProvider);
+      ref.invalidate(heartbeatHealthyProvider);
+      ref.invalidate(pingCountProvider);
       if (!mounted) return;
       Navigator.of(context).pop(true);
     } catch (e) {

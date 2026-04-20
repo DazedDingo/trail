@@ -72,7 +72,7 @@ class _PassphraseEntryScreenState
         await db.close();
       }
       await KeystoreKey.persist(derived);
-      TrailDatabase.invalidateShared();
+      await TrailDatabase.invalidateShared();
       if (!mounted) return;
       // Flip the router's gate so the next redirect lets us through to
       // the lock screen instead of bouncing us back to /unlock.

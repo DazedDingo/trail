@@ -4,6 +4,27 @@ All notable changes to **Trail** (gps-pinger) are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.1.8+9] — 2026-04-20
+
+### Fixed
+
+- **"Database is closed" error when setting a backup passphrase.**
+  `TrailDatabase.rekey()` called `openDatabase(path, password: ...)` to
+  obtain a handle for `PRAGMA rekey`. sqflite's default
+  `singleInstance: true` made that call return the exact same handle
+  `TrailDatabase.shared()` was already serving to the UI isolate's
+  Riverpod providers. Rekey's `finally { db.close() }` then tore down
+  the handle those providers still held direct references to — the
+  home screen's next query surfaced as a generic database exception
+  right after the setup dialog closed.
+
+  Fix: `invalidateShared()` is now async, awaits the close of the
+  cached shared handle, and is invoked BEFORE `rekey()` so the
+  `openDatabase` inside rekey produces a fresh handle it fully owns.
+  After rekey + key persist, the pings providers are invalidated so
+  they re-fetch with the new shared handle (freshly opened against the
+  newly-persisted derived key).
+
 ## [0.1.7+8] — 2026-04-19
 
 ### Added

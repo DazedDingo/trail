@@ -86,12 +86,29 @@ class TrailDatabase {
   /// and route the user to `/unlock`.
   static Future<Database> shared() => _shared ??= open();
 
-  /// Call after the user has unlocked the DB with their passphrase. The
-  /// freshly-validated key has already been persisted via
-  /// [KeystoreKey.persist]; this just drops the memoised handle so the
-  /// next [shared] call re-opens with the now-present key.
-  static void invalidateShared() {
+  /// Call after the user has unlocked the DB with their passphrase, or
+  /// after a rekey. Closes the current shared handle (if any) and drops
+  /// the memoised reference so the next [shared] call re-opens with
+  /// whatever key is now in secure storage.
+  ///
+  /// Closing the handle matters for rekey in particular: sqflite's
+  /// `singleInstance: true` (default) makes `openDatabase` return the
+  /// already-open shared Database, which means the rekey's
+  /// `finally { db.close() }` would otherwise tear down the handle
+  /// every UI provider is still holding a Dart reference to — next query
+  /// from the home screen hits "database_closed".
+  static Future<void> invalidateShared() async {
+    final s = _shared;
     _shared = null;
+    if (s == null) return;
+    try {
+      final db = await s;
+      await db.close();
+    } catch (_) {
+      // Handle may already be closed, or its open Future may have failed
+      // with PassphraseNeededException — either way there's nothing to
+      // close and swallowing is safe.
+    }
   }
 
   /// Re-encrypts the DB in-place with a new passphrase. Used by the
