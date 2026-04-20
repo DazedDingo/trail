@@ -4,6 +4,36 @@ All notable changes to **Trail** (gps-pinger) are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.7.0+23] — 2026-04-20
+
+### Added
+
+- **User-configurable ping cadence (Settings → Scheduling → Cadence).**
+  The 4h interval between scheduled pings is now a picker with
+  `30 min / 1 h / 2 h / 4 h` options (default still 4h, preserving
+  pre-0.7 behaviour). Each step below 4h roughly doubles the per-day
+  GPS-fix count and battery cost; the subtitle on the tile calls
+  that out explicitly so the user doesn't pick 30 min expecting free
+  precision. 15 min was considered and dropped — Doze + OEM throttling
+  routinely stretches short WorkManager cadences on restrictive
+  devices, so the "precision" benefit only lands in exact-alarm mode
+  and isn't worth the floor-case battery drain. Implementation spans
+  a new `PingCadence` enum in `scheduler_policy.dart`, a `CadenceStore`
+  backed by `SharedPreferences` (cross-isolate-safe so the background
+  worker reads the same value the UI writes), an `AsyncNotifier`
+  provider, and native plumbing through `SchedulerPrefs` /
+  `SchedulerMethodChannel` / `ExactAlarmScheduler` so exact-alarm
+  mode respects the user's cadence even after reboot before the
+  Flutter UI has run. Changing the cadence kicks the active driver
+  immediately (re-enqueues the WorkManager periodic task, or cancels
+  and re-arms the pending exact alarm) so the new value lands without
+  waiting for the current window to expire. Battery-saver logic is
+  preserved: `SchedulerPolicy.nextCadence` now takes an optional
+  `base:` parameter so `<20%` battery still doubles whatever cadence
+  the user picked (e.g. 30 min → 1 h, 2 h → 4 h), and `<5%` still
+  skips entirely. Test suite grew a `PingCadence enum` group plus
+  low-battery invariants that loop every cadence value.
+
 ## [0.6.7+22] — 2026-04-20
 
 ### Changed

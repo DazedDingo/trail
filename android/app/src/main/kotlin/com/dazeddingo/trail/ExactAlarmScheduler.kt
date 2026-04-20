@@ -22,9 +22,11 @@ import android.os.SystemClock
  * one after each fire. The initial schedule is fired from the MethodChannel
  * when the user enables exact-alarm mode or toggles the periodic cadence.
  *
- * **Cadence:** fixed 4 hours in exact-alarm mode. The battery-aware
- * low-battery cadence bump (8h below 20%, skip below 5%) only applies to
- * WorkManager mode — exact alarms stay on a precise schedule by design.
+ * **Cadence:** user-configurable via [SchedulerPrefs.getCadenceMinutes]
+ * (default 4 hours; picker ships 30min / 1h / 2h / 4h). The battery-
+ * aware low-battery cadence bump (double below 20%, skip below 5%)
+ * only applies to WorkManager mode — exact alarms hold the user's
+ * chosen cadence regardless of battery level by design.
  *
  * **Permission model:** [SCHEDULE_EXACT_ALARM] is a special permission on
  * API 31+. `canScheduleExactAlarms()` returns false until the user grants
@@ -36,8 +38,15 @@ import android.os.SystemClock
 object ExactAlarmScheduler {
     const val ACTION_SCHEDULED_PING = "com.dazeddingo.trail.EXACT_SCHEDULED_PING"
     const val REQUEST_CODE = 42_100
-    // PLAN.md "Core cadence": 4h between scheduled fixes.
-    const val CADENCE_MS = 4L * 60L * 60L * 1000L
+
+    /**
+     * Resolves the current cadence from [SchedulerPrefs] to milliseconds.
+     * Separate helper so callers (receiver, boot, tests) don't each
+     * repeat the `minutes → ms` arithmetic.
+     */
+    fun currentCadenceMs(context: Context): Long {
+        return SchedulerPrefs.getCadenceMinutes(context).toLong() * 60L * 1000L
+    }
 
     fun canScheduleExactAlarms(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
@@ -46,14 +55,15 @@ object ExactAlarmScheduler {
     }
 
     /**
-     * Schedules the next exact alarm. If [delayMs] is null, uses the
-     * default [CADENCE_MS]. Silently skips (and records a denied event)
-     * when [SCHEDULE_EXACT_ALARM] hasn't been granted — we don't want
-     * to throw from the receiver, which is called from a background
-     * broadcast and would kill the whole dispatch.
+     * Schedules the next exact alarm. If [delayMs] is null, reads the
+     * user's chosen cadence from [SchedulerPrefs]. Silently skips (and
+     * records a denied event) when [SCHEDULE_EXACT_ALARM] hasn't been
+     * granted — we don't want to throw from the receiver, which is
+     * called from a background broadcast and would kill the whole
+     * dispatch.
      */
     fun scheduleNext(context: Context, delayMs: Long? = null): Boolean {
-        val effective = delayMs ?: CADENCE_MS
+        val effective = delayMs ?: currentCadenceMs(context)
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
 
         if (!canScheduleExactAlarms(context)) {

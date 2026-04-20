@@ -25,6 +25,10 @@ import io.flutter.plugin.common.MethodChannel
  *   - `recordModeChanged({mode: String})` → null — UI records when
  *     the user flips between WorkManager / exact-alarm so the events
  *     timeline stays coherent.
+ *   - `recordCadenceChanged({minutes: Int})` → null — mirrors the
+ *     user's chosen base cadence so [ExactAlarmScheduler] reads the
+ *     same value from native prefs after reboot or upgrade, before
+ *     the Flutter UI has run.
  */
 object SchedulerMethodChannel {
     private const val CHANNEL = "com.dazeddingo.trail/scheduler"
@@ -73,6 +77,17 @@ object SchedulerMethodChannel {
                         context,
                         SchedulerEventsLog.EventKind.MODE_CHANGED,
                         note = mode,
+                    )
+                    result.success(null)
+                }
+                "recordCadenceChanged" -> {
+                    val minutes = call.argument<Int>("minutes")
+                        ?: SchedulerPrefs.DEFAULT_CADENCE_MIN
+                    SchedulerPrefs.setCadenceMinutes(context, minutes)
+                    SchedulerEventsLog.record(
+                        context,
+                        SchedulerEventsLog.EventKind.MODE_CHANGED,
+                        note = "cadence=${minutes}min",
                     )
                     result.success(null)
                 }

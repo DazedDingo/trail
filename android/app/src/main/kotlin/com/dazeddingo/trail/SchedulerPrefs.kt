@@ -17,8 +17,16 @@ import android.content.Context
 object SchedulerPrefs {
     private const val FILE = "trail_scheduler_prefs"
     private const val KEY_MODE = "mode"
+    private const val KEY_CADENCE_MIN = "cadence_min"
     const val MODE_WORKMANAGER = "workmanager"
     const val MODE_EXACT = "exact"
+
+    // Default matches [PingCadence.hour4] on the Dart side — the
+    // original PLAN.md spec. Keep this in sync with
+    // SchedulerPolicy.defaultCadence; the ExactAlarmScheduler falls
+    // back to this only when the Flutter UI has never mirrored a
+    // cadence yet (fresh install, pre-upgrade).
+    const val DEFAULT_CADENCE_MIN = 240
 
     fun setMode(context: Context, mode: String) {
         val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -31,4 +39,14 @@ object SchedulerPrefs {
     }
 
     fun isExactMode(context: Context): Boolean = getMode(context) == MODE_EXACT
+
+    fun setCadenceMinutes(context: Context, minutes: Int) {
+        val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+        prefs.edit().putInt(KEY_CADENCE_MIN, minutes).apply()
+    }
+
+    fun getCadenceMinutes(context: Context): Int {
+        val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+        return prefs.getInt(KEY_CADENCE_MIN, DEFAULT_CADENCE_MIN)
+    }
 }

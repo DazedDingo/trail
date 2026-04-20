@@ -45,7 +45,7 @@ void main() {
     });
   });
 
-  group('SchedulerPolicy.nextCadence', () {
+  group('SchedulerPolicy.nextCadence — default base (4h)', () {
     test('returns 8h when battery is strictly under 20%', () {
       expect(SchedulerPolicy.nextCadence(5), const Duration(hours: 8));
       expect(SchedulerPolicy.nextCadence(19), const Duration(hours: 8));
@@ -74,6 +74,67 @@ void main() {
       // bypassed that check and asked for a cadence, we still want 8h —
       // never 4h.
       expect(SchedulerPolicy.nextCadence(3), const Duration(hours: 8));
+    });
+  });
+
+  group('SchedulerPolicy.nextCadence — custom base (user cadence)', () {
+    test('30min base stays at 30min on healthy battery', () {
+      expect(
+        SchedulerPolicy.nextCadence(60, base: PingCadence.min30.value),
+        const Duration(minutes: 30),
+      );
+    });
+
+    test('30min base doubles to 1h below 20% battery', () {
+      expect(
+        SchedulerPolicy.nextCadence(10, base: PingCadence.min30.value),
+        const Duration(hours: 1),
+      );
+    });
+
+    test('1h base doubles to 2h below 20% battery', () {
+      expect(
+        SchedulerPolicy.nextCadence(15, base: PingCadence.hour1.value),
+        const Duration(hours: 2),
+      );
+    });
+
+    test('null battery returns the base unchanged — no silent slowdown', () {
+      expect(
+        SchedulerPolicy.nextCadence(null, base: PingCadence.min30.value),
+        const Duration(minutes: 30),
+      );
+    });
+  });
+
+  group('PingCadence enum', () {
+    test('hour4 is the default (matches SchedulerPolicy.defaultCadence)', () {
+      expect(PingCadence.hour4.value, SchedulerPolicy.defaultCadence);
+    });
+
+    test('fromWire falls back to hour4 on unknown / null input', () {
+      expect(PingCadence.fromWire(null), PingCadence.hour4);
+      expect(PingCadence.fromWire('garbage'), PingCadence.hour4);
+    });
+
+    test('fromWire round-trips every canonical wire form', () {
+      for (final c in PingCadence.values) {
+        expect(PingCadence.fromWire(c.wire), c);
+      }
+    });
+
+    test('minutes getter matches the Duration', () {
+      expect(PingCadence.min30.minutes, 30);
+      expect(PingCadence.hour1.minutes, 60);
+      expect(PingCadence.hour2.minutes, 120);
+      expect(PingCadence.hour4.minutes, 240);
+    });
+
+    test('all cadences are ≥ 15 min (WorkManager periodic minimum)', () {
+      for (final c in PingCadence.values) {
+        expect(c.value >= const Duration(minutes: 15), isTrue,
+            reason: '${c.label} would be rejected by WorkManager');
+      }
     });
   });
 
@@ -119,9 +180,15 @@ void main() {
           lessThan(SchedulerPolicy.lowBatteryThreshold));
     });
 
-    test('low-battery cadence is strictly longer than default', () {
-      expect(SchedulerPolicy.lowBatteryCadence,
-          greaterThan(SchedulerPolicy.defaultCadence));
+    test('nextCadence always stretches the base under low battery', () {
+      // The invariant this replaces ("lowBatteryCadence > defaultCadence")
+      // is now expressed as: for every supported base, low-battery
+      // returns a strictly longer duration than the base itself.
+      for (final c in PingCadence.values) {
+        final stretched = SchedulerPolicy.nextCadence(10, base: c.value);
+        expect(stretched, greaterThan(c.value),
+            reason: 'low-battery must never shorten cadence for ${c.label}');
+      }
     });
 
     test('skipNote is a stable string — export + shouldRetry both depend '

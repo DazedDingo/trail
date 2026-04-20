@@ -3,18 +3,20 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'scheduler_policy.dart';
 import 'workmanager_scheduler.dart';
 
-/// How the 4h cadence is driven.
+/// How the user's chosen cadence is driven.
 ///
 /// - [workmanager]: periodic WorkManager job (default). Battery-aware:
-///   drops to 8h below 20%, skips entirely below 5%. System-batched
-///   with other wakeups so battery cost is minimal; punctuality is
-///   "within a window" (Doze can stretch 4h to 6–8h on idle devices).
+///   doubles the interval below 20%, skips entirely below 5%. System-
+///   batched with other wakeups so battery cost is minimal; punctuality
+///   is "within a window" (Doze can stretch long cadences further on
+///   idle devices).
 /// - [exact]: `AlarmManager.setExactAndAllowWhileIdle` per ping.
 ///   Fires at the scheduled time ± a small window even under Doze, at
 ///   the cost of more frequent standalone wakeups. Not battery-aware —
-///   the cadence is fixed 4h.
+///   holds the user's chosen cadence regardless of battery level.
 enum SchedulerMode {
   workmanager('workmanager'),
   exact('exact');
@@ -111,6 +113,15 @@ class ExactAlarmBridge {
       'mode': mode.wire,
     });
   }
+
+  /// Mirrors the user's chosen cadence into native SharedPreferences so
+  /// [ExactAlarmScheduler] (re-armed by [BootReceiver] without the UI
+  /// ever running) uses the same cadence the Settings screen shows.
+  static Future<void> recordCadenceChanged(PingCadence cadence) async {
+    await _channel.invokeMethod<void>('recordCadenceChanged', {
+      'minutes': cadence.minutes,
+    });
+  }
 }
 
 /// Persists the user's scheduling-mode choice in [SharedPreferences] on
@@ -129,6 +140,27 @@ class SchedulerModeStore {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_key, mode.wire);
     await ExactAlarmBridge.recordModeChanged(mode);
+  }
+}
+
+/// Persists the user's chosen ping cadence (default 4h; pickable
+/// 30min/1h/2h/4h via Settings → Scheduling → Cadence). Same
+/// SharedPreferences file as everything else — the background
+/// WorkManager isolate reads from this same key on every fire
+/// (SharedPreferences is cross-isolate-safe, see CLAUDE.md gotcha #11).
+/// Native mirror goes via [ExactAlarmBridge.recordCadenceChanged].
+class CadenceStore {
+  static const _key = 'trail_scheduler_cadence_v1';
+
+  static Future<PingCadence> get() async {
+    final prefs = await SharedPreferences.getInstance();
+    return PingCadence.fromWire(prefs.getString(_key));
+  }
+
+  static Future<void> set(PingCadence cadence) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_key, cadence.wire);
+    await ExactAlarmBridge.recordCadenceChanged(cadence);
   }
 }
 

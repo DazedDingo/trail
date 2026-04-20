@@ -9,14 +9,17 @@ import '../../models/ping.dart';
 import '../location_service.dart';
 import '../notification_service.dart';
 import '../panic/panic_service.dart';
+import 'scheduler_mode.dart';
 import 'scheduler_policy.dart';
 import 'worker_run_log.dart';
 
-/// WorkManager scheduler for the 4h scheduled-ping cadence.
+/// WorkManager scheduler for the user-configured scheduled-ping cadence
+/// (default 4h; see [PingCadence]).
 ///
 /// Key invariants (from PLAN.md "Hard rules"):
 /// - No persistent foreground service for scheduled pings.
-/// - Low-battery policy: <20% drop to 8h cadence, <5% skip entirely.
+/// - Low-battery policy: <20% doubles the user's cadence, <5% skips
+///   entirely.
 /// - On no-fix, re-enqueue a one-shot 5-minute retry.
 /// - Always write a row per attempt — no silent gaps.
 ///
@@ -35,7 +38,6 @@ class WorkmanagerScheduler {
   // Cadence/retry thresholds live in SchedulerPolicy so they can be unit-
   // tested without workmanager. Aliased here for public call-sites.
   static const defaultCadence = SchedulerPolicy.defaultCadence;
-  static const lowBatteryCadence = SchedulerPolicy.lowBatteryCadence;
   static const retryDelay = SchedulerPolicy.retryDelay;
 
   /// Registers the top-level [_callbackDispatcher] with the native plugin.
@@ -44,14 +46,19 @@ class WorkmanagerScheduler {
     await Workmanager().initialize(_callbackDispatcher);
   }
 
-  /// Enqueue / replace the baseline 4h periodic worker.
+  /// Enqueue / replace the baseline periodic worker at the given
+  /// [frequency]. When `null` the user's chosen cadence (default 4h)
+  /// is read from [CadenceStore]; callers that already know the
+  /// cadence (e.g. the battery-aware branch in [_handleScheduled])
+  /// pass it explicitly.
   static Future<void> enqueuePeriodic({
-    Duration frequency = defaultCadence,
+    Duration? frequency,
   }) async {
+    final effective = frequency ?? (await CadenceStore.get()).value;
     await Workmanager().registerPeriodicTask(
       periodicTaskName,
       periodicTaskName,
-      frequency: frequency,
+      frequency: effective,
       existingWorkPolicy: ExistingPeriodicWorkPolicy.update,
       constraints: Constraints(
         // Policy invariants live in SchedulerPolicy so they are test-
@@ -198,8 +205,12 @@ Future<bool> _handleScheduled() async {
     }
     await dao.insert(snapshot);
 
+    final userCadence = await CadenceStore.get();
     await WorkmanagerScheduler.enqueuePeriodic(
-      frequency: SchedulerPolicy.nextCadence(snapshot.batteryPct),
+      frequency: SchedulerPolicy.nextCadence(
+        snapshot.batteryPct,
+        base: userCadence.value,
+      ),
     );
 
     if (SchedulerPolicy.shouldRetry(snapshot)) {

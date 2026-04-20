@@ -18,6 +18,7 @@ import '../services/panic/panic_service.dart';
 import '../services/passphrase_service.dart';
 import '../services/permissions_service.dart';
 import '../services/scheduler/scheduler_mode.dart';
+import '../services/scheduler/scheduler_policy.dart';
 import '../services/scheduler/workmanager_scheduler.dart';
 
 /// Diagnostics + permissions console.
@@ -144,7 +145,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           ),
           ListTile(
             leading: const Icon(Icons.schedule),
-            title: const Text('Re-enqueue 4h periodic worker'),
+            title: const Text('Re-enqueue periodic worker'),
             subtitle: const Text(
               'Useful after force-stop or uninstall/reinstall.',
             ),
@@ -168,6 +169,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           const Divider(),
           const _SectionHeader('Scheduling'),
           const _SchedulerModeTile(),
+          const _CadenceTile(),
           const _SchedulerEventsTile(),
           const Divider(),
           const _SectionHeader('Permissions'),
@@ -417,10 +419,73 @@ class _SchedulerModeTile extends ConsumerWidget {
   }
 }
 
+/// User-selectable base cadence (30min / 1h / 2h / 4h). Default is 4h
+/// — the original PLAN.md spec. Each step below 4h roughly doubles
+/// per-day GPS-fix count and battery cost; the subtitle calls that
+/// out so the user doesn't pick 30min expecting free precision.
+///
+/// On change we rewrite the persisted cadence via [pingCadenceProvider],
+/// then kick the appropriate active driver so the new cadence takes
+/// effect immediately instead of waiting for the current window to
+/// expire:
+///   - WorkManager mode: re-enqueue the periodic task (reads the fresh
+///     cadence from [CadenceStore]).
+///   - Exact mode: cancel the pending alarm and schedule a fresh one
+///     at the new cadence — otherwise the currently-armed alarm fires
+///     at the old interval once before self-rescheduling at the new.
+class _CadenceTile extends ConsumerWidget {
+  const _CadenceTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final cadence = ref.watch(pingCadenceProvider);
+    final mode = ref.watch(schedulerModeProvider).asData?.value;
+    return ListTile(
+      leading: const Icon(Icons.av_timer_outlined),
+      title: const Text('Cadence'),
+      subtitle: Text(
+        'How often the app tries to log a GPS fix. Current: '
+        '${cadence.asData?.value.label ?? "…"}. Shorter cadences use '
+        'more battery.',
+      ),
+      trailing: DropdownButton<PingCadence>(
+        value: cadence.asData?.value,
+        onChanged: cadence.isLoading
+            ? null
+            : (v) async {
+                if (v == null) return;
+                final previous = cadence.asData?.value;
+                if (previous == v) return;
+                await ref.read(pingCadenceProvider.notifier).set(v);
+                // Kick the active driver so the change lands before the
+                // next natural fire.
+                if (mode == SchedulerMode.exact) {
+                  await ExactAlarmBridge.disableExactAlarms();
+                  await ExactAlarmBridge.enableExactAlarms();
+                } else {
+                  await WorkmanagerScheduler.enqueuePeriodic();
+                }
+                ref.invalidate(schedulerEventsProvider);
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('Cadence set to ${v.label}.'),
+                  ),
+                );
+              },
+        items: [
+          for (final c in PingCadence.values)
+            DropdownMenuItem(value: c, child: Text(c.label)),
+        ],
+      ),
+    );
+  }
+}
+
 /// Expandable "last 20 scheduler events" panel — the observability
-/// surface for "did my 4h alarm actually fire?". Native code logs
-/// events on every schedule/fire/cancel (see
-/// `SchedulerEventsLog.kt`); we render them newest-first.
+/// surface for "did my alarm actually fire?". Native code logs events
+/// on every schedule/fire/cancel (see `SchedulerEventsLog.kt`); we
+/// render them newest-first.
 class _SchedulerEventsTile extends ConsumerWidget {
   const _SchedulerEventsTile();
 
