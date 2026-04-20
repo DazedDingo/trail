@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_map_mbtiles/flutter_map_mbtiles.dart';
@@ -18,9 +20,12 @@ import '../services/mbtiles_service.dart';
 ///   2. OpenStreetMap online tiles — fallback when nothing is installed.
 ///
 /// The time slider filters pings down to those logged at-or-before the
-/// slider's timestamp; dragging it back in time rewinds the trail. This
-/// is the cheapest way to give the user a feel for movement across a
-/// day / week without shipping a full playback animation.
+/// slider's timestamp; dragging it back in time rewinds the trail.
+/// Playback controls (0.7.1+24) auto-advance the slider one fix at a
+/// time — play/pause, step prev/next, jump-to-start, and a 1×/2×/4×/
+/// 8×/16× speed cycle. The discrete per-ping step keeps each fix
+/// visible for the same fraction of the animation, regardless of gaps
+/// between pings.
 class MapScreen extends ConsumerStatefulWidget {
   const MapScreen({super.key});
 
@@ -35,8 +40,20 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   DateTime? _sliderMax;
   bool _initialFitDone = false;
 
+  /// Playback: advances `_sliderMax` one ping at a time until it reaches
+  /// the last fix, then auto-pauses. Step interval = `_basePlaybackStep /
+  /// _playbackSpeed`, so 1× shows each ping for ~350ms, 4× for ~90ms, 16×
+  /// for ~22ms. Tuned so a week of 4h pings (42 fixes) plays in ~15s at 1×
+  /// and ~1s at 16× — long enough to track movement, short enough not to
+  /// feel like a stall.
+  bool _playing = false;
+  double _playbackSpeed = 1.0;
+  Timer? _playbackTimer;
+  static const _basePlaybackStep = Duration(milliseconds: 350);
+
   @override
   void dispose() {
+    _playbackTimer?.cancel();
     _controller.dispose();
     super.dispose();
   }
@@ -222,11 +239,114 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           current: sliderMax,
           visibleCount: visible.length,
           totalCount: chrono.length,
-          onChanged: (v) => setState(() => _sliderMax = v),
-          onReset: () => setState(() => _sliderMax = null),
+          playing: _playing,
+          playbackSpeed: _playbackSpeed,
+          onChanged: (v) {
+            _pausePlayback();
+            setState(() => _sliderMax = v);
+          },
+          onReset: () {
+            _pausePlayback();
+            setState(() => _sliderMax = null);
+          },
+          onJumpToStart: () {
+            _pausePlayback();
+            setState(() => _sliderMax = chrono.first.timestampUtc);
+          },
+          onStepPrev: () {
+            _pausePlayback();
+            setState(() => _sliderMax = _stepTo(chrono, sliderMax, -1));
+          },
+          onStepNext: () {
+            _pausePlayback();
+            setState(() => _sliderMax = _stepTo(chrono, sliderMax, 1));
+          },
+          onTogglePlay: () => _togglePlayback(chrono),
+          onCycleSpeed: _cycleSpeed,
         ),
       ],
     );
+  }
+
+  /// Move the slider one ping forward / backward along `chrono`.
+  /// Keeping this as discrete-per-ping (not per-millisecond) means step
+  /// buttons always advance the *visible trail* by exactly one marker,
+  /// even when gaps between pings are irregular.
+  DateTime _stepTo(List<Ping> chrono, DateTime current, int delta) {
+    final idx = chrono.indexWhere((p) => !p.timestampUtc.isBefore(current));
+    // indexWhere returns -1 if `current` is after every ping (shouldn't
+    // happen given _sliderMax is clamped, but treat as "at end").
+    final effective = idx < 0 ? chrono.length - 1 : idx;
+    final target = (effective + delta).clamp(0, chrono.length - 1);
+    return chrono[target].timestampUtc;
+  }
+
+  void _togglePlayback(List<Ping> chrono) {
+    if (_playing) {
+      _pausePlayback();
+      return;
+    }
+    if (chrono.length < 2) return;
+    // If we're already at the end, restart from the beginning — otherwise
+    // tapping play when the slider is pinned to the last ping is a no-op.
+    if (_sliderMax != null &&
+        !_sliderMax!.isBefore(chrono.last.timestampUtc)) {
+      setState(() => _sliderMax = chrono.first.timestampUtc);
+    }
+    _startPlaybackTimer(chrono);
+    setState(() => _playing = true);
+  }
+
+  void _startPlaybackTimer(List<Ping> chrono) {
+    _playbackTimer?.cancel();
+    final interval = Duration(
+      milliseconds:
+          (_basePlaybackStep.inMilliseconds / _playbackSpeed).round().clamp(16, 2000),
+    );
+    _playbackTimer = Timer.periodic(interval, (_) {
+      if (!mounted) return;
+      final current = _sliderMax ?? chrono.last.timestampUtc;
+      final next = _stepTo(chrono, current, 1);
+      if (!next.isAfter(current)) {
+        // Reached the end — stop.
+        _pausePlayback();
+        return;
+      }
+      setState(() => _sliderMax = next);
+    });
+  }
+
+  void _pausePlayback() {
+    if (_playbackTimer == null && !_playing) return;
+    _playbackTimer?.cancel();
+    _playbackTimer = null;
+    if (_playing) setState(() => _playing = false);
+  }
+
+  /// Cycle through 1× → 2× → 4× → 8× → 16× → 1×. Restarts the active
+  /// timer at the new cadence so speed changes are felt immediately
+  /// rather than taking effect on the next cycle.
+  void _cycleSpeed() {
+    final next = switch (_playbackSpeed) {
+      1.0 => 2.0,
+      2.0 => 4.0,
+      4.0 => 8.0,
+      8.0 => 16.0,
+      _ => 1.0,
+    };
+    setState(() => _playbackSpeed = next);
+    if (_playing) {
+      // Re-arm the timer at the new interval. Need the full `chrono` list
+      // again — pull it from the provider's current value rather than
+      // plumbing it through, since playback is only live when pings exist.
+      final pings = ref.read(allPingsProvider).valueOrNull;
+      if (pings != null) {
+        final fixes = pings
+            .where((p) => p.lat != null && p.lon != null)
+            .toList(growable: false);
+        _startPlaybackTimer(fixes);
+      }
+    }
   }
 
   Widget _tileLayer(MBTilesRegion? region) {
@@ -337,8 +457,15 @@ class _TimeSlider extends StatelessWidget {
   final DateTime current;
   final int visibleCount;
   final int totalCount;
+  final bool playing;
+  final double playbackSpeed;
   final ValueChanged<DateTime> onChanged;
   final VoidCallback onReset;
+  final VoidCallback onJumpToStart;
+  final VoidCallback onStepPrev;
+  final VoidCallback onStepNext;
+  final VoidCallback onTogglePlay;
+  final VoidCallback onCycleSpeed;
 
   const _TimeSlider({
     required this.first,
@@ -346,8 +473,15 @@ class _TimeSlider extends StatelessWidget {
     required this.current,
     required this.visibleCount,
     required this.totalCount,
+    required this.playing,
+    required this.playbackSpeed,
     required this.onChanged,
     required this.onReset,
+    required this.onJumpToStart,
+    required this.onStepPrev,
+    required this.onStepNext,
+    required this.onTogglePlay,
+    required this.onCycleSpeed,
   });
 
   @override
@@ -359,8 +493,11 @@ class _TimeSlider extends StatelessWidget {
     final disabled = totalMs <= 0;
     final scheme = Theme.of(context).colorScheme;
     final fmt = DateFormat('MMM d, HH:mm');
+    final speedLabel = playbackSpeed == playbackSpeed.roundToDouble()
+        ? '${playbackSpeed.toStringAsFixed(0)}×'
+        : '${playbackSpeed.toStringAsFixed(1)}×';
     return Container(
-      padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
       color: scheme.surfaceContainerHighest.withValues(alpha: 0.4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -393,6 +530,43 @@ class _TimeSlider extends StatelessWidget {
                         first.add(Duration(milliseconds: v.toInt())),
                       ),
             ),
+          ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              IconButton(
+                tooltip: 'Jump to first fix',
+                visualDensity: VisualDensity.compact,
+                onPressed: disabled ? null : onJumpToStart,
+                icon: const Icon(Icons.skip_previous),
+              ),
+              IconButton(
+                tooltip: 'Previous fix',
+                visualDensity: VisualDensity.compact,
+                onPressed: disabled ? null : onStepPrev,
+                icon: const Icon(Icons.chevron_left),
+              ),
+              IconButton.filledTonal(
+                tooltip: playing ? 'Pause playback' : 'Play through pings',
+                onPressed: disabled ? null : onTogglePlay,
+                icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+              ),
+              IconButton(
+                tooltip: 'Next fix',
+                visualDensity: VisualDensity.compact,
+                onPressed: disabled ? null : onStepNext,
+                icon: const Icon(Icons.chevron_right),
+              ),
+              const SizedBox(width: 4),
+              TextButton(
+                onPressed: disabled ? null : onCycleSpeed,
+                style: TextButton.styleFrom(
+                  minimumSize: const Size(48, 32),
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                ),
+                child: Text(speedLabel),
+              ),
+            ],
           ),
         ],
       ),

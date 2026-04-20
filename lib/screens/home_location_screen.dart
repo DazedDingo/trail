@@ -2,9 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../db/database.dart';
-import '../db/ping_dao.dart';
 import '../providers/home_location_provider.dart';
+import '../providers/pings_provider.dart';
 import '../services/home_location_service.dart';
 
 /// Home-location picker.
@@ -49,8 +48,13 @@ class _HomeLocationScreenState extends ConsumerState<HomeLocationScreen> {
       _error = null;
     });
     try {
-      final db = await TrailDatabase.shared();
-      final last = await PingDao(db).latestSuccessful();
+      // Read through the shared provider rather than opening our own DB
+      // handle — opening a second SQLCipher connection on the same file
+      // races the UI isolate's key derivation and surfaces as a generic
+      // "database exception" on fresh / rekeyed installs (see 0.1.3 bug
+      // note in CLAUDE.md). The provider is already memoised against
+      // `TrailDatabase.shared()`.
+      final last = await ref.read(lastSuccessfulPingProvider.future);
       if (last == null) {
         setState(() {
           _saving = false;

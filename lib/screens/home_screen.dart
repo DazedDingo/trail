@@ -19,13 +19,20 @@ import 'export_dialog.dart';
 
 /// The app's primary screen.
 ///
-/// Layout (top → bottom):
-/// 1. "Last successful ping" card — timestamp + coords, red stripe if > 5h.
-/// 2. Heartbeat / total pings summary.
-/// 3. Export actions (GPX + CSV) feeding into share_plus.
-/// 4. History list (recent 200 — longer history lives on /history).
+/// Layout: the top block (last-ping card, panic button, summary, export,
+/// map preview) is pinned. The "Recent pings" list is the only scrollable
+/// section — that's the part that grows unboundedly as pings accumulate,
+/// and keeping the heartbeat + panic button always visible matters more
+/// than letting the map scroll off the top of the viewport.
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
+
+  void _refreshAll(WidgetRef ref) {
+    ref.invalidate(lastSuccessfulPingProvider);
+    ref.invalidate(heartbeatHealthyProvider);
+    ref.invalidate(pingCountProvider);
+    ref.invalidate(recentPingsProvider);
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -41,12 +48,7 @@ class HomeScreen extends ConsumerWidget {
         actions: [
           IconButton(
             tooltip: 'Refresh',
-            onPressed: () {
-              ref.invalidate(lastSuccessfulPingProvider);
-              ref.invalidate(heartbeatHealthyProvider);
-              ref.invalidate(pingCountProvider);
-              ref.invalidate(recentPingsProvider);
-            },
+            onPressed: () => _refreshAll(ref),
             icon: const Icon(Icons.refresh),
           ),
           IconButton(
@@ -56,15 +58,10 @@ class HomeScreen extends ConsumerWidget {
           ),
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: () async {
-          ref.invalidate(lastSuccessfulPingProvider);
-          ref.invalidate(heartbeatHealthyProvider);
-          ref.invalidate(pingCountProvider);
-          ref.invalidate(recentPingsProvider);
-        },
-        child: ListView(
-          padding: const EdgeInsets.all(16),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _LastPingCard(last: last, healthy: healthy),
             const SizedBox(height: 12),
@@ -93,6 +90,7 @@ class HomeScreen extends ConsumerWidget {
               data: (pings) => TrailMap(
                 pings: pings,
                 activeRegion: activeRegion.valueOrNull,
+                height: 180,
               ),
               loading: () => const SizedBox(
                 height: 180,
@@ -115,12 +113,42 @@ class HomeScreen extends ConsumerWidget {
               ],
             ),
             const SizedBox(height: 8),
-            recent.when(
-              data: (pings) => Column(
-                children: pings.take(20).map((p) => _PingTile(ping: p)).toList(),
+            Expanded(
+              child: RefreshIndicator(
+                onRefresh: () async => _refreshAll(ref),
+                child: recent.when(
+                  data: (pings) {
+                    if (pings.isEmpty) {
+                      return ListView(
+                        // Need AlwaysScrollable so RefreshIndicator still
+                        // works when the list is empty — otherwise the
+                        // user has no way to retry from this state.
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        children: const [
+                          Padding(
+                            padding: EdgeInsets.all(24),
+                            child: Center(
+                              child: Text('No pings yet.'),
+                            ),
+                          ),
+                        ],
+                      );
+                    }
+                    final visible = pings.take(20).toList(growable: false);
+                    return ListView.builder(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      itemCount: visible.length,
+                      itemBuilder: (_, i) => _PingTile(ping: visible[i]),
+                    );
+                  },
+                  loading: () => const Center(
+                      child: CircularProgressIndicator()),
+                  error: (e, st) => ListView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    children: [_DbErrorCard(error: e, stack: st)],
+                  ),
+                ),
               ),
-              loading: () => const Center(child: CircularProgressIndicator()),
-              error: (e, st) => _DbErrorCard(error: e, stack: st),
             ),
           ],
         ),
@@ -679,13 +707,21 @@ class _DbErrorCard extends StatelessWidget {
   }
 }
 
-class _PingTile extends StatelessWidget {
+class _PingTile extends ConsumerWidget {
   final Ping ping;
   const _PingTile({required this.ping});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final isNoFix = ping.source == PingSource.noFix;
+    final hasFix = ping.lat != null && ping.lon != null;
+    final approx = hasFix
+        ? ref
+            .watch(approxLocationProvider((lat: ping.lat!, lon: ping.lon!)))
+            .asData
+            ?.value
+        : null;
+    final ts = DateFormat.MMMd().add_Hms().format(ping.timestampUtc.toLocal());
     return ListTile(
       dense: true,
       leading: Icon(
@@ -693,12 +729,37 @@ class _PingTile extends StatelessWidget {
         color: isNoFix ? Theme.of(context).colorScheme.error : null,
       ),
       title: Text(
-        ping.lat != null && ping.lon != null
+        hasFix
             ? '${ping.lat!.toStringAsFixed(4)}, ${ping.lon!.toStringAsFixed(4)}'
             : (ping.note ?? ping.source.dbValue),
       ),
-      subtitle: Text(
-        DateFormat.MMMd().add_Hms().format(ping.timestampUtc.toLocal()),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (approx != null && approx.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 2, bottom: 2),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.place_outlined,
+                    size: 12,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                  const SizedBox(width: 4),
+                  Flexible(
+                    child: Text(
+                      approx,
+                      style: Theme.of(context).textTheme.bodySmall,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          Text(ts),
+        ],
       ),
       trailing: Text(ping.source.dbValue),
     );

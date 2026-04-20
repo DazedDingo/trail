@@ -4,6 +4,60 @@ All notable changes to **Trail** (gps-pinger) are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.7.1+24] — 2026-04-20
+
+### Fixed
+
+- **"Use last successful fix" on the home-location screen no longer
+  throws a DB error.** The handler opened a second SQLCipher connection
+  via `TrailDatabase.shared()` + `PingDao(db).latestSuccessful()` on
+  tap, which — on fresh installs where the home-location screen is one
+  of the first places a user navigates after onboarding — raced the UI
+  isolate's Keystore key derivation and surfaced as a generic "database
+  exception." This is the same 0.1.3 race pattern the home-screen
+  providers already dodge; the fix routes through
+  `ref.read(lastSuccessfulPingProvider.future)` so the shared,
+  memoised handle is the only one in play.
+
+### Changed
+
+- **Home screen layout: only the "Recent pings" list scrolls.** Before
+  0.7.1+24 the whole home screen was one `ListView`, so the last-ping
+  card + panic button + summary + map preview would all slide off the
+  top as the user scrolled through history. The top block is now
+  pinned in a `Column`, and the recent-pings list lives in an
+  `Expanded(ListView.builder)` — the heartbeat + hold-to-panic button
+  are always visible while the user scrolls. The map preview was
+  reduced from 260 → 180 px to fit the new pinned layout without
+  pushing recent pings off-screen on small devices. Empty-state and
+  error-state branches use `AlwaysScrollableScrollPhysics` so
+  pull-to-refresh still works on a fresh install with no rows.
+- **Recent-ping tiles now show the reverse-geocoded location.** Each
+  tile renders the approximate place name ("Cambridge, MA") above the
+  timestamp when the system geocoder has data for the coordinate,
+  matching the pattern already used on the History screen's full
+  tiles. Silent when the geocoder returns null — offline gaps don't
+  clutter the list. `_PingTile` was converted from `StatelessWidget`
+  to `ConsumerWidget` to watch `approxLocationProvider` per row;
+  repeated pings at the same spot hit the provider family's cache.
+
+### Added
+
+- **Trail-map playback controls.** The Phase 4 time slider now sits
+  above a row of playback buttons: jump-to-start, step-previous,
+  play/pause, step-next, and a 1× / 2× / 4× / 8× / 16× speed cycle.
+  Playback advances `_sliderMax` one fix at a time via a
+  `Timer.periodic`, so each ping is visible for the same fraction of
+  the animation regardless of gaps between fixes — a walk + an
+  overnight sleep + a drive render proportionally in the playback
+  even though the raw timestamps span very different durations.
+  At 1× speed each step is ~350 ms (so 42 weekly pings play in
+  ~15 s); 16× collapses the same range to ~1 s for quick "how did
+  I move today" scrubbing. Any direct slider drag or step press
+  pauses playback, and reaching the last fix auto-pauses. Tapping
+  play when already at the last fix rewinds to the first fix first,
+  so "play" is never a no-op.
+
 ## [0.7.0+23] — 2026-04-20
 
 ### Added

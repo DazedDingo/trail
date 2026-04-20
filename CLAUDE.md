@@ -65,9 +65,9 @@ lib/
 │       ├── gpx_exporter.dart    # GPX serialization
 │       └── csv_exporter.dart    # CSV serialization
 ├── screens/                     # Screens (all ConsumerWidget)
-│   ├── home_screen.dart         # Panic button + last ping + heartbeat + trail viz + export + recent history
+│   ├── home_screen.dart         # Pinned top block (last ping + heartbeat + hold-to-panic + summary + export + map preview) with a scrollable Recent-pings list at the bottom. Recent tiles show reverse-geocoded labels. Layout shipped 0.7.1+24.
 │   ├── history_screen.dart      # Paginated full history list
-│   ├── map_screen.dart          # Full-screen map over all pings: time slider, path-line toggle, bbox-fit default viewport. Shipped 0.4.0+13.
+│   ├── map_screen.dart          # Full-screen map over all pings: time slider with playback (play/pause/step/1×-16×), path-line toggle, bbox-fit default viewport. Playback shipped 0.7.1+24; base shipped 0.4.0+13.
 │   ├── regions_screen.dart      # Offline MBTiles library: install (.mbtiles picker), delete, set-active. Shipped 0.4.0+13.
 │   ├── archive_screen.dart      # Archive older pings: cutoff picker, format radio, preview, export-and-delete confirm. Shipped 0.5.0+14.
 │   ├── diagnostics_screen.dart  # Permission matrix, DB integrity-check button, last-20 worker runs, copy-all action. Shipped 0.6.0+15.
