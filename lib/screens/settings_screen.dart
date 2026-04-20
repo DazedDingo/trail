@@ -121,7 +121,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         title: const Text('Settings'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.go('/'),
+          onPressed: () => context.go('/home'),
         ),
       ),
       body: ListView(

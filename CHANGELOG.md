@@ -4,6 +4,16 @@ All notable changes to **Trail** (gps-pinger) are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.6.6+21] — 2026-04-20
+
+### Fixed
+
+- **Settings back button points to `/home` instead of `/`.** The
+  0.6.5+20 back button fix used `context.go('/')`, but the router
+  has no `/` route — home is registered at `/home` — so tapping back
+  threw `GoException: no routes for location: /`. Corrected to
+  `context.go('/home')`.
+
 ## [0.6.5+20] — 2026-04-20
 
 ### Fixed
