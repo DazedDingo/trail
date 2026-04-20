@@ -5,21 +5,22 @@
   same user) — so we can be more permissive for physical transfers than
   for cloud.
 
-  Both destinations include the `file` domain (trail.db + salt file) and
-  exclude `sharedpref` (Keystore-bound, see backup_rules.xml rationale).
+  Both destinations include the `file` domain (trail.db + salt file).
+  Because `<include>` tags are exclusive (everything outside is implicitly
+  excluded), we don't need an explicit `<exclude>` for sharedpref —
+  FlutterSecureStorage's EncryptedSharedPreferences is Keystore-bound and
+  already left out. An explicit exclude would be a lint error
+  (FullBackupContent: "not in an included path").
 
-  We treat the two destinations the same because the adversary model
-  doesn't change — the encrypted DB + salt + stolen passphrase produces
-  plaintext in either case, and an attacker with physical device transfer
-  has more capable alternatives anyway.
+  Both destinations use the same rules: the adversary model doesn't
+  change between cloud backup and D2D transfer — the encrypted DB + salt
+  + stolen passphrase produces plaintext in either case.
 -->
 <data-extraction-rules>
     <cloud-backup>
         <include domain="file" path="."/>
-        <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
     </cloud-backup>
     <device-transfer>
         <include domain="file" path="."/>
-        <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
     </device-transfer>
 </data-extraction-rules>

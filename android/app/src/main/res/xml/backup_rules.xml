@@ -9,11 +9,13 @@
   domain on Android. Together they reconstruct the history once the user
   re-enters their backup passphrase on a fresh install.
 
-  EXCLUDE: `flutter_secure_storage`'s EncryptedSharedPreferences. Its master
-  key lives in Keystore and does NOT migrate across uninstall/reinstall or
-  to a new device — so restoring this file would produce a SharedPreferences
-  blob that's unreadable anyway, *and* (in the reinstall-same-device case)
-  could overwrite a freshly-generated Keystore value. Always regenerate.
+  When `<include>` tags are present, Android backs up ONLY the listed
+  paths — everything else is implicitly excluded. So we do NOT need an
+  explicit `<exclude domain="sharedpref">` to keep `flutter_secure_storage`
+  out of the backup (its EncryptedSharedPreferences master lives in the
+  Keystore, doesn't migrate across uninstall, and would be unreadable even
+  if restored). Adding a redundant exclude would be a lint error
+  (FullBackupContent: "not in an included path").
 
   NOTE on security: the DB is encrypted with a PBKDF2(user passphrase, salt)
   key. Anyone who obtains the Google Drive backup blob still needs the
@@ -21,5 +23,4 @@
 -->
 <full-backup-content>
     <include domain="file" path="."/>
-    <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
 </full-backup-content>

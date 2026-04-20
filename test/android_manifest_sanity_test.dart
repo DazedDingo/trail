@@ -134,16 +134,21 @@ void main() {
       );
     });
 
-    test('backup rules include file domain but exclude FlutterSecureStorage',
-        () {
+    test('backup rules include the file domain only', () {
+      // `<include>` tags are exclusive — everything outside is implicitly
+      // excluded, which is exactly what we want for sharedpref
+      // (FlutterSecureStorage is Keystore-bound and can't roundtrip).
+      // Adding an explicit `<exclude domain="sharedpref">` is a lint
+      // error ("not in an included path") and fails the release build,
+      // so we rely on the implicit default instead.
       final rules =
           File('android/app/src/main/res/xml/backup_rules.xml').readAsStringSync();
       expect(rules.contains('<include domain="file"'), isTrue,
           reason: 'Must include file domain — that\'s where trail.db lives.');
-      expect(rules.contains('FlutterSecureStorage'), isTrue,
-          reason:
-              'Must explicitly exclude FlutterSecureStorage — it\'s Keystore-'
-              'wrapped and can\'t roundtrip through a backup.');
+      expect(rules.contains('<include domain="sharedpref"'), isFalse,
+          reason: 'Must NOT include sharedpref — Keystore-bound data in '
+              'FlutterSecureStorage would be unreadable after restore and '
+              'could clobber a freshly-generated alias on reinstall.');
     });
 
     test('NEARBY_WIFI_DEVICES is flagged neverForLocation', () {
