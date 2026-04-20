@@ -4,6 +4,18 @@ All notable changes to **Trail** (gps-pinger) are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.6.5+20] — 2026-04-20
+
+### Fixed
+
+- **Settings screen now has a back button.** The `AppBar` was missing
+  its `leading` widget entirely; Flutter's auto-inserted back button
+  didn't render because GoRouter's `context.push('/settings')` from
+  home doesn't leave a pop-able Navigator route in the way the AppBar
+  heuristic expects. Added an explicit `IconButton` → `context.go('/')`
+  matching the pattern already in use on regions / diagnostics /
+  archive / home-location screens.
+
 ## [0.6.4+19] — 2026-04-20
 
 ### Fixed

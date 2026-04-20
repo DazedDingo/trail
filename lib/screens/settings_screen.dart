@@ -117,7 +117,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
+      appBar: AppBar(
+        title: const Text('Settings'),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => context.go('/'),
+        ),
+      ),
       body: ListView(
         children: [
           const _SectionHeader('Diagnostics'),
