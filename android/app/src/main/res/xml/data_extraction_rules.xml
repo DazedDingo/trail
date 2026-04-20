@@ -1,24 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  allowBackup=false already disables cloud backup. These rules belt-and-brace
-  the data-extraction pipeline on Android 12+ (API 31+) by excluding every
-  known path — the encrypted DB passphrase is keystore-bound and must not
-  travel off-device, and restoring the DB onto a different device would brick
-  it anyway (new keystore master key).
+  Android 12+ (API 31+) replacement for `allowBackup`. Splits backup into
+  two destinations — cloud-backup (off-device) and device-transfer (D2D,
+  same user) — so we can be more permissive for physical transfers than
+  for cloud.
+
+  Both destinations include the `file` domain (trail.db + salt file) and
+  exclude `sharedpref` (Keystore-bound, see backup_rules.xml rationale).
+
+  We treat the two destinations the same because the adversary model
+  doesn't change — the encrypted DB + salt + stolen passphrase produces
+  plaintext in either case, and an attacker with physical device transfer
+  has more capable alternatives anyway.
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <exclude domain="root"/>
-        <exclude domain="file"/>
-        <exclude domain="database"/>
-        <exclude domain="sharedpref"/>
-        <exclude domain="external"/>
+        <include domain="file" path="."/>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
     </cloud-backup>
     <device-transfer>
-        <exclude domain="root"/>
-        <exclude domain="file"/>
-        <exclude domain="database"/>
-        <exclude domain="sharedpref"/>
-        <exclude domain="external"/>
+        <include domain="file" path="."/>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
     </device-transfer>
 </data-extraction-rules>

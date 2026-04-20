@@ -4,6 +4,64 @@ All notable changes to **Trail** (gps-pinger) are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.1.7+8] — 2026-04-19
+
+### Added
+
+- **User-set backup passphrase → history survives uninstall.** New
+  Settings → "Enable cloud backup" flow: user picks a passphrase, we
+  derive a 32-byte SQLCipher key via PBKDF2-SHA256 (OWASP 2023: 210k
+  iterations), save a 16-byte salt next to the DB, and `PRAGMA rekey`
+  the encrypted database in place. Android's auto-backup is now on
+  (`allowBackup="true"`), so the DB + salt get snapshotted to Google
+  Drive; reinstall + re-enter passphrase = full history back.
+
+  The derived key is still persisted in `FlutterSecureStorage` so the
+  background WorkManager isolate reads it transparently — no plumbing
+  changes in the scheduler. On a fresh install post-restore, the
+  Keystore-bound secure storage is empty but the restored salt file
+  signals "passphrase mode active"; `KeystoreKey.getOrCreate()`
+  returns `null` in that case instead of silently generating a new
+  random key (which would orphan the restored DB). The UI startup gate
+  (`needsUnlockProvider`) detects this and routes to `/unlock`, the
+  scheduler catches `PassphraseNeededException` and skips the ping
+  cleanly until the user unlocks.
+
+  Trade-off (called out explicitly in the setup dialog): if the user
+  forgets the passphrase, the backup is unrecoverable. Same E2E
+  property as any user-keyed encrypted backup.
+
+### Changed
+
+- `android:allowBackup` flipped from `false` to `true`. Backup rules
+  (`res/xml/backup_rules.xml` + `res/xml/data_extraction_rules.xml`)
+  explicitly include the `file` domain (covers `trail.db` +
+  `trail_salt_v1.bin`) and exclude `FlutterSecureStorage.xml` — its
+  Keystore master key doesn't migrate across uninstall, so a
+  round-tripped entry would be unreadable anyway and the exclude
+  avoids clobbering a freshly-generated Keystore alias on reinstall.
+- `TrailDatabase.open()` now throws `PassphraseNeededException` when
+  passphrase mode is active but no key is stored. Background handlers
+  call `open()` *before* acquiring GPS so a locked-backup install
+  doesn't spend 30s on a fix it can't record.
+- `KeystoreKey.getOrCreate()` return type is now nullable (`String?`).
+  `null` means "passphrase mode active, needs unlock" — distinct from
+  "no key and ready to generate a fresh random one", which still
+  returns a new key as before.
+
+### Tests
+
+- `test/passphrase_service_test.dart` — 14 new tests: PBKDF2
+  determinism, salt-sensitivity, output format, salt file roundtrip,
+  corrupted-salt handling, OWASP iteration-count floor.
+- `test/keystore_key_test.dart` — added `read`/`persist` groups plus
+  the passphrase-mode-aware `getOrCreate` group (salt present + no
+  stored key → returns null, doesn't write).
+- `test/android_manifest_sanity_test.dart` — replaced the
+  `allowBackup=false` guard with `allowBackup=true` +
+  `fullBackupContent="@xml/backup_rules"` + backup-rules-file-exists +
+  include-file-exclude-sharedpref assertions.
+
 ## [0.1.6+7] — 2026-04-20
 
 ### Added

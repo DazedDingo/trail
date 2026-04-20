@@ -4,8 +4,12 @@ import 'package:intl/intl.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../db/database.dart';
+import '../db/keystore_key.dart';
 import '../models/ping.dart';
+import '../providers/backup_provider.dart';
 import '../providers/pings_provider.dart';
+import '../services/passphrase_service.dart';
 import '../services/permissions_service.dart';
 import '../services/scheduler/workmanager_scheduler.dart';
 
@@ -174,6 +178,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             },
           ),
           const Divider(),
+          const _SectionHeader('Cloud backup'),
+          _BackupTile(onChanged: () => ref.invalidate(backupEnabledProvider)),
+          const Divider(),
           const ListTile(
             leading: Icon(Icons.info_outline),
             title: Text('Trail'),
@@ -284,4 +291,203 @@ Future<String> _appVersionLabel() async {
 Future<({String version, String buildNumber})> _loadPackageInfo() async {
   final info = await PackageInfo.fromPlatform();
   return (version: info.version, buildNumber: info.buildNumber);
+}
+
+/// Cloud-backup status tile + setup entry point.
+///
+/// Enabled state is read through [backupEnabledProvider] (a probe on the
+/// salt file). The setup dialog takes a passphrase, derives a key via
+/// PBKDF2, runs `PRAGMA rekey` to re-encrypt the DB with it, and persists
+/// the derived key in the same secure-storage slot the background isolate
+/// already reads — so the ping pipeline keeps working transparently.
+class _BackupTile extends ConsumerWidget {
+  final VoidCallback onChanged;
+  const _BackupTile({required this.onChanged});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final enabled = ref.watch(backupEnabledProvider);
+    return enabled.when(
+      loading: () => const ListTile(
+        leading: Icon(Icons.cloud_outlined),
+        title: Text('Cloud backup'),
+        subtitle: Text('Checking…'),
+      ),
+      error: (e, _) => ListTile(
+        leading: const Icon(Icons.cloud_off_outlined),
+        title: const Text('Cloud backup'),
+        subtitle: Text('Status unavailable: $e'),
+      ),
+      data: (isEnabled) {
+        if (isEnabled) {
+          return const ListTile(
+            leading: Icon(Icons.cloud_done_outlined),
+            title: Text('Cloud backup'),
+            subtitle: Text(
+              'Enabled. History will survive uninstall via Google Drive. '
+              'Lost passphrase = lost backup.',
+            ),
+          );
+        }
+        return ListTile(
+          leading: const Icon(Icons.cloud_upload_outlined),
+          title: const Text('Enable cloud backup'),
+          subtitle: const Text(
+            'Set a passphrase so history survives uninstall + device loss.',
+          ),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => _openSetup(context),
+        );
+      },
+    );
+  }
+
+  Future<void> _openSetup(BuildContext context) async {
+    final completed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const _BackupSetupDialog(),
+    );
+    if (completed == true) onChanged();
+  }
+}
+
+class _BackupSetupDialog extends StatefulWidget {
+  const _BackupSetupDialog();
+
+  @override
+  State<_BackupSetupDialog> createState() => _BackupSetupDialogState();
+}
+
+class _BackupSetupDialogState extends State<_BackupSetupDialog> {
+  final _pass1 = TextEditingController();
+  final _pass2 = TextEditingController();
+  bool _obscured = true;
+  bool _working = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _pass1.dispose();
+    _pass2.dispose();
+    super.dispose();
+  }
+
+  Future<void> _enable() async {
+    final p1 = _pass1.text;
+    final p2 = _pass2.text;
+    final validation = PassphraseService.validate(p1);
+    if (validation != null) {
+      setState(() => _error = validation);
+      return;
+    }
+    if (p1 != p2) {
+      setState(() => _error = 'Passphrases do not match.');
+      return;
+    }
+    setState(() {
+      _working = true;
+      _error = null;
+    });
+    try {
+      final currentKey = await KeystoreKey.read();
+      if (currentKey == null) {
+        // Race: we're in keystore mode but no key yet. That means the
+        // DB has never been opened on this install, so there's nothing
+        // to rekey — just generate the salt and store the derived key
+        // so the next open creates the DB encrypted with the derived
+        // key directly.
+        final salt = await PassphraseService.generateAndPersistSalt();
+        final derived = PassphraseService.deriveKey(p1, salt);
+        await KeystoreKey.persist(derived);
+        TrailDatabase.invalidateShared();
+      } else {
+        final salt = await PassphraseService.generateAndPersistSalt();
+        final derived = PassphraseService.deriveKey(p1, salt);
+        await TrailDatabase.rekey(currentKey: currentKey, newKey: derived);
+        await KeystoreKey.persist(derived);
+        TrailDatabase.invalidateShared();
+      }
+      if (!mounted) return;
+      Navigator.of(context).pop(true);
+    } catch (e) {
+      if (!mounted) return;
+      // Clean up a partial salt on failure — leaving one orphaned would
+      // route the user to the passphrase recovery screen on next launch.
+      await PassphraseService.deleteSalt();
+      setState(() {
+        _working = false;
+        _error = 'Setup failed: $e';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Enable cloud backup'),
+      content: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Your history will be end-to-end encrypted with a passphrase '
+              'you choose. Android auto-backs up the encrypted file to your '
+              'Google Drive; reinstall + re-enter passphrase recovers it.',
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'If you forget the passphrase, the backup is unrecoverable. '
+              'Write it down somewhere safe.',
+              style: TextStyle(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _pass1,
+              obscureText: _obscured,
+              enabled: !_working,
+              decoration: InputDecoration(
+                labelText: 'Backup passphrase',
+                helperText:
+                    '≥ ${PassphraseService.minPassphraseLength} characters',
+                suffixIcon: IconButton(
+                  icon: Icon(
+                    _obscured ? Icons.visibility : Icons.visibility_off,
+                  ),
+                  onPressed: () => setState(() => _obscured = !_obscured),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _pass2,
+              obscureText: _obscured,
+              enabled: !_working,
+              decoration: InputDecoration(
+                labelText: 'Confirm passphrase',
+                errorText: _error,
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _working ? null : () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _working ? null : _enable,
+          child: _working
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('Enable'),
+        ),
+      ],
+    );
+  }
 }

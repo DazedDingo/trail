@@ -102,13 +102,48 @@ void main() {
   });
 
   group('AndroidManifest — encrypted-DB invariants', () {
-    test('android:allowBackup is explicitly false', () {
-      // PLAN.md hard rule. Cross-device backup of the SQLCipher DB would
-      // wrap the key under a different device key and orphan the data.
-      expect(_manifest().contains('android:allowBackup="false"'), isTrue,
+    test('android:allowBackup is true and points at backup_rules', () {
+      // Flipped in 0.1.7+8 so users can opt into the "set a backup
+      // passphrase" flow — PBKDF2-derived key means the DB survives
+      // uninstall/new-device restore without the Keystore-bound problem
+      // the old design had.
+      expect(_manifest().contains('android:allowBackup="true"'), isTrue,
           reason:
-              'allowBackup must stay false — the encrypted DB is intentionally '
-              'device-bound (Keystore-derived passphrase).');
+              'allowBackup must be true so Android auto-backs the encrypted '
+              'DB + salt file to Google Drive. The passphrase-derived key '
+              'stays off-device — backup alone is useless without it.');
+      expect(
+        _manifest().contains('android:fullBackupContent="@xml/backup_rules"'),
+        isTrue,
+        reason:
+            'Must point at backup_rules.xml — the selective rules that '
+            'include the DB + salt but exclude Keystore-bound sharedpref.',
+      );
+    });
+
+    test('backup_rules.xml and data_extraction_rules.xml both exist', () {
+      expect(
+        File('android/app/src/main/res/xml/backup_rules.xml').existsSync(),
+        isTrue,
+        reason: 'Referenced from AndroidManifest — build fails without it.',
+      );
+      expect(
+        File('android/app/src/main/res/xml/data_extraction_rules.xml')
+            .existsSync(),
+        isTrue,
+      );
+    });
+
+    test('backup rules include file domain but exclude FlutterSecureStorage',
+        () {
+      final rules =
+          File('android/app/src/main/res/xml/backup_rules.xml').readAsStringSync();
+      expect(rules.contains('<include domain="file"'), isTrue,
+          reason: 'Must include file domain — that\'s where trail.db lives.');
+      expect(rules.contains('FlutterSecureStorage'), isTrue,
+          reason:
+              'Must explicitly exclude FlutterSecureStorage — it\'s Keystore-'
+              'wrapped and can\'t roundtrip through a backup.');
     });
 
     test('NEARBY_WIFI_DEVICES is flagged neverForLocation', () {

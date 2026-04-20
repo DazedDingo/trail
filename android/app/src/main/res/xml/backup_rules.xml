@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Auto-backup rules for Android <= 11. Pairs with data_extraction_rules.xml
+  (Android 12+). Both drive the same decision:
+
+  INCLUDE: the SQLCipher-encrypted DB (`trail.db`) and the PBKDF2 salt file
+  (`trail_salt_v1.bin`) that sits next to it. Both live under
+  `getApplicationDocumentsDirectory()`, which maps to the `file` backup
+  domain on Android. Together they reconstruct the history once the user
+  re-enters their backup passphrase on a fresh install.
+
+  EXCLUDE: `flutter_secure_storage`'s EncryptedSharedPreferences. Its master
+  key lives in Keystore and does NOT migrate across uninstall/reinstall or
+  to a new device — so restoring this file would produce a SharedPreferences
+  blob that's unreadable anyway, *and* (in the reinstall-same-device case)
+  could overwrite a freshly-generated Keystore value. Always regenerate.
+
+  NOTE on security: the DB is encrypted with a PBKDF2(user passphrase, salt)
+  key. Anyone who obtains the Google Drive backup blob still needs the
+  passphrase to decrypt it. Salt in the clear is standard practice.
+-->
+<full-backup-content>
+    <include domain="file" path="."/>
+    <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
+</full-backup-content>

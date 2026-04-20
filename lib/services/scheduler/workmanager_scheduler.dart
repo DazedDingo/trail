@@ -137,6 +137,13 @@ void _callbackDispatcher() {
         default:
           return true;
       }
+    } on PassphraseNeededException {
+      // Post-restore case: DB is locked pending the user's passphrase.
+      // Can't write a marker row (DB is the thing we can't open), so we
+      // just return success and let the next scheduled window try again.
+      // The UI gate will have routed the user to /unlock by now anyway.
+      debugPrint('[scheduler] Skipping ping — awaiting backup passphrase.');
+      return true;
     } catch (_) {
       // Never throw out of the worker — WorkManager will mark failed and
       // apply backoff, which we don't want for a transient bug. Swallow and
@@ -147,10 +154,13 @@ void _callbackDispatcher() {
 }
 
 Future<bool> _handleScheduled() async {
+  // Open the DB first so a locked-backup install bails before spending
+  // ~30s on GPS. `TrailDatabase.open` throws [PassphraseNeededException]
+  // in that case, caught by the dispatcher.
+  final db = await TrailDatabase.open();
   final location = LocationService();
   // Grab battery first — we need it even if we skip the fix entirely.
   final snapshot = await location.getScheduledPing();
-  final db = await TrailDatabase.open();
   try {
     final dao = PingDao(db);
     if (SchedulerPolicy.shouldSkipForLowBattery(snapshot.batteryPct)) {
@@ -179,9 +189,9 @@ Future<bool> _handleScheduled() async {
 }
 
 Future<bool> _handleRetry() async {
+  final db = await TrailDatabase.open();
   final location = LocationService();
   final ping = await location.getScheduledPing();
-  final db = await TrailDatabase.open();
   try {
     await PingDao(db).insert(ping);
     return true;

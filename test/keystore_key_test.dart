@@ -1,8 +1,10 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:trail/db/keystore_key.dart';
+import 'package:trail/services/passphrase_service.dart';
 
 /// [KeystoreKey] calls `flutter_secure_storage` which internally talks to a
 /// native MethodChannel. There's no DI seam in the class (the secure-storage
@@ -94,7 +96,7 @@ void main() {
       final key = await KeystoreKey.getOrCreate();
       // 32 bytes base64url → 43 chars, unpadded. If this drops below 256 bits
       // of entropy we want to fail loudly — SQLCipher's strength rests on it.
-      final decoded = base64Url.decode(base64.normalize(key));
+      final decoded = base64Url.decode(base64.normalize(key!));
       expect(decoded.length, 32,
           reason: '32 bytes = 256 bits of entropy for SQLCipher');
     });
@@ -195,6 +197,94 @@ void main() {
       final fresh = await KeystoreKey.getOrCreate();
       expect(fresh, isNot('original'));
       expect(fresh, isNotEmpty);
+    });
+  });
+
+  group('KeystoreKey.read', () {
+    test('returns the stored value when one exists', () async {
+      fake.preset('stored-key');
+      expect(await KeystoreKey.read(), 'stored-key');
+    });
+
+    test('returns null when storage is empty', () async {
+      expect(await KeystoreKey.read(), isNull);
+    });
+
+    test('returns null for empty string (treated as "not set")', () async {
+      fake.preset('');
+      expect(await KeystoreKey.read(), isNull);
+    });
+
+    test('never writes as a side-effect', () async {
+      await KeystoreKey.read();
+      expect(fake.calls.any((c) => c.method == 'write'), isFalse);
+    });
+  });
+
+  group('KeystoreKey.persist', () {
+    test('writes the provided value under the versioned storage key', () async {
+      await KeystoreKey.persist('derived-key-abc');
+      expect(fake.current(), 'derived-key-abc');
+      final write = fake.calls.singleWhere((c) => c.method == 'write');
+      final args = (write.arguments as Map).cast<String, Object?>();
+      expect(args['key'], 'trail_db_passphrase_v1');
+      expect(args['value'], 'derived-key-abc');
+    });
+
+    test('overwrites any existing value', () async {
+      fake.preset('old-key');
+      await KeystoreKey.persist('new-key');
+      expect(fake.current(), 'new-key');
+    });
+  });
+
+  group('KeystoreKey.getOrCreate — passphrase-mode aware', () {
+    // These tests exercise the salt-file guard: when passphrase mode is
+    // active (salt file present) AND secure storage is empty, getOrCreate
+    // MUST NOT generate a random key — doing so would silently destroy the
+    // user's ability to unlock a restored DB. It should return null and
+    // let the caller route to the passphrase-entry screen.
+    late Directory tempDir;
+
+    setUp(() async {
+      tempDir =
+          await Directory.systemTemp.createTemp('trail_keystore_passphrase_');
+      PassphraseService.setSaltDirForTest(tempDir);
+    });
+
+    tearDown(() async {
+      PassphraseService.setSaltDirForTest(null);
+      if (tempDir.existsSync()) await tempDir.delete(recursive: true);
+    });
+
+    test('returns null when salt exists and storage is empty (post-restore)',
+        () async {
+      await PassphraseService.generateAndPersistSalt();
+      expect(fake.current(), isNull);
+      final result = await KeystoreKey.getOrCreate();
+      expect(result, isNull,
+          reason:
+              'Passphrase mode is active, no derived key stored → caller '
+              'must route to /unlock rather than get a random key here.');
+      expect(fake.calls.any((c) => c.method == 'write'), isFalse,
+          reason: 'Must NOT silently overwrite the "needs unlock" signal.');
+    });
+
+    test('returns the stored key when salt exists and storage is populated',
+        () async {
+      await PassphraseService.generateAndPersistSalt();
+      fake.preset('derived-from-passphrase-xyz');
+      final result = await KeystoreKey.getOrCreate();
+      expect(result, 'derived-from-passphrase-xyz');
+    });
+
+    test('generates a random key when salt is absent (legacy / new install)',
+        () async {
+      // No salt file → keystore mode → normal behaviour.
+      final result = await KeystoreKey.getOrCreate();
+      expect(result, isNotNull);
+      expect(result, isNotEmpty);
+      expect(fake.current(), result);
     });
   });
 }

@@ -30,7 +30,8 @@ lib/
 │   └── keystore_key.dart       # Keystore-backed passphrase
 ├── providers/                   # Riverpod state
 │   ├── pings_provider.dart     # recentPingsProvider, lastSuccessfulPingProvider, heartbeatHealthyProvider, approxLocationProvider
-│   └── onboarding_provider.dart # onboardingCompleteProvider, OnboardingGate (secure storage)
+│   ├── onboarding_provider.dart # onboardingCompleteProvider, OnboardingGate (secure storage)
+│   └── backup_provider.dart     # backupEnabledProvider, needsUnlockProvider, computeNeedsUnlock()
 ├── services/                    # Business logic
 │   ├── location_service.dart    # Wraps geolocator, enforces 2min timeout, passive cell/Wi-Fi reads
 │   ├── permissions_service.dart # Staged permission requests (fine → background location)
@@ -39,6 +40,7 @@ lib/
 │   ├── cell_wifi_service.dart   # Passive cell tower ID + Wi-Fi SSID capture
 │   ├── geo_client.dart          # Geolocator wrapper (testable)
 │   ├── geocoding_service.dart   # Reverse geocode wrapper (offline-tolerant)
+│   ├── passphrase_service.dart  # PBKDF2 + salt file for the backup-passphrase mode
 │   ├── scheduler/
 │   │   ├── workmanager_scheduler.dart # WorkManager init, periodic/retry/boot task enqueue
 │   │   └── scheduler_policy.dart      # Cadence constants, battery/network constraints
@@ -48,8 +50,9 @@ lib/
 ├── screens/                     # Screens (all ConsumerWidget)
 │   ├── home_screen.dart         # Last ping + heartbeat + trail viz + export + recent history
 │   ├── history_screen.dart      # Paginated full history, optional map view (Phase 2)
-│   ├── settings_screen.dart     # Diagnostics (Run-ping-now, permission status), app version
+│   ├── settings_screen.dart     # Diagnostics, permissions, cloud-backup setup, app version
 │   ├── lock_screen.dart         # Biometric/PIN unlock gate (pre-home)
+│   ├── passphrase_entry_screen.dart # Post-restore backup-passphrase unlock gate
 │   └── onboarding/              # First-run flow (permissions, emergency contacts)
 │       └── onboarding_flow.dart
 ├── widgets/
@@ -102,7 +105,9 @@ lib/
 - **pings table:** timestamp_utc (primary key for queries), lat/lon/accuracy/altitude/heading/speed, battery_pct, network_state, cell_id, wifi_ssid, source (enum: scheduled|panic|boot|no_fix), note.
 - **emergency_contacts table:** name, phone_e164 (Phase 2 panic-share).
 - **Index:** `idx_pings_ts_utc DESC` for fast recent queries.
-- **Encryption:** SQLCipher with Keystore-derived passphrase (see `KeystoreKey`).
+- **Encryption:** SQLCipher with a 32-byte key persisted in Keystore-backed secure storage. Two key-source modes:
+  - **Keystore mode (default):** 32 bytes of `Random.secure()` entropy generated on first launch, base64url-encoded. Zero user interaction.
+  - **Passphrase mode (opt-in via Settings → Enable cloud backup):** key is PBKDF2-SHA256(user passphrase, salt, 210k). Salt is a 16-byte random blob in `trail_salt_v1.bin` alongside the DB; both files are `include`'d in Android's `backup_rules.xml` so Google Drive auto-backup preserves them across uninstall. The derived key is cached in secure storage the same way the random key is, so the background WorkManager isolate never sees the passphrase itself. Setup rekeys the DB in place via `PRAGMA rekey`. Post-restore detection: salt file present + secure storage empty → route to `/unlock`; `KeystoreKey.getOrCreate()` returns `null` rather than silently overwriting.
 
 ## Build, Test, Run
 
@@ -161,6 +166,8 @@ See `git log --oneline -20` for recent pattern.
 3. **SQLCipher + tests:** sqflite_sqlcipher does not work in unit test context (platform channel unavailable). Use sqflite_common_ffi for test database. Production uses sqflite_sqlcipher.
 4. **Dark mode only:** no light theme variant. All Color tokens assume `ThemeMode.dark` explicitly.
 5. **Phase 1 scope:** no map rendering, no panic-share, no notifications, no exact alarms. These land in Phases 2–5. Manifest declares them upfront so manifest validation passes early.
+6. **`PassphraseNeededException`:** `TrailDatabase.open()` throws this in passphrase-mode-post-restore installs. The UI startup gate (`computeNeedsUnlock` → `needsUnlockProvider`) detects this at `main()` and routes to `/unlock`. Background workers catch and skip silently — they can't write a marker row when the DB is the thing they can't open. Don't handle this exception ad-hoc in new providers; catch at the screen boundary (or rely on the router gate).
+7. **Don't disable `allowBackup` or remove `backup_rules.xml`.** Passphrase-mode users rely on auto-backup for uninstall survivability. If you ever add a new on-disk file that must NOT be backed up, add an `<exclude>` to `backup_rules.xml` + `data_extraction_rules.xml`.
 
 ## Related Docs
 
