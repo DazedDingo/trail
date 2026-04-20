@@ -4,6 +4,17 @@ All notable changes to **Trail** (gps-pinger) are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.1.6+7] — 2026-04-20
+
+### Added
+
+- **Approx location on History tiles.** The history screen already showed
+  raw lat/lon; it now also renders the reverse-geocoded "Locality, Region"
+  label under the coords (same `approxLocationProvider.family` the Home
+  card uses, so repeated pings at the same spot — the common case at 4h
+  cadence — are served from cache). Silently omits the line when the
+  geocoder has nothing for that coordinate.
+
 ## [0.1.5+6] — 2026-04-19
 
 ### Fixed
