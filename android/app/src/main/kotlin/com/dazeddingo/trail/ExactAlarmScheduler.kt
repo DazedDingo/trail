@@ -65,7 +65,12 @@ object ExactAlarmScheduler {
             return false
         }
 
-        val pi = buildPendingIntent(context)
+        // `buildPendingIntent` returns `PendingIntent?` only to support the
+        // cancel path (which passes `FLAG_NO_CREATE`). Without that flag,
+        // `PendingIntent.getBroadcast` never returns null — enforce that
+        // invariant here so the signature of `setExactAndAllowWhileIdle`
+        // (non-null) type-checks.
+        val pi = buildPendingIntent(context)!!
         val triggerAt = SystemClock.elapsedRealtime() + effective
         am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
         SchedulerEventsLog.record(
