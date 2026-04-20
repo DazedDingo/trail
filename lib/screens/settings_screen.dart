@@ -4,11 +4,15 @@ import 'package:intl/intl.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'package:go_router/go_router.dart';
+
 import '../db/database.dart';
 import '../db/keystore_key.dart';
 import '../models/ping.dart';
 import '../providers/backup_provider.dart';
+import '../providers/panic_provider.dart';
 import '../providers/pings_provider.dart';
+import '../services/panic/panic_service.dart';
 import '../services/passphrase_service.dart';
 import '../services/permissions_service.dart';
 import '../services/scheduler/workmanager_scheduler.dart';
@@ -178,6 +182,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             },
           ),
           const Divider(),
+          const _SectionHeader('Panic'),
+          ListTile(
+            leading: const Icon(Icons.contacts_outlined),
+            title: const Text('Emergency contacts'),
+            subtitle:
+                const Text('People the panic button should SMS with a location pin.'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => context.push('/contacts'),
+          ),
+          const _ContinuousDurationTile(),
+          const Divider(),
           const _SectionHeader('Cloud backup'),
           _BackupTile(onChanged: () => ref.invalidate(backupEnabledProvider)),
           const Divider(),
@@ -272,6 +287,37 @@ class _PermissionTile extends StatelessWidget {
     if (s.isRestricted) return 'RESTRICTED';
     if (s.isLimited) return 'LIMITED';
     return 'NOT GRANTED';
+  }
+}
+
+/// Duration picker for the continuous-panic foreground service. Defaults
+/// to 30 min; persisted via [panicDurationProvider] so the choice sticks
+/// across app restarts.
+class _ContinuousDurationTile extends ConsumerWidget {
+  const _ContinuousDurationTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final current = ref.watch(panicDurationProvider);
+    return ListTile(
+      leading: const Icon(Icons.timer_outlined),
+      title: const Text('Continuous-panic duration'),
+      subtitle: Text(
+        'Foreground service pings every ~90s for the chosen window, then '
+        'auto-stops. Currently: ${current.asData?.value.label ?? "…"}.',
+      ),
+      trailing: DropdownButton<PanicDuration>(
+        value: current.asData?.value,
+        onChanged: (v) {
+          if (v == null) return;
+          ref.read(panicDurationProvider.notifier).set(v);
+        },
+        items: [
+          for (final d in PanicDuration.values)
+            DropdownMenuItem(value: d, child: Text(d.label)),
+        ],
+      ),
+    );
   }
 }
 

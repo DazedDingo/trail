@@ -1,7 +1,7 @@
 name: trail
 description: "Trail — personal-safety GPS logger. Offline, encrypted, 4h-cadence background pings."
 publish_to: 'none'
-version: 0.1.9+10
+version: 0.2.0+11
 
 environment:
   sdk: ^3.5.0
@@ -46,9 +46,14 @@ dependencies:
 
   # UX helpers
   share_plus: ^10.0.2
-  # flutter_local_notifications lands in Phase 2 with the panic-receipt
-  # notification. Not imported yet — adding it now would pull in timezone
-  # and desugaring deps we don't need for the MVP build.
+  # Panic-receipt notification + continuous-panic persistent notification.
+  # Silent for scheduled pings (PLAN.md: too frequent to notify); only the
+  # panic path posts user-visible notifications.
+  flutter_local_notifications: ^17.2.3
+  # Composes the "PANIC at HH:MM — maps.google.com/?q=lat,lon" SMS intent
+  # URL for Phase 2's emergency-contact hand-off. No SEND_SMS permission —
+  # user still taps send in their default SMS app.
+  url_launcher: ^6.3.1
 
   # Map viewer — interactive pan/zoom trail visualisation on the home
   # screen. Uses OpenStreetMap raster tiles (HTTPS); the logging pipeline

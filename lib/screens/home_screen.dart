@@ -8,9 +8,12 @@ import 'package:share_plus/share_plus.dart';
 import '../db/database.dart';
 import '../db/ping_dao.dart';
 import '../models/ping.dart';
+import '../providers/contacts_provider.dart';
+import '../providers/panic_provider.dart';
 import '../providers/pings_provider.dart';
 import '../services/export/csv_exporter.dart';
 import '../services/export/gpx_exporter.dart';
+import '../services/panic/panic_service.dart';
 import '../widgets/trail_map.dart';
 
 /// The app's primary screen.
@@ -62,6 +65,8 @@ class HomeScreen extends ConsumerWidget {
           padding: const EdgeInsets.all(16),
           children: [
             _LastPingCard(last: last, healthy: healthy),
+            const SizedBox(height: 12),
+            const _PanicButton(),
             const SizedBox(height: 12),
             _SummaryCard(count: count),
             const SizedBox(height: 12),
@@ -210,6 +215,145 @@ class _ApproxLocationLine extends ConsumerWidget {
       },
       loading: () => const SizedBox.shrink(),
       error: (_, __) => const SizedBox.shrink(),
+    );
+  }
+}
+
+/// Prominent panic card on the home screen.
+///
+/// Two actions, clearly separated:
+///   - **Panic now** (big button): one-shot high-accuracy fix + visible
+///     receipt + pre-filled SMS to configured emergency contacts.
+///   - **Continuous** (small button): opens native foreground service for
+///     the duration configured in Settings.
+///
+/// Both branches gracefully degrade — no contacts? Fix still writes,
+/// notification still fires, just no SMS hand-off. Native channel not
+/// wired (test / emulator without native plugin)? Continuous mode
+/// downgrades to a one-shot.
+class _PanicButton extends ConsumerStatefulWidget {
+  const _PanicButton();
+
+  @override
+  ConsumerState<_PanicButton> createState() => _PanicButtonState();
+}
+
+class _PanicButtonState extends ConsumerState<_PanicButton> {
+  bool _working = false;
+
+  Future<void> _panicNow() async {
+    setState(() => _working = true);
+    Ping? result;
+    Object? error;
+    try {
+      result = await PanicService.triggerOnce();
+    } catch (e) {
+      error = e;
+    }
+    if (!mounted) return;
+    setState(() => _working = false);
+    ref.invalidate(lastSuccessfulPingProvider);
+    ref.invalidate(heartbeatHealthyProvider);
+    ref.invalidate(pingCountProvider);
+    ref.invalidate(recentPingsProvider);
+
+    if (error != null || result == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Panic failed: ${error ?? "unknown"}')),
+      );
+      return;
+    }
+
+    // Attempt SMS hand-off. Contacts may be empty — surface that distinctly
+    // from a real failure so the user knows to configure them.
+    final contacts = await ref.read(emergencyContactsProvider.future);
+    if (!mounted) return;
+    if (contacts.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Panic logged — add emergency contacts in Settings to SMS them.',
+          ),
+        ),
+      );
+      return;
+    }
+    final opened =
+        await PanicService.openPanicSms(contacts: contacts, ping: result);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          opened
+              ? 'Panic logged + SMS app opened with ${contacts.length} contact'
+                  '${contacts.length == 1 ? "" : "s"}.'
+              : 'Panic logged. SMS hand-off failed — send manually.',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _startContinuous() async {
+    final duration = await ref.read(panicDurationProvider.future);
+    final ok = await PanicService.startContinuous(duration);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? 'Continuous panic started (${duration.label}). Tap Stop '
+                  'in the notification to end early.'
+              : 'Continuous-mode service unavailable — logging a single '
+                  'panic ping instead.',
+        ),
+      ),
+    );
+    if (!ok) {
+      await _panicNow();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      color: scheme.errorContainer.withValues(alpha: 0.4),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: scheme.error.withValues(alpha: 0.6)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            FilledButton.icon(
+              onPressed: _working ? null : _panicNow,
+              style: FilledButton.styleFrom(
+                backgroundColor: scheme.error,
+                foregroundColor: scheme.onError,
+                padding: const EdgeInsets.symmetric(vertical: 18),
+                textStyle: Theme.of(context).textTheme.titleMedium,
+              ),
+              icon: _working
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white),
+                    )
+                  : const Icon(Icons.warning_amber_rounded),
+              label: Text(_working ? 'Logging…' : 'PANIC NOW'),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _working ? null : _startContinuous,
+              icon: const Icon(Icons.timer_outlined, size: 18),
+              label: const Text('Start continuous panic'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

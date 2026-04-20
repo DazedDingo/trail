@@ -35,7 +35,9 @@ lib/
 ├── providers/                   # Riverpod state
 │   ├── pings_provider.dart     # recentPingsProvider, lastSuccessfulPingProvider, heartbeatHealthyProvider, approxLocationProvider
 │   ├── onboarding_provider.dart # onboardingCompleteProvider, OnboardingGate (secure storage)
-│   └── backup_provider.dart     # backupEnabledProvider, needsUnlockProvider, computeNeedsUnlock()
+│   ├── backup_provider.dart     # backupEnabledProvider, needsUnlockProvider, computeNeedsUnlock()
+│   ├── contacts_provider.dart   # emergencyContactsProvider (FutureProvider, ContactDao)
+│   └── panic_provider.dart      # panicDurationProvider (AsyncNotifier, secure-storage-backed)
 ├── services/                    # Business logic
 │   ├── location_service.dart    # Wraps geolocator, enforces 2min timeout, passive cell/Wi-Fi reads
 │   ├── permissions_service.dart # Staged permission requests (fine → background location)
@@ -45,16 +47,21 @@ lib/
 │   ├── geo_client.dart          # Geolocator wrapper (testable)
 │   ├── geocoding_service.dart   # Reverse geocode wrapper (offline-tolerant)
 │   ├── passphrase_service.dart  # PBKDF2 + salt file for the backup-passphrase mode
+│   ├── notification_service.dart # flutter_local_notifications wrapper, `trail_panic` channel
+│   ├── panic/
+│   │   ├── panic_service.dart          # triggerOnce / startContinuous / stopContinuous / MethodChannel
+│   │   └── panic_share_builder.dart    # sms: URI compose + PANIC body format
 │   ├── scheduler/
-│   │   ├── workmanager_scheduler.dart # WorkManager init, periodic/retry/boot task enqueue
+│   │   ├── workmanager_scheduler.dart # WorkManager init, periodic/retry/boot/panic task enqueue
 │   │   └── scheduler_policy.dart      # Cadence constants, battery/network constraints
 │   └── export/
 │       ├── gpx_exporter.dart    # GPX serialization
 │       └── csv_exporter.dart    # CSV serialization
 ├── screens/                     # Screens (all ConsumerWidget)
-│   ├── home_screen.dart         # Last ping + heartbeat + trail viz + export + recent history
-│   ├── history_screen.dart      # Paginated full history, optional map view (Phase 2)
-│   ├── settings_screen.dart     # Diagnostics, permissions, cloud-backup setup, app version
+│   ├── home_screen.dart         # Panic button + last ping + heartbeat + trail viz + export + recent history
+│   ├── history_screen.dart      # Paginated full history, optional map view (Phase 4)
+│   ├── settings_screen.dart     # Diagnostics, permissions, cloud-backup setup, panic duration, app version
+│   ├── contacts_screen.dart     # Emergency contacts CRUD (stored in encrypted DB)
 │   ├── lock_screen.dart         # Biometric/PIN unlock gate (pre-home)
 │   ├── passphrase_entry_screen.dart # Post-restore backup-passphrase unlock gate
 │   └── onboarding/              # First-run flow (permissions, emergency contacts)
@@ -169,7 +176,7 @@ See `git log --oneline -20` for recent pattern.
 2. **Permission staging order (Android 11+):** requesting background-location before fine-location silently collapses to denied. Always request fine first.
 3. **SQLCipher + tests:** sqflite_sqlcipher does not work in unit test context (platform channel unavailable). Use sqflite_common_ffi for test database. Production uses sqflite_sqlcipher.
 4. **Dark mode only:** no light theme variant. All Color tokens assume `ThemeMode.dark` explicitly.
-5. **Phase 1 scope:** no panic-share, no notifications, no exact alarms. These land in Phases 2–5. Manifest declares them upfront so manifest validation passes early. Map rendering shipped early (0.1.9+10) via `flutter_map` + OSM online tiles; Phase 4's offline MBTiles plan still stands — swap the TileLayer source when those land.
+5. **Phase 1 scope:** exact alarms still land in Phase 5. Panic (Phase 2, shipped 0.2.0+11) and notifications (`trail_panic` channel) are live. Manifest declared all these permissions upfront so validation passes early. Map rendering shipped early (0.1.9+10) via `flutter_map` + OSM online tiles; Phase 4's offline MBTiles plan still stands — swap the TileLayer source when those land.
 6. **`PassphraseNeededException`:** `TrailDatabase.open()` throws this in passphrase-mode-post-restore installs. The UI startup gate (`computeNeedsUnlock` → `needsUnlockProvider`) detects this at `main()` and routes to `/unlock`. Background workers catch and skip silently — they can't write a marker row when the DB is the thing they can't open. Don't handle this exception ad-hoc in new providers; catch at the screen boundary (or rely on the router gate).
 7. **Don't disable `allowBackup` or remove `backup_rules.xml`.** Passphrase-mode users rely on auto-backup for uninstall survivability. If you ever add a new on-disk file that must NOT be backed up, add an `<exclude>` to `backup_rules.xml` + `data_extraction_rules.xml`.
 

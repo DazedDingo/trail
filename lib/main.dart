@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'app.dart';
 import 'providers/backup_provider.dart';
 import 'providers/onboarding_provider.dart';
+import 'services/notification_service.dart';
 import 'services/scheduler/workmanager_scheduler.dart';
 
 /// Entry point for Trail.
@@ -16,6 +17,9 @@ import 'services/scheduler/workmanager_scheduler.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await WorkmanagerScheduler.initialize();
+  // Eagerly create the panic notification channel so the first panic
+  // triggers a notification with no first-use latency.
+  await NotificationService.initialize();
   final onboarded = await OnboardingGate.isComplete();
   // Detect the post-restore case: auto-backup has put the encrypted DB +
   // salt back in place, but the Keystore-bound secure storage is empty

@@ -18,5 +18,6 @@ class MainActivity : FlutterFragmentActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         CellWifiPlugin.register(flutterEngine, applicationContext)
+        PanicMethodChannel.register(flutterEngine, applicationContext)
     }
 }

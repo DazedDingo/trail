@@ -1,10 +1,14 @@
 import 'package:flutter/widgets.dart';
 import 'package:workmanager/workmanager.dart';
 
+import 'package:geolocator/geolocator.dart';
+
 import '../../db/database.dart';
 import '../../db/ping_dao.dart';
 import '../../models/ping.dart';
 import '../location_service.dart';
+import '../notification_service.dart';
+import '../panic/panic_service.dart';
 import 'scheduler_policy.dart';
 
 /// WorkManager scheduler for the 4h scheduled-ping cadence.
@@ -134,6 +138,8 @@ void _callbackDispatcher() {
           return await _handleRetry();
         case WorkmanagerScheduler.bootTaskName:
           return await _handleBoot();
+        case PanicService.panicTaskName:
+          return await _handlePanic();
         default:
           return true;
       }
@@ -194,6 +200,31 @@ Future<bool> _handleRetry() async {
   final ping = await location.getScheduledPing();
   try {
     await PingDao(db).insert(ping);
+    return true;
+  } finally {
+    await db.close();
+  }
+}
+
+/// Background-isolate panic handler. Invoked from:
+///   - `PanicForegroundService.kt` timer ticks (continuous mode)
+///   - Native quick-settings tile / home-screen widget taps (Phase 3)
+///
+/// Uses `LocationAccuracy.best` and a short 45s budget — same rationale
+/// as the UI-isolate [PanicService.triggerOnce]. Writes a `panic` row and
+/// posts the visible panic-receipt notification so the user sees the
+/// confirmation even though the UI isolate isn't running.
+Future<bool> _handlePanic() async {
+  final db = await TrailDatabase.open();
+  try {
+    final location = LocationService();
+    final ping = await location.getScheduledPing(
+      source: PingSource.panic,
+      accuracy: LocationAccuracy.best,
+      timeout: const Duration(seconds: 45),
+    );
+    await PingDao(db).insert(ping);
+    await NotificationService.postPanicReceipt(ping);
     return true;
   } finally {
     await db.close();

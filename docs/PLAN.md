@@ -193,8 +193,14 @@ docs/
 ### Phase 1 — MVP (logs + exports)
 Scaffold, encrypted DB with Keystore key, `LocationService.getScheduledPing()` (includes heading/speed/battery/network/cell/Wi-Fi), `WorkManager` 4h PeriodicWorkRequest with retry-once-after-5min on no-fix, boot receiver logging `boot` row + triggering immediate ping, low-battery policy, home screen (last ping card + heartbeat + history list), GPX + CSV export via share sheet, staged permission flow, biometric gate on app open. Dark theme. **Demo:** install, onboard, grant permissions, see pings accumulate over a day, biometric unlocks app, export to GPX, open in OsmAnd.
 
-### Phase 2 — Panic + emergency contacts
+### Phase 2 — Panic + emergency contacts ✅ (shipped 0.2.0+11)
 Panic button on home + dedicated panic foreground service + continuous mode with configurable 15/30/60 min duration. Panic receipt notification. Emergency contacts screen (add/edit/delete contacts, stored in encrypted DB). Panic-share builder opens SMS app pre-filled with recipients and location text. **Demo:** hit panic, SMS app opens with contacts + maps link, continuous mode runs for chosen duration then auto-stops.
+
+**Implementation notes:**
+- Continuous mode uses the native FG service → WorkManager → Flutter dispatcher bridge (instead of a native DB write) so SQLCipher access stays in Dart and matches the scheduled-ping isolate model.
+- `foregroundServiceType="location"` declared on the service; runtime `FOREGROUND_SERVICE_LOCATION` permission was already requested in Phase 1 staging.
+- Duration preference persists in `flutter_secure_storage` under `trail_panic_duration_v1`, defaulting to 30 min.
+- SMS hand-off uses `url_launcher` on an `sms:` URI with comma-joined recipients. No `SEND_SMS` permission ever requested — user taps Send in their own SMS app.
 
 ### Phase 3 — Quick-settings tile + home-screen widget
 Native Kotlin quick-settings tile service and home-screen widget, both triggering panic via same foreground-service entry point. **Demo:** add widget, swipe down for tile, one-tap panic without opening the app.

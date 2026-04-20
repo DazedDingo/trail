@@ -4,6 +4,69 @@ All notable changes to **Trail** (gps-pinger) are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.2.0+11] — 2026-04-20
+
+### Added
+
+- **Phase 2: Panic button + emergency contacts + continuous panic.** Full
+  Phase-2 scope shipped as a single release.
+
+  - **Panic button** on the home screen fires a one-shot high-accuracy
+    (`LocationAccuracy.best`, 45s budget) ping, writes a `panic` row
+    through the existing DAO, posts a visible "Panic ping logged"
+    notification, then opens the user's default SMS app pre-filled
+    with every configured emergency contact and a
+    `PANIC at HH:MM — https://maps.google.com/?q=lat,lon` body. No
+    `SEND_SMS` permission is used — the user still taps Send in their
+    SMS app. Empty-contacts case surfaces an inline "configure
+    contacts" nudge instead of silently launching an empty SMS.
+  - **Emergency contacts screen** (`/contacts`) with full CRUD: name
+    and E.164-validated phone, stored in the existing encrypted
+    `emergency_contacts` table (schema unchanged — table was already
+    seeded in v1).
+  - **Continuous-panic mode** runs for a user-selectable 15 / 30 / 60
+    min duration (persisted in secure storage under
+    `trail_panic_duration_v1`). A native foreground service
+    (`PanicForegroundService.kt`,
+    `foregroundServiceType="location"`) owns the ongoing
+    "Panic active" notification with a Stop action and ticks every
+    ~90s. Each tick enqueues a one-off WorkManager task that
+    re-enters the Flutter dispatcher and runs `_handlePanic` in
+    `workmanager_scheduler.dart` — same isolate + DAO path as
+    scheduled pings, so SQLCipher access stays in Dart. Session
+    auto-stops after the configured duration even if the app process
+    dies. Stop action, `stopContinuous()` MethodChannel call, and
+    auto-timeout all route through the same clean-shutdown path.
+  - **Panic notification channel** (`trail_panic`) posts a receipt
+    after every one-shot and every continuous tick. Scheduled pings
+    stay silent — too frequent to notify.
+  - **Settings → Panic** section: quick-link to `/contacts`, and a
+    duration dropdown wired to `panicDurationProvider`.
+
+### Changed
+
+- `MainActivity.kt` now registers `PanicMethodChannel` alongside
+  `CellWifiPlugin` for the `com.dazeddingo.trail/panic`
+  MethodChannel (`startContinuous`, `stopContinuous`). Channel errors
+  downgrade gracefully to the one-shot path so a broken native build
+  can't block a panic in the field.
+- `AndroidManifest.xml` declares
+  `<service android:name=".PanicForegroundService" android:foregroundServiceType="location" android:exported="false"/>`.
+  `FOREGROUND_SERVICE` and `FOREGROUND_SERVICE_LOCATION` permissions
+  were already declared in Phase 1 for exactly this moment.
+- Router gains `GoRoute('/contacts' …)` for the new screen.
+- `main.dart` initialises `NotificationService` on startup so the
+  first panic triggers a notification without channel-creation
+  latency.
+
+### Testing
+
+- 9 new `panic_share_builder_test.dart` cases covering empty
+  contacts, blank-phone filtering, comma-joined recipient paths,
+  5-decimal maps-URL formatting, no-fix fallback, lat-only /
+  lon-only defensive fallback, and deterministic `HH:mm`
+  formatting. Full suite at 181 passing.
+
 ## [0.1.9+10] — 2026-04-20
 
 ### Added

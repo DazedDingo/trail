@@ -85,6 +85,15 @@
             </intent-filter>
         </activity>
 
+        <!-- Continuous-panic foreground service (Phase 2). `location` type
+             keeps GPS usable while the service is foregrounded on Android 14+.
+             Not exported: only our own package starts/stops it (either from
+             the Flutter MethodChannel or the Phase 3 tile/widget). -->
+        <service
+            android:name=".PanicForegroundService"
+            android:foregroundServiceType="location"
+            android:exported="false"/>
+
         <!-- Boot marker: enqueues a one-off WorkManager task that logs a
              `boot` row and triggers an immediate GPS fix. -->
         <receiver
