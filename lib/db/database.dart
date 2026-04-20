@@ -144,6 +144,24 @@ class TrailDatabase {
     _shared = null;
   }
 
+  /// Runs SQLite's `PRAGMA integrity_check`. A healthy DB returns a single
+  /// row `{ 'integrity_check': 'ok' }`; anything else is a corruption
+  /// signal (the result set lists every malformed index / orphaned row).
+  /// Used by the diagnostics screen so the user can verify the encrypted
+  /// DB isn't silently corrupt without reaching for adb.
+  ///
+  /// Uses the shared UI handle, not a fresh one — a second SQLCipher
+  /// connection on the same file races key derivation (see the 0.1.3
+  /// bug note in CLAUDE.md).
+  static Future<List<String>> integrityCheck() async {
+    final db = await shared();
+    final rows = await db.rawQuery('PRAGMA integrity_check');
+    return rows
+        .map((r) => r.values.first?.toString() ?? '')
+        .where((s) => s.isNotEmpty)
+        .toList(growable: false);
+  }
+
   static Future<void> _onCreate(Database db, int version) async {
     await db.execute('''
       CREATE TABLE pings (

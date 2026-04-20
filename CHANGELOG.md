@@ -4,6 +4,95 @@ All notable changes to **Trail** (gps-pinger) are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.6.0+15] — 2026-04-20
+
+### Added
+
+- **Phase 6: polish.** The last planned phase lands — closes out the
+  diagnostics, heatmap, home-location, and date-range-export items
+  held back from earlier work, plus confirms the adaptive icon is
+  already shipping in the intended neutral style.
+
+  - **Diagnostics screen** at `Settings → Diagnostics`. Permission
+    matrix (fine / background location, battery optimisation,
+    notifications, exact-alarm) loaded in parallel via `Future.wait`,
+    each row showing the `PermissionStatus` with colour-coded iconography.
+    **DB integrity check** button runs `PRAGMA integrity_check` on the
+    shared UI handle and surfaces the result list inline (healthy DB =
+    single `ok` row). **Last 20 worker runs** list sourced from a new
+    `WorkerRunLog` (shared-prefs, rolling, JSON-encoded) that every
+    branch of the WorkManager `_callbackDispatcher` now writes to
+    (`ok` / `no_fix` / `low_battery_skip` / `awaiting_passphrase` /
+    `error`, with a battery-% / reason note). **Copy-all** AppBar
+    action dumps the whole snapshot — version, permissions,
+    recent runs — to clipboard for pasting into a bug report.
+    Screen refreshes on lifecycle resume (`WidgetsBindingObserver`)
+    so returning from the Android settings pane shows the new
+    permission state immediately.
+  - **Date-range export.** The home-screen's "Export GPX" + "Export
+    CSV" pair (both dumped ALL history) collapses to a single
+    "Export…" entry opening an `ExportDialog`. Uses
+    `showDateRangePicker` + a `RadioGroup<ExportFormat>` for
+    GPX+CSV / GPX-only / CSV-only; "All history" stays as a
+    one-tap preset. Filter logic is factored to a pure
+    `filterPingsByRange(rows, range)` (inclusive start, `end` bumped
+    to next-day midnight so a single-day pick covers the whole local
+    day — picker returns 00:00 local for both sides). Empty-range
+    exports surface an inline error instead of sharing an empty file.
+  - **Heatmap overlay** on the map screen. AppBar toggle swaps the
+    path polyline + pins for a density view: pings bucketed into
+    0.001° grid cells (~100 m at the equator), each bucket rendered
+    as a `RadialGradient`-filled `Marker` with radius and alpha
+    scaled to normalised bucket count. Gives a single glance at
+    "where do I actually spend my time" without squinting at
+    overlapping pins.
+  - **Home location.** `Settings → Home` lets the user store a
+    lat/lon + optional label, either by reusing the last successful
+    fix or by manual entry. `HomeLocationService` persists to shared
+    prefs (`trail_home_lat_v1` / `trail_home_lon_v1` /
+    `trail_home_label_v1` / `trail_home_saved_at_v1`). Home screen
+    shows a "`X km from home`" line under the current coords using
+    `HomeLocation.distanceMetersTo` (Haversine, R=6371000). Empty
+    labels normalise to null at write-time so the UI doesn't render
+    an empty title.
+  - **Adaptive icon** confirmed. `mipmap-anydpi-v26/ic_launcher.xml`
+    already ships with a neutral teal Material-pin foreground on
+    `#0E1115` background (plus the round and monochrome variants),
+    matching the PLAN's "neutral / disguised" requirement. No code
+    change needed — documented here so Phase 6 is bookkept complete.
+
+### Changed
+
+- Home-screen layout: coords block now includes a home-distance
+  subtitle when home is set; export row is a single outlined
+  "Export…" button instead of two side-by-side format buttons.
+- Settings screen now has a **Home** section (between Panic and
+  Offline map) with a tile showing the current home label /
+  coords or "Not set" + chevron to the setter screen.
+- `WorkManager` dispatcher records a `WorkerRunLog` entry on every
+  branch — callers don't need to opt in, it's wired at each
+  terminal outcome in `_handleScheduled`, `_handleRetry`,
+  `_handlePanic`, `_handleBoot`, and the `catch` /
+  `PassphraseNeededException` paths.
+
+### Tests
+
+- `home_location_service_test.dart` (10 cases): round-trip
+  lat/lon/label + `savedAt`, null-on-fresh-install,
+  empty-label-normalises-to-null, `clear()` wipes, overwrite
+  semantics, `HomeLocation.distanceMetersTo` Haversine
+  sanity (zero / London↔Paris ≈ 343.6 km / 100 m at equator ≈
+  0.0009° / antipodal ≈ 20 015 km).
+- `worker_run_log_test.dart` (10 cases): empty-on-fresh-install,
+  round-trip, null note, newest-first order, maxEntries trim
+  (25 writes → 20 survivors, oldest dropped), malformed-JSON
+  fallback, non-list-JSON fallback, non-map entry filter,
+  missing-field fallback (`unknown`), trim-then-append stability.
+- `export_dialog_filter_test.dart` (6 cases): null range
+  passthrough, empty input, single-day inclusive/exclusive
+  bounds, multi-day range, input-order preservation.
+- Full suite: **245 tests passing.** `flutter analyze` clean.
+
 ## [0.5.0+14] — 2026-04-20
 
 ### Added

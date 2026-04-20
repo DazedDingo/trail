@@ -10,6 +10,7 @@ import '../db/database.dart';
 import '../db/keystore_key.dart';
 import '../models/ping.dart';
 import '../providers/backup_provider.dart';
+import '../providers/home_location_provider.dart';
 import '../providers/panic_provider.dart';
 import '../providers/pings_provider.dart';
 import '../providers/scheduler_provider.dart';
@@ -149,6 +150,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               );
             },
           ),
+          ListTile(
+            leading: const Icon(Icons.analytics_outlined),
+            title: const Text('Diagnostics'),
+            subtitle: const Text(
+              'Permission matrix, DB integrity check, last 20 worker runs.',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => context.push('/diagnostics'),
+          ),
           const Divider(),
           const _SectionHeader('Scheduling'),
           const _SchedulerModeTile(),
@@ -198,6 +208,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             onTap: () => context.push('/contacts'),
           ),
           const _ContinuousDurationTile(),
+          const Divider(),
+          const _SectionHeader('Home'),
+          const _HomeLocationTile(),
           const Divider(),
           const _SectionHeader('Offline map'),
           ListTile(
@@ -476,6 +489,34 @@ class _SchedulerEventsTile extends ConsumerWidget {
         'workmanager_enqueued' => 'WorkManager task enqueued',
         _ => kind,
       };
+}
+
+/// Entry point to the home-location screen. Shows the currently-set
+/// home beneath the tile so the user can see at a glance whether the
+/// feature is active.
+class _HomeLocationTile extends ConsumerWidget {
+  const _HomeLocationTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final home = ref.watch(homeLocationProvider);
+    final h = home.asData?.value;
+    return ListTile(
+      leading: const Icon(Icons.home_outlined),
+      title: const Text('Home location'),
+      subtitle: Text(
+        h == null
+            ? 'Not set — tap to add a reference point for "km from home".'
+            : h.label != null
+                ? '${h.label} (${h.lat.toStringAsFixed(3)}, '
+                    '${h.lon.toStringAsFixed(3)})'
+                : '${h.lat.toStringAsFixed(5)}, '
+                    '${h.lon.toStringAsFixed(5)}',
+      ),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () => context.push('/home-location'),
+    );
+  }
 }
 
 /// Duration picker for the continuous-panic foreground service. Defaults

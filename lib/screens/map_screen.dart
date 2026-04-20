@@ -31,6 +31,7 @@ class MapScreen extends ConsumerStatefulWidget {
 class _MapScreenState extends ConsumerState<MapScreen> {
   final _controller = MapController();
   bool _showPath = true;
+  bool _showHeatmap = false;
   DateTime? _sliderMax;
   bool _initialFitDone = false;
 
@@ -53,6 +54,15 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           onPressed: () => context.go('/home'),
         ),
         actions: [
+          IconButton(
+            tooltip: _showHeatmap ? 'Hide heatmap' : 'Show heatmap',
+            icon: Icon(
+              _showHeatmap
+                  ? Icons.blur_on
+                  : Icons.blur_circular_outlined,
+            ),
+            onPressed: () => setState(() => _showHeatmap = !_showHeatmap),
+          ),
           IconButton(
             tooltip: _showPath ? 'Hide path line' : 'Show path line',
             icon: Icon(_showPath ? Icons.timeline : Icons.scatter_plot),
@@ -131,7 +141,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             ),
             children: [
               _tileLayer(region),
-              if (_showPath && hasMultiple)
+              if (_showHeatmap && points.isNotEmpty)
+                MarkerLayer(
+                  markers: _buildHeatmapMarkers(points, scheme),
+                ),
+              if (_showPath && hasMultiple && !_showHeatmap)
                 PolylineLayer(
                   polylines: [
                     Polyline(
@@ -141,42 +155,43 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                     ),
                   ],
                 ),
-              MarkerLayer(
-                markers: [
-                  for (int i = 0; i < points.length - 1; i++)
-                    Marker(
-                      point: points[i],
-                      width: 10,
-                      height: 10,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: scheme.primary,
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.85),
-                            width: 1.2,
+              if (!_showHeatmap)
+                MarkerLayer(
+                  markers: [
+                    for (int i = 0; i < points.length - 1; i++)
+                      Marker(
+                        point: points[i],
+                        width: 10,
+                        height: 10,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: scheme.primary,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: Colors.white.withValues(alpha: 0.85),
+                              width: 1.2,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                  if (latest != null)
-                    Marker(
-                      point: latest,
-                      width: 22,
-                      height: 22,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: scheme.tertiary,
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.95),
-                            width: 2.5,
+                    if (latest != null)
+                      Marker(
+                        point: latest,
+                        width: 22,
+                        height: 22,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: scheme.tertiary,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: Colors.white.withValues(alpha: 0.95),
+                              width: 2.5,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                ],
-              ),
+                  ],
+                ),
               _attribution(region),
               Positioned(
                 right: 8,
@@ -247,6 +262,56 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         ),
       ),
     );
+  }
+
+  /// Grid-based heatmap: bucket every fix into a ~0.001° cell (~100 m at
+  /// the equator, proportionally less near the poles — fine for "how
+  /// often do I come to this spot"), then render each cell as one
+  /// translucent circle whose opacity + radius tracks cell density.
+  /// Cheap enough to render every pan; not as pretty as a real KDE but
+  /// needs zero extra packages and survives 10k+ pings without chugging.
+  List<Marker> _buildHeatmapMarkers(List<LatLng> points, ColorScheme scheme) {
+    if (points.isEmpty) return const [];
+    const gridSize = 0.001; // degrees
+    final counts = <String, ({LatLng point, int count})>{};
+    for (final p in points) {
+      final latBucket = (p.latitude / gridSize).round();
+      final lonBucket = (p.longitude / gridSize).round();
+      final key = '$latBucket,$lonBucket';
+      final existing = counts[key];
+      counts[key] = (
+        point: LatLng(latBucket * gridSize, lonBucket * gridSize),
+        count: (existing?.count ?? 0) + 1,
+      );
+    }
+    final maxCount =
+        counts.values.map((e) => e.count).fold<int>(0, (a, b) => a > b ? a : b);
+    final markers = <Marker>[];
+    for (final cell in counts.values) {
+      // Normalise to [0, 1] — single-visit cells still draw at low
+      // opacity so sparse tracks are visible alongside dense hubs.
+      final norm = maxCount <= 1 ? 1.0 : cell.count / maxCount;
+      final radius = 16.0 + norm * 24.0;
+      markers.add(
+        Marker(
+          point: cell.point,
+          width: radius * 2,
+          height: radius * 2,
+          child: Container(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: RadialGradient(
+                colors: [
+                  scheme.tertiary.withValues(alpha: 0.55 * norm + 0.2),
+                  scheme.tertiary.withValues(alpha: 0),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+    return markers;
   }
 
   void _fit(List<LatLng> points) {

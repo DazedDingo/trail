@@ -3,19 +3,16 @@ import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
-import 'package:share_plus/share_plus.dart';
 
-import '../db/database.dart';
-import '../db/ping_dao.dart';
 import '../models/ping.dart';
 import '../providers/contacts_provider.dart';
+import '../providers/home_location_provider.dart';
 import '../providers/mbtiles_provider.dart';
 import '../providers/panic_provider.dart';
 import '../providers/pings_provider.dart';
-import '../services/export/csv_exporter.dart';
-import '../services/export/gpx_exporter.dart';
 import '../services/panic/panic_service.dart';
 import '../widgets/trail_map.dart';
+import 'export_dialog.dart';
 
 /// The app's primary screen.
 ///
@@ -183,6 +180,7 @@ class _LastPingCard extends ConsumerWidget {
                 style: Theme.of(context).textTheme.bodyMedium,
               ),
               _ApproxLocationLine(lat: p.lat!, lon: p.lon!),
+              _HomeDistanceLine(lat: p.lat!, lon: p.lon!),
             ],
           ],
         ),
@@ -230,6 +228,43 @@ class _ApproxLocationLine extends ConsumerWidget {
       },
       loading: () => const SizedBox.shrink(),
       error: (_, __) => const SizedBox.shrink(),
+    );
+  }
+}
+
+/// "X km from home" annotation under the coords. Silent when the user
+/// hasn't set a home location (Settings → Home location), so the card
+/// reads identically for users who never opt in.
+class _HomeDistanceLine extends ConsumerWidget {
+  final double lat;
+  final double lon;
+  const _HomeDistanceLine({required this.lat, required this.lon});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final home = ref.watch(homeLocationProvider);
+    final h = home.asData?.value;
+    if (h == null) return const SizedBox.shrink();
+    final metres = h.distanceMetersTo(lat, lon);
+    final label = metres < 1000
+        ? '${metres.round()} m from home'
+        : '${(metres / 1000).toStringAsFixed(metres < 10000 ? 1 : 0)} km from home';
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Row(
+        children: [
+          Icon(
+            Icons.home_outlined,
+            size: 14,
+            color: Theme.of(context).colorScheme.secondary,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+      ),
     );
   }
 }
@@ -395,37 +430,13 @@ class _SummaryCard extends StatelessWidget {
 class _ExportRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return Row(
-      children: [
-        Expanded(
-          child: OutlinedButton.icon(
-            onPressed: () => _export(context, gpx: true),
-            icon: const Icon(Icons.map_outlined),
-            label: const Text('Export GPX'),
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: OutlinedButton.icon(
-            onPressed: () => _export(context, gpx: false),
-            icon: const Icon(Icons.table_view_outlined),
-            label: const Text('Export CSV'),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Future<void> _export(BuildContext context, {required bool gpx}) async {
-    // Uses the UI-isolate shared handle — do NOT close; see TrailDatabase.
-    final db = await TrailDatabase.shared();
-    final all = await PingDao(db).all();
-    final path = gpx
-        ? await GpxExporter().export(all)
-        : await CsvExporter().export(all);
-    await Share.shareXFiles(
-      [XFile(path)],
-      subject: 'Trail export (${gpx ? "GPX" : "CSV"})',
+    return OutlinedButton.icon(
+      onPressed: () => showDialog<void>(
+        context: context,
+        builder: (_) => const ExportDialog(),
+      ),
+      icon: const Icon(Icons.ios_share),
+      label: const Text('Export…'),
     );
   }
 }

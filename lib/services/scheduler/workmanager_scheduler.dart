@@ -10,6 +10,7 @@ import '../location_service.dart';
 import '../notification_service.dart';
 import '../panic/panic_service.dart';
 import 'scheduler_policy.dart';
+import 'worker_run_log.dart';
 
 /// WorkManager scheduler for the 4h scheduled-ping cadence.
 ///
@@ -149,11 +150,22 @@ void _callbackDispatcher() {
       // just return success and let the next scheduled window try again.
       // The UI gate will have routed the user to /unlock by now anyway.
       debugPrint('[scheduler] Skipping ping — awaiting backup passphrase.');
+      // Dispatcher-level log so the diagnostics screen shows the skip
+      // even though no ping row landed.
+      await WorkerRunLog.record(
+        task: taskName,
+        outcome: 'awaiting_passphrase',
+      );
       return true;
-    } catch (_) {
+    } catch (e) {
       // Never throw out of the worker — WorkManager will mark failed and
       // apply backoff, which we don't want for a transient bug. Swallow and
       // let the next scheduled window pick up.
+      await WorkerRunLog.record(
+        task: taskName,
+        outcome: 'error',
+        note: '$e',
+      );
       return true;
     }
   });
@@ -177,6 +189,11 @@ Future<bool> _handleScheduled() async {
         source: PingSource.noFix,
         note: SchedulerPolicy.skipNote,
       ));
+      await WorkerRunLog.record(
+        task: WorkmanagerScheduler.periodicTaskName,
+        outcome: 'low_battery_skip',
+        note: 'batt=${snapshot.batteryPct}%',
+      );
       return true;
     }
     await dao.insert(snapshot);
@@ -188,6 +205,11 @@ Future<bool> _handleScheduled() async {
     if (SchedulerPolicy.shouldRetry(snapshot)) {
       await WorkmanagerScheduler.enqueueRetry();
     }
+    await WorkerRunLog.record(
+      task: WorkmanagerScheduler.periodicTaskName,
+      outcome: snapshot.source == PingSource.noFix ? 'no_fix' : 'ok',
+      note: snapshot.source == PingSource.noFix ? snapshot.note : null,
+    );
     return true;
   } finally {
     await db.close();
@@ -200,6 +222,11 @@ Future<bool> _handleRetry() async {
   final ping = await location.getScheduledPing();
   try {
     await PingDao(db).insert(ping);
+    await WorkerRunLog.record(
+      task: WorkmanagerScheduler.retryTaskName,
+      outcome: ping.source == PingSource.noFix ? 'no_fix' : 'ok',
+      note: ping.source == PingSource.noFix ? ping.note : null,
+    );
     return true;
   } finally {
     await db.close();
@@ -225,6 +252,11 @@ Future<bool> _handlePanic() async {
     );
     await PingDao(db).insert(ping);
     await NotificationService.postPanicReceipt(ping);
+    await WorkerRunLog.record(
+      task: PanicService.panicTaskName,
+      outcome: ping.source == PingSource.noFix ? 'no_fix' : 'ok',
+      note: ping.source == PingSource.noFix ? ping.note : null,
+    );
     return true;
   } finally {
     await db.close();
@@ -242,6 +274,11 @@ Future<bool> _handleBoot() async {
       source: PingSource.boot,
       note: 'device_boot',
     ));
+    await WorkerRunLog.record(
+      task: WorkmanagerScheduler.bootTaskName,
+      outcome: 'ok',
+      note: 'boot marker written',
+    );
   } finally {
     await db.close();
   }
