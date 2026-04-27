@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.8.0+33] — 2026-04-27
+
+### Added
+- **Beefier white-map diagnostic.** The home-screen overlay now also shows whether the active region's file actually exists on disk and the tail of its path, alongside the last MapLibre event. Lets us spot a wrong path or unreadable file without adb. The earlier compression-mismatch theory turned out to be a wrong byte-mapping on my end — the file is GZIP-compressed, which MapLibre supports.
+
 ## [0.8.0+32] — 2026-04-27
 
 ### Changed

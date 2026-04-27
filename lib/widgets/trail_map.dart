@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:maplibre/maplibre.dart';
 
@@ -202,8 +204,9 @@ class _TrailMapState extends State<TrailMap> {
               borderRadius: BorderRadius.circular(4),
             ),
             child: Text(
-              'Offline: ${widget.activeRegion!.name} · '
-              '© OpenMapTiles © OSM contributors · last: $_lastEvent',
+              'last: $_lastEvent · '
+              'fileExists: ${File(widget.activeRegion!.path).existsSync()} · '
+              'tail: …${_pathTail(widget.activeRegion!.path)}',
               style: const TextStyle(color: Colors.white, fontSize: 10),
             ),
           ),
@@ -230,6 +233,14 @@ class _TrailMapState extends State<TrailMap> {
         ),
       ],
     );
+  }
+
+  /// Last 60 chars of the path so the diagnostic overlay shows enough
+  /// of the filename + parent dir to spot a wrong target without
+  /// running off the screen on small phones.
+  static String _pathTail(String path) {
+    if (path.length <= 60) return path;
+    return path.substring(path.length - 60);
   }
 
   BoxDecoration _frame(ColorScheme scheme) => BoxDecoration(
