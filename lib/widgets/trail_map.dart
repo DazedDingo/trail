@@ -196,18 +196,35 @@ class _TrailMapState extends State<TrailMap> {
         ),
         Positioned(
           left: 6,
+          right: 6,
           bottom: 6,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.55),
-              borderRadius: BorderRadius.circular(4),
+              color: Colors.black.withValues(alpha: 0.7),
+              borderRadius: BorderRadius.circular(6),
             ),
-            child: Text(
-              'last: $_lastEvent · '
-              'fileExists: ${File(widget.activeRegion!.path).existsSync()} · '
-              'tail: …${_pathTail(widget.activeRegion!.path)}',
-              style: const TextStyle(color: Colors.white, fontSize: 10),
+            child: DefaultTextStyle(
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                height: 1.25,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('last: $_lastEvent'),
+                  Text(
+                    'fileExists: '
+                    '${File(widget.activeRegion!.path).existsSync()}',
+                  ),
+                  Text(
+                    'tail: …${_pathTail(widget.activeRegion!.path)}',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
             ),
           ),
         ),

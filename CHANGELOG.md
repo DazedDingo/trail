@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.8.0+34] — 2026-04-27
+
+### Changed
+- Diagnostic overlay rewritten to stack each field on its own line at fontSize 12 instead of cramming everything onto a single fontSize-10 line that clipped off the right edge on a phone. Same content (`last:`, `fileExists:`, `tail:`).
+
 ## [0.8.0+33] — 2026-04-27
 
 ### Added
