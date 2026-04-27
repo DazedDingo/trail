@@ -31,6 +31,11 @@ class TrailMap extends StatefulWidget {
 class _TrailMapState extends State<TrailMap> {
   MapController? _controller;
   Future<String?>? _styleFuture;
+  // Diagnostics: surface the most recent MapLibre event so a "white map"
+  // failure can be triaged without adb logcat. Once we see consistent
+  // `MapEventStyleLoaded` in the field this overlay can come out (or
+  // move behind a debug flag).
+  String _lastEvent = 'mounting…';
 
   @override
   void initState() {
@@ -140,6 +145,7 @@ class _TrailMapState extends State<TrailMap> {
           ),
           onMapCreated: (c) {
             _controller = c;
+            if (mounted) setState(() => _lastEvent = 'mapCreated');
           },
           onStyleLoaded: (_) {
             // Style is loaded — fit camera to the trail bbox once vector
@@ -147,6 +153,12 @@ class _TrailMapState extends State<TrailMap> {
             // `onMapCreated` avoids a flicker where the camera fits while
             // the style is still parsing.
             _fitToPings(fixes);
+            if (mounted) setState(() => _lastEvent = 'styleLoaded');
+          },
+          onEvent: (e) {
+            if (!mounted) return;
+            final name = e.runtimeType.toString().replaceFirst('MapEvent', '');
+            setState(() => _lastEvent = name);
           },
           layers: [
             if (positions.length >= 2)
@@ -191,7 +203,7 @@ class _TrailMapState extends State<TrailMap> {
             ),
             child: Text(
               'Offline: ${widget.activeRegion!.name} · '
-              '© OpenMapTiles © OSM contributors',
+              '© OpenMapTiles © OSM contributors · last: $_lastEvent',
               style: const TextStyle(color: Colors.white, fontSize: 10),
             ),
           ),

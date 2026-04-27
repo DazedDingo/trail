@@ -4,6 +4,14 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.8.0+31] — 2026-04-27
+
+### Fixed
+- **Style asset paths inside the bundled `style.json` were missing the `flutter_assets/` prefix.** Flutter packages every pubspec asset into the APK at `assets/flutter_assets/<key>`, but maplibre-native Android's `asset://` resolver reads paths relative to `<APK>/assets/`. Glyph and sprite URLs now use `asset://flutter_assets/assets/maptiles/...`. This was a strong candidate for the lingering "white map" report on top of the +30 PMTiles URL fix.
+
+### Added
+- **Diagnostic overlay on the home-screen trail preview.** The bottom-left attribution strip now appends `last: <event>` showing the most recent MapLibre map event — `mapCreated`, `styleLoaded`, `cameraIdle`, etc. If the map renders white, the last event reveals whether the style ever loaded (vs tiles failing afterwards). Will be removed once the renderer settles in production.
+
 ## [0.8.0+30] — 2026-04-27
 
 ### Fixed

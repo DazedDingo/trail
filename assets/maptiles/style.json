@@ -12,8 +12,8 @@
       "url": "pmtiles://__TRAIL_ACTIVE_REGION__"
     }
   },
-  "sprite": "asset://assets/maptiles/sprites/osm-liberty",
-  "glyphs": "asset://assets/maptiles/glyphs/{fontstack}/{range}.pbf",
+  "sprite": "asset://flutter_assets/assets/maptiles/sprites/osm-liberty",
+  "glyphs": "asset://flutter_assets/assets/maptiles/glyphs/{fontstack}/{range}.pbf",
   "layers": [
     {
       "id": "background",
