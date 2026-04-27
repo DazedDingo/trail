@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:maplibre/maplibre.dart';
 
 import '../models/ping.dart';
@@ -198,34 +199,66 @@ class _TrailMapState extends State<TrailMap> {
           left: 6,
           right: 6,
           bottom: 6,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.7),
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: DefaultTextStyle(
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                height: 1.25,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text('last: $_lastEvent'),
-                  Text(
-                    'fileExists: '
-                    '${File(widget.activeRegion!.path).existsSync()}',
+          child: Builder(
+            builder: (context) {
+              final exists =
+                  File(widget.activeRegion!.path).existsSync();
+              final dump = 'last: $_lastEvent\n'
+                  'fileExists: $exists\n'
+                  'path: ${widget.activeRegion!.path}';
+              return Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(6),
+                  onTap: () async {
+                    await Clipboard.setData(ClipboardData(text: dump));
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Map diagnostic copied'),
+                        duration: Duration(seconds: 2),
+                      ),
+                    );
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.7),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: DefaultTextStyle(
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        height: 1.25,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('last: $_lastEvent'),
+                          Text('fileExists: $exists'),
+                          Text(
+                            'tail: …${_pathTail(widget.activeRegion!.path)}',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 2),
+                          const Text(
+                            '(tap to copy full path)',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Colors.white70,
+                              fontStyle: FontStyle.italic,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
-                  Text(
-                    'tail: …${_pathTail(widget.activeRegion!.path)}',
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ),
-            ),
+                ),
+              );
+            },
           ),
         ),
         Positioned(

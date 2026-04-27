@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.8.0+36] — 2026-04-27
+
+### Changed
+- Diagnostic overlay on the home-screen trail preview is now tap-to-copy. Tapping the panel writes `last: …, fileExists: …, path: <full path>` to the clipboard and surfaces a brief "copied" SnackBar — easier than reading and spelling out the path on a phone.
+
 ## [0.8.0+35] — 2026-04-27
 
 ### Added
