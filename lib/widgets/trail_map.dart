@@ -1,22 +1,21 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
-import 'package:flutter_map_mbtiles/flutter_map_mbtiles.dart';
-import 'package:latlong2/latlong.dart';
+import 'package:maplibre/maplibre.dart';
 
 import '../models/ping.dart';
 import '../services/mbtiles_service.dart';
+import '../services/trail_style.dart';
 
 /// Interactive map of the user's recent ping trail.
 ///
-/// Uses `flutter_map`. Tile source prefers an active MBTiles region
-/// (set in the Regions screen) and falls back to OpenStreetMap raster
-/// tiles when no region is installed. Passing `activeRegion: null` at
-/// the callsite keeps the widget usable in tests without spinning up a
-/// real file.
+/// Renders a `MapLibreMap` over the user's active offline region — the
+/// app is offline-only, so when no region is installed the widget shows
+/// a placeholder pointing at Settings → Offline map → Regions instead
+/// of mounting the map. Passing `activeRegion: null` at the callsite
+/// keeps the widget usable in tests without spinning up a real file.
 class TrailMap extends StatefulWidget {
   final List<Ping> pings;
   final double height;
-  final MBTilesRegion? activeRegion;
+  final TilesRegion? activeRegion;
 
   const TrailMap({
     super.key,
@@ -30,22 +29,24 @@ class TrailMap extends StatefulWidget {
 }
 
 class _TrailMapState extends State<TrailMap> {
-  final _controller = MapController();
+  MapController? _controller;
+  Future<String?>? _styleFuture;
 
   @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
+  void initState() {
+    super.initState();
+    _styleFuture = TrailStyle.loadForRegion(widget.activeRegion?.path);
   }
 
   @override
   void didUpdateWidget(covariant TrailMap oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // When a new ping lands, recenter on the latest fix so the user's
-    // current position stays on-screen across the 4h cadence.
+    if (oldWidget.activeRegion?.path != widget.activeRegion?.path) {
+      _styleFuture = TrailStyle.loadForRegion(widget.activeRegion?.path);
+    }
     final oldFixes = _fixesOf(oldWidget.pings);
     final newFixes = _fixesOf(widget.pings);
-    if (newFixes.isEmpty) return;
+    if (newFixes.isEmpty || _controller == null) return;
     final newestChanged = oldFixes.isEmpty ||
         oldFixes.first.timestampUtc != newFixes.first.timestampUtc;
     if (newestChanged) {
@@ -58,20 +59,23 @@ class _TrailMapState extends State<TrailMap> {
       .toList(growable: false);
 
   void _fitToPings(List<Ping> fixes) {
-    if (fixes.isEmpty) return;
+    final c = _controller;
+    if (c == null || fixes.isEmpty) return;
     if (fixes.length == 1) {
-      _controller.move(LatLng(fixes.first.lat!, fixes.first.lon!), 14);
+      c.animateCamera(
+        center: Geographic(lon: fixes.first.lon!, lat: fixes.first.lat!),
+        zoom: 14,
+      );
       return;
     }
-    final bounds = LatLngBounds.fromPoints(
-      fixes.map((p) => LatLng(p.lat!, p.lon!)).toList(),
+    final bounds = LngLatBounds.fromPoints(
+      fixes
+          .map((p) => Geographic(lon: p.lon!, lat: p.lat!))
+          .toList(growable: false),
     );
-    _controller.fitCamera(
-      CameraFit.bounds(
-        bounds: bounds,
-        padding: const EdgeInsets.all(32),
-        maxZoom: 15,
-      ),
+    c.fitBounds(
+      bounds: bounds,
+      padding: const EdgeInsets.all(32),
     );
   }
 
@@ -87,146 +91,132 @@ class _TrailMapState extends State<TrailMap> {
         message: 'No fixes yet — trail will appear after a few pings.',
       );
     }
-
-    final points =
-        fixes.map((p) => LatLng(p.lat!, p.lon!)).toList(growable: false);
-    final latest = points.first;
+    if (widget.activeRegion == null) {
+      return _PlaceholderFrame(
+        height: widget.height,
+        scheme: scheme,
+        message:
+            'Install an offline map region to see your trail. '
+            'Settings → Offline map → Regions.',
+      );
+    }
 
     return Container(
       height: widget.height,
       decoration: _frame(scheme),
       clipBehavior: Clip.antiAlias,
-      child: Stack(
-        children: [
-          FlutterMap(
-            mapController: _controller,
-            options: MapOptions(
-              initialCenter: latest,
-              initialZoom: 14,
-              minZoom: 2,
-              maxZoom: 18,
-              // Bound the camera so users can't pan off into the void on
-              // a fresh install where only one fix exists yet.
-              cameraConstraint: const CameraConstraint.unconstrained(),
-              interactionOptions: const InteractionOptions(
-                flags: InteractiveFlag.pinchZoom |
-                    InteractiveFlag.drag |
-                    InteractiveFlag.doubleTapZoom |
-                    InteractiveFlag.flingAnimation |
-                    InteractiveFlag.scrollWheelZoom,
-              ),
-            ),
-            children: [
-              if (widget.activeRegion != null)
-                TileLayer(
-                  tileProvider: MbTilesTileProvider.fromPath(
-                    path: widget.activeRegion!.path,
-                  ),
-                  maxZoom: 18,
-                )
-              else
-                TileLayer(
-                  urlTemplate:
-                      'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                  userAgentPackageName: 'com.dazeddingo.trail',
-                  maxZoom: 19,
-                  // No retina flag — OSM's standard tiles are 256 px and
-                  // doubling the request rate would risk tripping their
-                  // fair-use policy for a tiny personal-safety app.
-                ),
-              if (points.length >= 2)
-                PolylineLayer(
-                  polylines: [
-                    Polyline(
-                      points: points,
-                      strokeWidth: 3,
-                      color: scheme.primary.withValues(alpha: 0.85),
-                    ),
-                  ],
-                ),
-              MarkerLayer(
-                markers: [
-                  for (int i = 1; i < points.length; i++)
-                    Marker(
-                      point: points[i],
-                      width: 12,
-                      height: 12,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: scheme.primary,
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.85),
-                            width: 1.5,
-                          ),
-                        ),
-                      ),
-                    ),
-                  // Latest fix — larger, tertiary colour so it pops
-                  // against the rest of the trail.
-                  Marker(
-                    point: latest,
-                    width: 22,
-                    height: 22,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: scheme.tertiary,
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: Colors.white.withValues(alpha: 0.95),
-                          width: 2.5,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          // OSM requires attribution on the map surface itself. Keep it
-          // unobtrusive but legible — a white pill in the corner.
-          Positioned(
-            left: 6,
-            bottom: 6,
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.55),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Text(
-                widget.activeRegion != null
-                    ? 'Offline: ${widget.activeRegion!.name}'
-                    : '© OpenStreetMap',
-                style: const TextStyle(color: Colors.white, fontSize: 10),
-              ),
-            ),
-          ),
-          // Recenter/refit button — cheap affordance since panning can
-          // get the user lost on a small viewport.
-          Positioned(
-            right: 6,
-            top: 6,
-            child: Material(
-              color: Colors.black.withValues(alpha: 0.55),
-              shape: const CircleBorder(),
-              child: InkWell(
-                customBorder: const CircleBorder(),
-                onTap: () => _fitToPings(fixes),
-                child: const Padding(
-                  padding: EdgeInsets.all(6),
-                  child: Icon(
-                    Icons.center_focus_strong,
-                    color: Colors.white,
-                    size: 18,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
+      child: FutureBuilder<String?>(
+        future: _styleFuture,
+        builder: (context, snap) {
+          if (!snap.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          return _buildMap(context, fixes, snap.data!, scheme);
+        },
       ),
+    );
+  }
+
+  Widget _buildMap(
+    BuildContext context,
+    List<Ping> fixes,
+    String styleJson,
+    ColorScheme scheme,
+  ) {
+    final positions = fixes
+        .map((p) => [p.lon!, p.lat!].xy)
+        .toList(growable: false);
+    final latest = positions.last;
+
+    return Stack(
+      children: [
+        MapLibreMap(
+          options: MapOptions(
+            initStyle: styleJson,
+            initCenter: Geographic(lon: latest.x, lat: latest.y),
+            initZoom: 14,
+            minZoom: 2,
+            maxZoom: 18,
+          ),
+          onMapCreated: (c) {
+            _controller = c;
+          },
+          onStyleLoaded: (_) {
+            // Style is loaded — fit camera to the trail bbox once vector
+            // tiles can render. Doing this in `onStyleLoaded` rather than
+            // `onMapCreated` avoids a flicker where the camera fits while
+            // the style is still parsing.
+            _fitToPings(fixes);
+          },
+          layers: [
+            if (positions.length >= 2)
+              PolylineLayer(
+                polylines: [
+                  Feature(geometry: LineString.from(positions)),
+                ],
+                color: scheme.primary.withValues(alpha: 0.85),
+                width: 3,
+              ),
+            // All non-latest fixes — small primary-colour dots.
+            if (positions.length > 1)
+              CircleLayer(
+                points: [
+                  for (int i = 0; i < positions.length - 1; i++)
+                    Feature(geometry: Point(positions[i])),
+                ],
+                radius: 4,
+                color: scheme.primary,
+                strokeWidth: 1,
+                strokeColor: Colors.white.withValues(alpha: 0.85),
+              ),
+            // Latest fix — larger tertiary-colour dot, drawn after the
+            // others so it always sits on top.
+            CircleLayer(
+              points: [Feature(geometry: Point(latest))],
+              radius: 8,
+              color: scheme.tertiary,
+              strokeWidth: 2,
+              strokeColor: Colors.white.withValues(alpha: 0.95),
+            ),
+          ],
+        ),
+        Positioned(
+          left: 6,
+          bottom: 6,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.55),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              'Offline: ${widget.activeRegion!.name} · '
+              '© OpenMapTiles © OSM contributors',
+              style: const TextStyle(color: Colors.white, fontSize: 10),
+            ),
+          ),
+        ),
+        Positioned(
+          right: 6,
+          top: 6,
+          child: Material(
+            color: Colors.black.withValues(alpha: 0.55),
+            shape: const CircleBorder(),
+            child: InkWell(
+              customBorder: const CircleBorder(),
+              onTap: () => _fitToPings(fixes),
+              child: const Padding(
+                padding: EdgeInsets.all(6),
+                child: Icon(
+                  Icons.center_focus_strong,
+                  color: Colors.white,
+                  size: 18,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 

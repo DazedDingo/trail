@@ -23,10 +23,11 @@
 -->
 <full-backup-content>
     <include domain="file" path="."/>
-    <!-- Phase 4 MBTiles regions. Sideloaded raster basemaps can reach
-         200-600 MB each and would blow Android's 25 MB per-app cloud
-         backup quota; the user re-sideloads via Settings → Regions
-         after restore (see docs/TILES.md). Exclusion is valid here
-         because the path is inside an included path. -->
-    <exclude domain="file" path="mbtiles/"/>
+    <!-- Sideloaded `.pmtiles` regions. Vector basemaps still run
+         50-700 MB each (Lake-District-only to UK-z13) and would blow
+         Android's 25 MB per-app cloud-backup quota; the user
+         re-sideloads via Settings → Regions after restore (see
+         docs/TILES.md). Exclusion is valid here because the path is
+         inside an included path. -->
+    <exclude domain="file" path="tiles/"/>
 </full-backup-content>

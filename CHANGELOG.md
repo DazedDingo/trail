@@ -4,6 +4,16 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.7.2+28] — 2026-04-27
+
+### Changed
+- **Map renderer cutover: vector PMTiles via MapLibre** (Phase 7). The home-screen trail preview and the full-screen history map now render vector tiles from sideloaded `.pmtiles` files, replacing the previous raster `.mbtiles` path. Vector tiles are 5–10× smaller for the same coverage and produce smoother labels and lines at all zooms. The Regions screen file picker now accepts `.pmtiles`; the storage directory moved from `<docs>/mbtiles/` to `<docs>/tiles/`. The active-region preference key was reset deliberately — old `.mbtiles` files can't be read by the new renderer, so the active selection clears on first launch and you reinstall the region.
+- **No more online OSM fallback.** Without an active region, the map screen shows an "install a region" prompt rather than streaming raster tiles from openstreetmap.org. Trail's design has been offline-only since Phase 1; the tile fallback was an inconsistent leftover.
+
+### Removed
+- `flutter_map`, `flutter_map_mbtiles`, `latlong2`, `polylabel`, and a handful of transitive map deps. `maplibre` covers the whole rendering layer now.
+- The custom 0.001°-grid heatmap bucketing in `map_screen.dart`. Heatmap mode now renders one blurred translucent CircleLayer over every fix and lets overlapping circles produce the hot spots — handles 10k+ pings on the GPU without re-bucketing on pan.
+
 ## [0.7.2+27] — 2026-04-27
 
 ### Added

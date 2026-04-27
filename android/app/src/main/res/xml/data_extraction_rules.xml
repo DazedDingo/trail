@@ -19,15 +19,16 @@
 <data-extraction-rules>
     <cloud-backup>
         <include domain="file" path="."/>
-        <!-- Phase 4 MBTiles regions: too large for the 25 MB per-app
-             cloud quota and trivially re-sideloaded after restore. -->
-        <exclude domain="file" path="mbtiles/"/>
+        <!-- Sideloaded `.pmtiles` regions: too large for the 25 MB
+             per-app cloud quota and trivially re-sideloaded after
+             restore. -->
+        <exclude domain="file" path="tiles/"/>
     </cloud-backup>
     <device-transfer>
         <include domain="file" path="."/>
         <!-- Same rationale as cloud-backup. D2D could technically
              handle the size, but keeping the rules symmetric avoids
              surprise state after a device migration. -->
-        <exclude domain="file" path="mbtiles/"/>
+        <exclude domain="file" path="tiles/"/>
     </device-transfer>
 </data-extraction-rules>

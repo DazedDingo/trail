@@ -1,8 +1,17 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:trail/models/ping.dart';
+import 'package:trail/services/mbtiles_service.dart';
 import 'package:trail/widgets/trail_map.dart';
+
+/// Widget-test coverage for [TrailMap].
+///
+/// We cover the **placeholder** branches (zero fixes, no region installed)
+/// because those render pure Flutter widgets we can assert on. We do
+/// *not* mount [TrailMap] with a real region in tests — that path
+/// instantiates `MapLibreMap`, which talks to the native platform view
+/// layer that doesn't exist in `flutter_test`. The map render itself is
+/// covered by `maplibre`'s own integration tests upstream.
 
 Ping _fix({required DateTime ts, double lat = 42.37, double lon = -71.10}) =>
     Ping(
@@ -23,26 +32,21 @@ Future<void> _pumpWith(WidgetTester tester, Widget child) async {
       home: Scaffold(body: child),
     ),
   );
-  // flutter_map kicks off async tile + layout work on first frame. Without
-  // a settle pump, widget-tree assertions race the map's initial build and
-  // intermittently can't find FlutterMap's child layers.
   await tester.pump(const Duration(milliseconds: 50));
 }
 
 void main() {
-  group('TrailMap', () {
+  group('TrailMap placeholder branches', () {
     testWidgets('renders a helpful message when there are zero fixes',
         (tester) async {
       await _pumpWith(tester, const TrailMap(pings: []));
       expect(find.textContaining('No fixes yet'), findsOneWidget);
-      // Placeholder path — no map should be built at all.
-      expect(find.byType(FlutterMap), findsNothing);
     });
 
     testWidgets('ignores rows without lat/lon when counting fixes',
         (tester) async {
-      // Two no_fix rows + zero real fixes should hit the placeholder,
-      // not render an empty map.
+      // Two no_fix rows + zero real fixes should hit the "no fixes"
+      // placeholder, not try to mount the map.
       await _pumpWith(
         tester,
         TrailMap(pings: [
@@ -51,64 +55,33 @@ void main() {
         ]),
       );
       expect(find.textContaining('No fixes yet'), findsOneWidget);
-      expect(find.byType(FlutterMap), findsNothing);
     });
 
-    testWidgets('renders a FlutterMap centered on a single fix',
-        (tester) async {
-      // A single fix is enough to drop a pin — no reason to hide the map.
+    testWidgets('shows the install-region prompt when fixes exist but no '
+        'region is active', (tester) async {
+      // App is offline-only — no online tile fallback. Without a region
+      // installed the widget must point the user at the regions screen
+      // rather than mounting a blank or broken map.
       await _pumpWith(
         tester,
         TrailMap(pings: [_fix(ts: DateTime.utc(2026, 4, 18))]),
       );
-      expect(find.byType(FlutterMap), findsOneWidget);
-      expect(find.textContaining('© OpenStreetMap'), findsOneWidget);
+      expect(find.textContaining('Install an offline map region'),
+          findsOneWidget);
+      expect(find.textContaining('Settings'), findsOneWidget);
     });
+  });
 
-    testWidgets('renders polyline + markers with multiple fixes',
-        (tester) async {
-      final pings = List.generate(
-        5,
-        (i) => _fix(
-          ts: DateTime.utc(2026, 4, 18, i * 4),
-          lat: 42.37 + i * 0.01,
-          lon: -71.10 + i * 0.01,
-        ),
+  group('TilesRegion (used by TrailMap)', () {
+    test('has a name, path, and byte size', () {
+      const region = TilesRegion(
+        name: 'gb',
+        path: '/data/files/tiles/gb.pmtiles',
+        bytes: 511 * 1024 * 1024,
       );
-      await _pumpWith(tester, TrailMap(pings: pings));
-      expect(find.byType(FlutterMap), findsOneWidget);
-      expect(find.byType(PolylineLayer), findsOneWidget);
-      expect(find.byType(MarkerLayer), findsOneWidget);
-    });
-
-    testWidgets('handles degenerate bbox (all pings at one spot)',
-        (tester) async {
-      // Three fixes at identical coords — fitCamera mustn't NaN on a
-      // zero-span LatLngBounds.
-      final pings = List.generate(
-        3,
-        (i) => _fix(
-          ts: DateTime.utc(2026, 4, 18, i * 4),
-          lat: 42.37,
-          lon: -71.10,
-        ),
-      );
-      await _pumpWith(tester, TrailMap(pings: pings));
-      expect(tester.takeException(), isNull);
-      expect(find.byType(FlutterMap), findsOneWidget);
-    });
-
-    testWidgets('has a recenter button in the corner', (tester) async {
-      final pings = List.generate(
-        3,
-        (i) => _fix(
-          ts: DateTime.utc(2026, 4, 18, i * 4),
-          lat: 42.37 + i * 0.01,
-          lon: -71.10 + i * 0.01,
-        ),
-      );
-      await _pumpWith(tester, TrailMap(pings: pings));
-      expect(find.byIcon(Icons.center_focus_strong), findsOneWidget);
+      expect(region.name, 'gb');
+      expect(region.path, '/data/files/tiles/gb.pmtiles');
+      expect(region.bytes, 511 * 1024 * 1024);
     });
   });
 }

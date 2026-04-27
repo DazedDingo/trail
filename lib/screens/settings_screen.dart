@@ -226,7 +226,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             leading: const Icon(Icons.map_outlined),
             title: const Text('Regions'),
             subtitle: const Text(
-              'Install sideloaded .mbtiles for an offline viewer. '
+              'Install sideloaded .pmtiles for an offline viewer. '
               'See docs/TILES.md for build pipeline.',
             ),
             trailing: const Icon(Icons.chevron_right),

@@ -9,7 +9,7 @@ import '../services/mbtiles_service.dart';
 /// Offline-map region library.
 ///
 /// The logging pipeline is already fully offline; this screen makes the
-/// history *viewer* offline too by letting the user sideload `.mbtiles`
+/// history *viewer* offline too by letting the user sideload `.pmtiles`
 /// files built from OpenStreetMap on a PC (see `docs/TILES.md`).
 class RegionsScreen extends ConsumerWidget {
   const RegionsScreen({super.key});
@@ -62,16 +62,16 @@ class RegionsScreen extends ConsumerWidget {
     if (result == null || result.files.isEmpty) return;
     final path = result.files.single.path;
     if (path == null) return;
-    if (!path.toLowerCase().endsWith('.mbtiles')) {
+    if (!path.toLowerCase().endsWith('.pmtiles')) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Pick a .mbtiles file')),
+          const SnackBar(content: Text('Pick a .pmtiles file')),
         );
       }
       return;
     }
     try {
-      await MBTilesService.install(path);
+      await TilesService.install(path);
       ref.invalidate(installedRegionsProvider);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -89,13 +89,13 @@ class RegionsScreen extends ConsumerWidget {
 }
 
 class _Header extends StatelessWidget {
-  final MBTilesRegion? activeRegion;
+  final TilesRegion? activeRegion;
   const _Header({required this.activeRegion});
 
   @override
   Widget build(BuildContext context) {
     final text = activeRegion == null
-        ? 'No active region — map viewer uses online OpenStreetMap tiles.'
+        ? 'No active region — map viewer is empty until one is set.'
         : 'Active: ${activeRegion!.name} · viewer reads from this file.';
     return Card(
       child: Padding(
@@ -103,7 +103,7 @@ class _Header extends StatelessWidget {
         child: Row(
           children: [
             Icon(
-              activeRegion == null ? Icons.cloud : Icons.storage,
+              activeRegion == null ? Icons.map_outlined : Icons.storage,
               size: 20,
             ),
             const SizedBox(width: 10),
@@ -116,7 +116,7 @@ class _Header extends StatelessWidget {
 }
 
 class _RegionTile extends ConsumerWidget {
-  final MBTilesRegion region;
+  final TilesRegion region;
   final bool isActive;
   const _RegionTile({required this.region, required this.isActive});
 
@@ -163,11 +163,11 @@ class _RegionTile extends ConsumerWidget {
   ) async {
     switch (action) {
       case _RegionAction.setActive:
-        await MBTilesService.setActive(region);
+        await TilesService.setActive(region);
         ref.invalidate(activeRegionProvider);
         break;
       case _RegionAction.clearActive:
-        await MBTilesService.clearActive();
+        await TilesService.clearActive();
         ref.invalidate(activeRegionProvider);
         break;
       case _RegionAction.delete:
@@ -191,7 +191,7 @@ class _RegionTile extends ConsumerWidget {
           ),
         );
         if (ok == true) {
-          await MBTilesService.delete(region);
+          await TilesService.delete(region);
           ref.invalidate(installedRegionsProvider);
           ref.invalidate(activeRegionProvider);
         }
@@ -224,15 +224,15 @@ class _EmptyState extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(
-            'Tap Install and pick a .mbtiles file. See docs/TILES.md '
+            'Tap Install and pick a .pmtiles file. See docs/TILES.md '
             'for building one on your PC.',
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 12),
           Text(
-            'Without a region installed, the map viewer uses online '
-            'OpenStreetMap tiles — fine for testing, needs network.',
+            'The map viewer is offline-only — without a region installed '
+            'the map screen shows an empty state.',
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: Theme.of(context).colorScheme.onSurfaceVariant,

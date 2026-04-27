@@ -1,23 +1,23 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
-import 'package:flutter_map_mbtiles/flutter_map_mbtiles.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
-import 'package:latlong2/latlong.dart';
+import 'package:maplibre/maplibre.dart';
 
 import '../models/ping.dart';
 import '../providers/mbtiles_provider.dart';
 import '../providers/pings_provider.dart';
 import '../services/mbtiles_service.dart';
+import '../services/trail_style.dart';
 
 /// Full-screen history map with time slider + path toggle + bbox-fit.
 ///
-/// Tile source preference, in order:
-///   1. Active MBTiles region (fully offline) — picked in Regions screen.
-///   2. OpenStreetMap online tiles — fallback when nothing is installed.
+/// Uses `MapLibreMap` against a sideloaded `.pmtiles` region — the app
+/// is offline-only, so when no region is installed the screen shows an
+/// empty state pointing to Settings → Offline map → Regions instead of
+/// rendering a map.
 ///
 /// The time slider filters pings down to those logged at-or-before the
 /// slider's timestamp; dragging it back in time rewinds the trail.
@@ -34,7 +34,10 @@ class MapScreen extends ConsumerStatefulWidget {
 }
 
 class _MapScreenState extends ConsumerState<MapScreen> {
-  final _controller = MapController();
+  MapController? _controller;
+  Future<String?>? _styleFuture;
+  String? _activeRegionPath;
+
   bool _showPath = true;
   bool _showHeatmap = false;
   DateTime? _sliderMax;
@@ -54,14 +57,20 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   @override
   void dispose() {
     _playbackTimer?.cancel();
-    _controller.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final pingsAsync = ref.watch(allPingsProvider);
-    final activeRegion = ref.watch(activeRegionProvider);
+    final activeRegion = ref.watch(activeRegionProvider).valueOrNull;
+
+    // Lazily (re)load the style JSON whenever the active region changes.
+    if (activeRegion?.path != _activeRegionPath) {
+      _activeRegionPath = activeRegion?.path;
+      _styleFuture = TrailStyle.loadForRegion(_activeRegionPath);
+      _initialFitDone = false;
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -103,18 +112,27 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               .where((p) => p.lat != null && p.lon != null)
               .toList(growable: false);
           if (fixes.isEmpty) {
-            return const _EmptyState();
+            return const _EmptyState(
+              message: 'No fixes yet — trail will appear after a few pings.',
+            );
           }
-          return _buildMap(context, fixes, activeRegion.valueOrNull);
+          if (activeRegion == null) {
+            return const _EmptyState(
+              message:
+                  'Install an offline map region to see your trail. '
+                  'Tap the Regions icon (top right) → Install.',
+            );
+          }
+          return _buildBody(context, fixes, activeRegion);
         },
       ),
     );
   }
 
-  Widget _buildMap(
+  Widget _buildBody(
     BuildContext context,
     List<Ping> fixes,
-    MBTilesRegion? region,
+    TilesRegion region,
   ) {
     // Already chronological (oldest-first) thanks to allPingsProvider.
     final chrono = fixes;
@@ -125,112 +143,17 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         .where((p) => !p.timestampUtc.isAfter(sliderMax))
         .toList(growable: false);
 
-    final points =
-        visible.map((p) => LatLng(p.lat!, p.lon!)).toList(growable: false);
-    final scheme = Theme.of(context).colorScheme;
-    final hasMultiple = points.length >= 2;
-    final latest = points.isNotEmpty ? points.last : null;
-
-    // Lazy bbox-fit after first paint. `addPostFrameCallback` is the
-    // only safe place to touch MapController in initial build.
-    if (!_initialFitDone && points.isNotEmpty) {
-      _initialFitDone = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) => _fit(points));
-    }
-
     return Column(
       children: [
         Expanded(
-          child: FlutterMap(
-            mapController: _controller,
-            options: MapOptions(
-              initialCenter: latest ?? const LatLng(0, 0),
-              initialZoom: 13,
-              minZoom: 2,
-              maxZoom: 18,
-              interactionOptions: const InteractionOptions(
-                flags: InteractiveFlag.pinchZoom |
-                    InteractiveFlag.drag |
-                    InteractiveFlag.doubleTapZoom |
-                    InteractiveFlag.flingAnimation |
-                    InteractiveFlag.scrollWheelZoom,
-              ),
-            ),
-            children: [
-              _tileLayer(region),
-              if (_showHeatmap && points.isNotEmpty)
-                MarkerLayer(
-                  markers: _buildHeatmapMarkers(points, scheme),
-                ),
-              if (_showPath && hasMultiple && !_showHeatmap)
-                PolylineLayer(
-                  polylines: [
-                    Polyline(
-                      points: points,
-                      strokeWidth: 3,
-                      color: scheme.primary.withValues(alpha: 0.85),
-                    ),
-                  ],
-                ),
-              if (!_showHeatmap)
-                MarkerLayer(
-                  markers: [
-                    for (int i = 0; i < points.length - 1; i++)
-                      Marker(
-                        point: points[i],
-                        width: 10,
-                        height: 10,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: scheme.primary,
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color: Colors.white.withValues(alpha: 0.85),
-                              width: 1.2,
-                            ),
-                          ),
-                        ),
-                      ),
-                    if (latest != null)
-                      Marker(
-                        point: latest,
-                        width: 22,
-                        height: 22,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: scheme.tertiary,
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color: Colors.white.withValues(alpha: 0.95),
-                              width: 2.5,
-                            ),
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              _attribution(region),
-              Positioned(
-                right: 8,
-                top: 8,
-                child: Material(
-                  color: Colors.black.withValues(alpha: 0.55),
-                  shape: const CircleBorder(),
-                  child: InkWell(
-                    customBorder: const CircleBorder(),
-                    onTap: () => _fit(points),
-                    child: const Padding(
-                      padding: EdgeInsets.all(8),
-                      child: Icon(
-                        Icons.center_focus_strong,
-                        color: Colors.white,
-                        size: 20,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
+          child: FutureBuilder<String?>(
+            future: _styleFuture,
+            builder: (context, snap) {
+              if (!snap.hasData) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              return _buildMap(context, visible, snap.data!, region);
+            },
           ),
         ),
         _TimeSlider(
@@ -265,6 +188,161 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           onCycleSpeed: _cycleSpeed,
         ),
       ],
+    );
+  }
+
+  Widget _buildMap(
+    BuildContext context,
+    List<Ping> visibleFixes,
+    String styleJson,
+    TilesRegion region,
+  ) {
+    final scheme = Theme.of(context).colorScheme;
+    final positions = visibleFixes
+        .map((p) => [p.lon!, p.lat!].xy)
+        .toList(growable: false);
+    final hasMultiple = positions.length >= 2;
+    final latest = positions.isNotEmpty ? positions.last : null;
+    final initial = latest ?? [-2.0, 54.0].xy; // fallback: middle of GB
+
+    return Stack(
+      children: [
+        MapLibreMap(
+          options: MapOptions(
+            initStyle: styleJson,
+            initCenter: Geographic(lon: initial.x, lat: initial.y),
+            initZoom: 13,
+            minZoom: 2,
+            maxZoom: 18,
+          ),
+          onMapCreated: (c) {
+            _controller = c;
+          },
+          onStyleLoaded: (_) {
+            // Fit to all visible fixes once vector tiles can render.
+            // `_initialFitDone` keeps subsequent slider drags from
+            // re-snapping the camera back to the bbox.
+            if (!_initialFitDone && positions.isNotEmpty) {
+              _initialFitDone = true;
+              _fit(positions);
+            }
+          },
+          layers: _layersFor(positions, hasMultiple, latest, scheme),
+        ),
+        Positioned(
+          left: 8,
+          bottom: 8,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.55),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              'Offline: ${region.name} · © OpenMapTiles © OSM contributors',
+              style: const TextStyle(color: Colors.white, fontSize: 11),
+            ),
+          ),
+        ),
+        Positioned(
+          right: 8,
+          top: 8,
+          child: Material(
+            color: Colors.black.withValues(alpha: 0.55),
+            shape: const CircleBorder(),
+            child: InkWell(
+              customBorder: const CircleBorder(),
+              onTap: () => _fit(positions),
+              child: const Padding(
+                padding: EdgeInsets.all(8),
+                child: Icon(
+                  Icons.center_focus_strong,
+                  color: Colors.white,
+                  size: 20,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Builds the declarative layer stack for the current visibility flags.
+  ///
+  /// Heatmap mode renders one blurred translucent CircleLayer over every
+  /// fix — overlapping circles naturally produce hot spots at
+  /// frequently-visited locations. This replaces the 0.7.1+24-era custom
+  /// 0.001°-grid bucketing (which rendered hundreds of `CircleMarker`
+  /// widgets in Dart-land); native GPU-rendered circles handle 10k+
+  /// pings without breaking a sweat and never need re-bucketing on pan.
+  List<Layer> _layersFor(
+    List<Position> positions,
+    bool hasMultiple,
+    Position? latest,
+    ColorScheme scheme,
+  ) {
+    if (_showHeatmap) {
+      return [
+        if (positions.isNotEmpty)
+          CircleLayer(
+            points: [
+              for (final pos in positions) Feature(geometry: Point(pos)),
+            ],
+            radius: 18,
+            color: scheme.tertiary.withValues(alpha: 0.35),
+            blur: 0.5,
+          ),
+      ];
+    }
+    return [
+      if (_showPath && hasMultiple)
+        PolylineLayer(
+          polylines: [Feature(geometry: LineString.from(positions))],
+          color: scheme.primary.withValues(alpha: 0.85),
+          width: 3,
+        ),
+      // All non-latest fixes — small primary-colour dots.
+      if (positions.length > 1)
+        CircleLayer(
+          points: [
+            for (int i = 0; i < positions.length - 1; i++)
+              Feature(geometry: Point(positions[i])),
+          ],
+          radius: 4,
+          color: scheme.primary,
+          strokeWidth: 1,
+          strokeColor: Colors.white.withValues(alpha: 0.85),
+        ),
+      if (latest != null)
+        CircleLayer(
+          points: [Feature(geometry: Point(latest))],
+          radius: 8,
+          color: scheme.tertiary,
+          strokeWidth: 2,
+          strokeColor: Colors.white.withValues(alpha: 0.95),
+        ),
+    ];
+  }
+
+  void _fit(List<Position> positions) {
+    final c = _controller;
+    if (c == null || positions.isEmpty) return;
+    if (positions.length == 1) {
+      c.animateCamera(
+        center: Geographic(lon: positions.first.x, lat: positions.first.y),
+        zoom: 14,
+      );
+      return;
+    }
+    final bounds = LngLatBounds.fromPoints(
+      positions
+          .map((p) => Geographic(lon: p.x, lat: p.y))
+          .toList(growable: false),
+    );
+    c.fitBounds(
+      bounds: bounds,
+      padding: const EdgeInsets.all(40),
     );
   }
 
@@ -347,107 +425,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         _startPlaybackTimer(fixes);
       }
     }
-  }
-
-  Widget _tileLayer(MBTilesRegion? region) {
-    if (region != null) {
-      return TileLayer(
-        tileProvider: MbTilesTileProvider.fromPath(path: region.path),
-        maxZoom: 18,
-      );
-    }
-    return TileLayer(
-      urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-      userAgentPackageName: 'com.dazeddingo.trail',
-      maxZoom: 19,
-    );
-  }
-
-  Widget _attribution(MBTilesRegion? region) {
-    final text = region != null
-        ? 'Offline: ${region.name}'
-        : '© OpenStreetMap';
-    return Positioned(
-      left: 8,
-      bottom: 8,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.55),
-          borderRadius: BorderRadius.circular(4),
-        ),
-        child: Text(
-          text,
-          style: const TextStyle(color: Colors.white, fontSize: 11),
-        ),
-      ),
-    );
-  }
-
-  /// Grid-based heatmap: bucket every fix into a ~0.001° cell (~100 m at
-  /// the equator, proportionally less near the poles — fine for "how
-  /// often do I come to this spot"), then render each cell as one
-  /// translucent circle whose opacity + radius tracks cell density.
-  /// Cheap enough to render every pan; not as pretty as a real KDE but
-  /// needs zero extra packages and survives 10k+ pings without chugging.
-  List<Marker> _buildHeatmapMarkers(List<LatLng> points, ColorScheme scheme) {
-    if (points.isEmpty) return const [];
-    const gridSize = 0.001; // degrees
-    final counts = <String, ({LatLng point, int count})>{};
-    for (final p in points) {
-      final latBucket = (p.latitude / gridSize).round();
-      final lonBucket = (p.longitude / gridSize).round();
-      final key = '$latBucket,$lonBucket';
-      final existing = counts[key];
-      counts[key] = (
-        point: LatLng(latBucket * gridSize, lonBucket * gridSize),
-        count: (existing?.count ?? 0) + 1,
-      );
-    }
-    final maxCount =
-        counts.values.map((e) => e.count).fold<int>(0, (a, b) => a > b ? a : b);
-    final markers = <Marker>[];
-    for (final cell in counts.values) {
-      // Normalise to [0, 1] — single-visit cells still draw at low
-      // opacity so sparse tracks are visible alongside dense hubs.
-      final norm = maxCount <= 1 ? 1.0 : cell.count / maxCount;
-      final radius = 16.0 + norm * 24.0;
-      markers.add(
-        Marker(
-          point: cell.point,
-          width: radius * 2,
-          height: radius * 2,
-          child: Container(
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: RadialGradient(
-                colors: [
-                  scheme.tertiary.withValues(alpha: 0.55 * norm + 0.2),
-                  scheme.tertiary.withValues(alpha: 0),
-                ],
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-    return markers;
-  }
-
-  void _fit(List<LatLng> points) {
-    if (points.isEmpty) return;
-    if (points.length == 1) {
-      _controller.move(points.first, 14);
-      return;
-    }
-    final bounds = LatLngBounds.fromPoints(points);
-    _controller.fitCamera(
-      CameraFit.bounds(
-        bounds: bounds,
-        padding: const EdgeInsets.all(40),
-        maxZoom: 15,
-      ),
-    );
   }
 }
 
@@ -575,7 +552,8 @@ class _TimeSlider extends StatelessWidget {
 }
 
 class _EmptyState extends StatelessWidget {
-  const _EmptyState();
+  final String message;
+  const _EmptyState({required this.message});
 
   @override
   Widget build(BuildContext context) {
@@ -583,7 +561,7 @@ class _EmptyState extends StatelessWidget {
       padding: const EdgeInsets.all(24),
       child: Center(
         child: Text(
-          'No fixes yet — trail will appear after a few pings.',
+          message,
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.bodyMedium,
         ),
