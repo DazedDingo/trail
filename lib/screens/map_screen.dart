@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
-import 'package:maplibre/maplibre.dart';
+import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../models/ping.dart';
 import '../providers/mbtiles_provider.dart';
@@ -14,18 +14,18 @@ import '../services/trail_style.dart';
 
 /// Full-screen history map with time slider + path toggle + bbox-fit.
 ///
-/// Uses `MapLibreMap` against a sideloaded `.pmtiles` region — the app
-/// is offline-only, so when no region is installed the screen shows an
-/// empty state pointing to Settings → Offline map → Regions instead of
-/// rendering a map.
+/// Uses `maplibre_gl` (the older battle-tested community plugin)
+/// against a sideloaded `.mbtiles` or `.pmtiles` region. The newer
+/// `maplibre` package was tried first but its local-file URL handling
+/// on Android fails silently for both formats — see CHANGELOG entries
+/// 0.8.0+30 through +37 for the diagnostic trail.
 ///
-/// The time slider filters pings down to those logged at-or-before the
-/// slider's timestamp; dragging it back in time rewinds the trail.
-/// Playback controls (0.7.1+24) auto-advance the slider one fix at a
-/// time — play/pause, step prev/next, jump-to-start, and a 1×/2×/4×/
-/// 8×/16× speed cycle. The discrete per-ping step keeps each fix
-/// visible for the same fraction of the animation, regardless of gaps
-/// between pings.
+/// The app is offline-only: when no region is installed the screen
+/// shows an empty state instead of rendering a map.
+///
+/// The time slider filters pings down to those at-or-before the
+/// slider's timestamp; dragging back rewinds the trail. Playback
+/// auto-advances one fix at a time at 1×/2×/4×/8×/16× speeds.
 class MapScreen extends ConsumerStatefulWidget {
   const MapScreen({super.key});
 
@@ -34,9 +34,10 @@ class MapScreen extends ConsumerStatefulWidget {
 }
 
 class _MapScreenState extends ConsumerState<MapScreen> {
-  MapController? _controller;
+  MapLibreMapController? _controller;
   Future<String?>? _styleFuture;
   String? _activeRegionPath;
+  bool _styleReady = false;
 
   bool _showPath = true;
   bool _showHeatmap = false;
@@ -44,11 +45,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   bool _initialFitDone = false;
 
   /// Playback: advances `_sliderMax` one ping at a time until it reaches
-  /// the last fix, then auto-pauses. Step interval = `_basePlaybackStep /
-  /// _playbackSpeed`, so 1× shows each ping for ~350ms, 4× for ~90ms, 16×
-  /// for ~22ms. Tuned so a week of 4h pings (42 fixes) plays in ~15s at 1×
-  /// and ~1s at 16× — long enough to track movement, short enough not to
-  /// feel like a stall.
+  /// the last fix, then auto-pauses. Step interval = `_basePlaybackStep
+  /// / _playbackSpeed`, so 1× shows each ping for ~350ms, 4× for ~90ms,
+  /// 16× for ~22ms. Tuned so a week of 4h pings (42 fixes) plays in
+  /// ~15s at 1× and ~1s at 16× — long enough to track movement, short
+  /// enough not to feel like a stall.
   bool _playing = false;
   double _playbackSpeed = 1.0;
   Timer? _playbackTimer;
@@ -65,11 +66,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final pingsAsync = ref.watch(allPingsProvider);
     final activeRegion = ref.watch(activeRegionProvider).valueOrNull;
 
-    // Lazily (re)load the style JSON whenever the active region changes.
     if (activeRegion?.path != _activeRegionPath) {
       _activeRegionPath = activeRegion?.path;
       _styleFuture = TrailStyle.loadForRegion(_activeRegionPath);
       _initialFitDone = false;
+      _styleReady = false;
     }
 
     return Scaffold(
@@ -87,12 +88,18 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   ? Icons.blur_on
                   : Icons.blur_circular_outlined,
             ),
-            onPressed: () => setState(() => _showHeatmap = !_showHeatmap),
+            onPressed: () {
+              setState(() => _showHeatmap = !_showHeatmap);
+              _refreshAnnotationsIfReady();
+            },
           ),
           IconButton(
             tooltip: _showPath ? 'Hide path line' : 'Show path line',
             icon: Icon(_showPath ? Icons.timeline : Icons.scatter_plot),
-            onPressed: () => setState(() => _showPath = !_showPath),
+            onPressed: () {
+              setState(() => _showPath = !_showPath);
+              _refreshAnnotationsIfReady();
+            },
           ),
           IconButton(
             tooltip: 'Regions',
@@ -105,9 +112,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(child: Text('Error: $e')),
         data: (pings) {
-          // `allPingsProvider` returns oldest-first. Drop null-coord
-          // rows up front so the slider's visibleCount reflects real
-          // fixes, not "no_fix"/boot rows that never plot anywhere.
           final fixes = pings
               .where((p) => p.lat != null && p.lon != null)
               .toList(growable: false);
@@ -167,22 +171,27 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           onChanged: (v) {
             _pausePlayback();
             setState(() => _sliderMax = v);
+            _refreshAnnotationsIfReady();
           },
           onReset: () {
             _pausePlayback();
             setState(() => _sliderMax = null);
+            _refreshAnnotationsIfReady();
           },
           onJumpToStart: () {
             _pausePlayback();
             setState(() => _sliderMax = chrono.first.timestampUtc);
+            _refreshAnnotationsIfReady();
           },
           onStepPrev: () {
             _pausePlayback();
             setState(() => _sliderMax = _stepTo(chrono, sliderMax, -1));
+            _refreshAnnotationsIfReady();
           },
           onStepNext: () {
             _pausePlayback();
             setState(() => _sliderMax = _stepTo(chrono, sliderMax, 1));
+            _refreshAnnotationsIfReady();
           },
           onTogglePlay: () => _togglePlayback(chrono),
           onCycleSpeed: _cycleSpeed,
@@ -197,52 +206,30 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     String styleJson,
     TilesRegion region,
   ) {
-    final scheme = Theme.of(context).colorScheme;
-    final positions = visibleFixes
-        .map((p) => [p.lon!, p.lat!].xy)
-        .toList(growable: false);
-    final hasMultiple = positions.length >= 2;
-    final latest = positions.isNotEmpty ? positions.last : null;
-    final initial = latest ?? [-2.0, 54.0].xy; // fallback: middle of GB
+    final initial = visibleFixes.isNotEmpty
+        ? LatLng(visibleFixes.last.lat!, visibleFixes.last.lon!)
+        : const LatLng(54, -2); // GB centroid fallback
 
     return Stack(
       children: [
         MapLibreMap(
-          options: MapOptions(
-            initStyle: styleJson,
-            initCenter: Geographic(lon: initial.x, lat: initial.y),
-            initZoom: 13,
-            minZoom: 2,
-            maxZoom: 18,
-          ),
-          onMapCreated: (c) {
-            _controller = c;
-          },
-          onStyleLoaded: (_) {
-            // Fit to all visible fixes once vector tiles can render.
-            // `_initialFitDone` keeps subsequent slider drags from
-            // re-snapping the camera back to the bbox.
-            if (!_initialFitDone && positions.isNotEmpty) {
+          styleString: styleJson,
+          initialCameraPosition: CameraPosition(target: initial, zoom: 13),
+          minMaxZoomPreference: const MinMaxZoomPreference(2, 18),
+          dragEnabled: true,
+          compassEnabled: false,
+          rotateGesturesEnabled: false,
+          tiltGesturesEnabled: false,
+          attributionButtonPosition: AttributionButtonPosition.bottomRight,
+          onMapCreated: (c) => _controller = c,
+          onStyleLoadedCallback: () {
+            _styleReady = true;
+            _refreshAnnotations(visibleFixes, Theme.of(context).colorScheme);
+            if (!_initialFitDone && visibleFixes.isNotEmpty) {
               _initialFitDone = true;
-              _fit(positions);
+              _fitToFixes(visibleFixes);
             }
           },
-          layers: _layersFor(positions, hasMultiple, latest, scheme),
-        ),
-        Positioned(
-          left: 8,
-          bottom: 8,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.55),
-              borderRadius: BorderRadius.circular(4),
-            ),
-            child: Text(
-              'Offline: ${region.name} · © OpenMapTiles © OSM contributors',
-              style: const TextStyle(color: Colors.white, fontSize: 11),
-            ),
-          ),
         ),
         Positioned(
           right: 8,
@@ -252,7 +239,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             shape: const CircleBorder(),
             child: InkWell(
               customBorder: const CircleBorder(),
-              onTap: () => _fit(positions),
+              onTap: () => _fitToFixes(visibleFixes),
               child: const Padding(
                 padding: EdgeInsets.all(8),
                 child: Icon(
@@ -268,92 +255,124 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     );
   }
 
-  /// Builds the declarative layer stack for the current visibility flags.
-  ///
-  /// Heatmap mode renders one blurred translucent CircleLayer over every
-  /// fix — overlapping circles naturally produce hot spots at
-  /// frequently-visited locations. This replaces the 0.7.1+24-era custom
-  /// 0.001°-grid bucketing (which rendered hundreds of `CircleMarker`
-  /// widgets in Dart-land); native GPU-rendered circles handle 10k+
-  /// pings without breaking a sweat and never need re-bucketing on pan.
-  List<Layer> _layersFor(
-    List<Position> positions,
-    bool hasMultiple,
-    Position? latest,
-    ColorScheme scheme,
-  ) {
-    if (_showHeatmap) {
-      return [
-        if (positions.isNotEmpty)
-          CircleLayer(
-            points: [
-              for (final pos in positions) Feature(geometry: Point(pos)),
-            ],
-            radius: 18,
-            color: scheme.tertiary.withValues(alpha: 0.35),
-            blur: 0.5,
-          ),
-      ];
-    }
-    return [
-      if (_showPath && hasMultiple)
-        PolylineLayer(
-          polylines: [Feature(geometry: LineString.from(positions))],
-          color: scheme.primary.withValues(alpha: 0.85),
-          width: 3,
-        ),
-      // All non-latest fixes — small primary-colour dots.
-      if (positions.length > 1)
-        CircleLayer(
-          points: [
-            for (int i = 0; i < positions.length - 1; i++)
-              Feature(geometry: Point(positions[i])),
-          ],
-          radius: 4,
-          color: scheme.primary,
-          strokeWidth: 1,
-          strokeColor: Colors.white.withValues(alpha: 0.85),
-        ),
-      if (latest != null)
-        CircleLayer(
-          points: [Feature(geometry: Point(latest))],
-          radius: 8,
-          color: scheme.tertiary,
-          strokeWidth: 2,
-          strokeColor: Colors.white.withValues(alpha: 0.95),
-        ),
-    ];
+  void _refreshAnnotationsIfReady() {
+    if (!_styleReady || _controller == null) return;
+    final pings = ref.read(allPingsProvider).valueOrNull;
+    if (pings == null) return;
+    final chrono = pings
+        .where((p) => p.lat != null && p.lon != null)
+        .toList(growable: false);
+    if (chrono.isEmpty) return;
+    final sliderMax = _sliderMax ?? chrono.last.timestampUtc;
+    final visible = chrono
+        .where((p) => !p.timestampUtc.isAfter(sliderMax))
+        .toList(growable: false);
+    _refreshAnnotations(visible, Theme.of(context).colorScheme);
   }
 
-  void _fit(List<Position> positions) {
+  /// Clears existing line/circle annotations and re-adds for the
+  /// current visibility flags. We use clear+add (rather than a
+  /// GeoJsonSource that we update in place) because the slider drives
+  /// a fairly small number of points (~weeks of 4h pings = 42–500
+  /// fixes); the perf cost is invisible at that scale and the code is
+  /// substantially simpler. If the app ever stores 10k+ pings, swap to
+  /// `setGeoJsonSource` against a single source.
+  Future<void> _refreshAnnotations(
+    List<Ping> visibleFixes,
+    ColorScheme scheme,
+  ) async {
     final c = _controller;
-    if (c == null || positions.isEmpty) return;
-    if (positions.length == 1) {
-      c.animateCamera(
-        center: Geographic(lon: positions.first.x, lat: positions.first.y),
-        zoom: 14,
+    if (c == null) return;
+    await c.clearLines();
+    await c.clearCircles();
+    if (visibleFixes.isEmpty) return;
+    final points = visibleFixes
+        .map((p) => LatLng(p.lat!, p.lon!))
+        .toList(growable: false);
+
+    if (_showHeatmap) {
+      // Heatmap mode: one translucent blurred dot per fix; overlapping
+      // circles produce hot spots at frequently-visited locations
+      // automatically. Replaces the pre-MapLibre custom 0.001°-grid
+      // bucketing.
+      for (final p in points) {
+        await c.addCircle(CircleOptions(
+          geometry: p,
+          circleRadius: 18,
+          circleColor: scheme.tertiary.toHexStringRGB(),
+          circleOpacity: 0.18,
+          circleBlur: 0.5,
+        ));
+      }
+      return;
+    }
+
+    if (_showPath && points.length >= 2) {
+      await c.addLine(LineOptions(
+        geometry: points,
+        lineColor: scheme.primary.toHexStringRGB(),
+        lineWidth: 3,
+        lineOpacity: 0.85,
+      ));
+    }
+    for (var i = 0; i < points.length - 1; i++) {
+      await c.addCircle(CircleOptions(
+        geometry: points[i],
+        circleRadius: 4,
+        circleColor: scheme.primary.toHexStringRGB(),
+        circleStrokeWidth: 1,
+        circleStrokeColor: '#FFFFFF',
+        circleStrokeOpacity: 0.85,
+      ));
+    }
+    await c.addCircle(CircleOptions(
+      geometry: points.last,
+      circleRadius: 8,
+      circleColor: scheme.tertiary.toHexStringRGB(),
+      circleStrokeWidth: 2,
+      circleStrokeColor: '#FFFFFF',
+      circleStrokeOpacity: 0.95,
+    ));
+  }
+
+  Future<void> _fitToFixes(List<Ping> visibleFixes) async {
+    final c = _controller;
+    if (c == null || visibleFixes.isEmpty) return;
+    if (visibleFixes.length == 1) {
+      await c.animateCamera(
+        CameraUpdate.newLatLngZoom(
+          LatLng(visibleFixes.first.lat!, visibleFixes.first.lon!),
+          14,
+        ),
       );
       return;
     }
-    final bounds = LngLatBounds.fromPoints(
-      positions
-          .map((p) => Geographic(lon: p.x, lat: p.y))
-          .toList(growable: false),
-    );
-    c.fitBounds(
-      bounds: bounds,
-      padding: const EdgeInsets.all(40),
-    );
+    var minLat = visibleFixes.first.lat!, maxLat = minLat;
+    var minLon = visibleFixes.first.lon!, maxLon = minLon;
+    for (final p in visibleFixes) {
+      if (p.lat! < minLat) minLat = p.lat!;
+      if (p.lat! > maxLat) maxLat = p.lat!;
+      if (p.lon! < minLon) minLon = p.lon!;
+      if (p.lon! > maxLon) maxLon = p.lon!;
+    }
+    await c.animateCamera(CameraUpdate.newLatLngBounds(
+      LatLngBounds(
+        southwest: LatLng(minLat, minLon),
+        northeast: LatLng(maxLat, maxLon),
+      ),
+      left: 40,
+      top: 40,
+      right: 40,
+      bottom: 40,
+    ));
   }
 
   /// Move the slider one ping forward / backward along `chrono`.
-  /// Keeping this as discrete-per-ping (not per-millisecond) means step
-  /// buttons always advance the *visible trail* by exactly one marker,
-  /// even when gaps between pings are irregular.
+  /// Discrete-per-ping (not per-millisecond) so step buttons always
+  /// advance the *visible trail* by exactly one marker, regardless of
+  /// gaps between pings.
   DateTime _stepTo(List<Ping> chrono, DateTime current, int delta) {
     final idx = chrono.indexWhere((p) => !p.timestampUtc.isBefore(current));
-    // indexWhere returns -1 if `current` is after every ping (shouldn't
-    // happen given _sliderMax is clamped, but treat as "at end").
     final effective = idx < 0 ? chrono.length - 1 : idx;
     final target = (effective + delta).clamp(0, chrono.length - 1);
     return chrono[target].timestampUtc;
@@ -365,8 +384,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       return;
     }
     if (chrono.length < 2) return;
-    // If we're already at the end, restart from the beginning — otherwise
-    // tapping play when the slider is pinned to the last ping is a no-op.
     if (_sliderMax != null &&
         !_sliderMax!.isBefore(chrono.last.timestampUtc)) {
       setState(() => _sliderMax = chrono.first.timestampUtc);
@@ -378,19 +395,20 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   void _startPlaybackTimer(List<Ping> chrono) {
     _playbackTimer?.cancel();
     final interval = Duration(
-      milliseconds:
-          (_basePlaybackStep.inMilliseconds / _playbackSpeed).round().clamp(16, 2000),
+      milliseconds: (_basePlaybackStep.inMilliseconds / _playbackSpeed)
+          .round()
+          .clamp(16, 2000),
     );
     _playbackTimer = Timer.periodic(interval, (_) {
       if (!mounted) return;
       final current = _sliderMax ?? chrono.last.timestampUtc;
       final next = _stepTo(chrono, current, 1);
       if (!next.isAfter(current)) {
-        // Reached the end — stop.
         _pausePlayback();
         return;
       }
       setState(() => _sliderMax = next);
+      _refreshAnnotationsIfReady();
     });
   }
 
@@ -401,9 +419,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     if (_playing) setState(() => _playing = false);
   }
 
-  /// Cycle through 1× → 2× → 4× → 8× → 16× → 1×. Restarts the active
-  /// timer at the new cadence so speed changes are felt immediately
-  /// rather than taking effect on the next cycle.
+  /// Cycle 1× → 2× → 4× → 8× → 16× → 1×. Restart the active timer at
+  /// the new cadence so speed changes are felt immediately.
   void _cycleSpeed() {
     final next = switch (_playbackSpeed) {
       1.0 => 2.0,
@@ -414,9 +431,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     };
     setState(() => _playbackSpeed = next);
     if (_playing) {
-      // Re-arm the timer at the new interval. Need the full `chrono` list
-      // again — pull it from the provider's current value rather than
-      // plumbing it through, since playback is only live when pings exist.
       final pings = ref.read(allPingsProvider).valueOrNull;
       if (pings != null) {
         final fixes = pings
@@ -464,9 +478,8 @@ class _TimeSlider extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final totalMs = last.millisecondsSinceEpoch - first.millisecondsSinceEpoch;
-    final currentMs = current.millisecondsSinceEpoch - first.millisecondsSinceEpoch;
-    // If all pings happened at the exact same millisecond (test fixtures,
-    // fresh install with one ping), the slider has nothing to slide.
+    final currentMs =
+        current.millisecondsSinceEpoch - first.millisecondsSinceEpoch;
     final disabled = totalMs <= 0;
     final scheme = Theme.of(context).colorScheme;
     final fmt = DateFormat('MMM d, HH:mm');
@@ -498,9 +511,8 @@ class _TimeSlider extends StatelessWidget {
             child: Slider(
               min: 0,
               max: totalMs <= 0 ? 1 : totalMs.toDouble(),
-              value: disabled
-                  ? 0
-                  : currentMs.clamp(0, totalMs).toDouble(),
+              value:
+                  disabled ? 0 : currentMs.clamp(0, totalMs).toDouble(),
               onChanged: disabled
                   ? null
                   : (v) => onChanged(

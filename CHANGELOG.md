@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.8.0+38] — 2026-04-27
+
+### Changed
+- **Renderer plugin swap: `maplibre` 0.3.5 → `maplibre_gl` 0.26.0.** The newer `maplibre` package's local-file URL pipeline on Android silently dropped tile fetches for both `.pmtiles` and `.mbtiles` (verified across +30, +33, +34, +35, +37 with the diagnostic overlay — file present, style loaded, `cameraIdle` fired, but the canvas stayed blank). Remote URLs worked, confirming the bug was specifically the plugin's local-file bridge. `maplibre_gl` is the older mapbox_gl-derived community plugin with documented PMTiles + MBTiles examples and a different JNI codebase. Different API: imperative controller annotations (`addLine`, `addCircle`) instead of declarative `layers:`. Trail preview and full-screen map both rewritten against the new package.
+
 ## [0.8.0+37] — 2026-04-27
 
 ### Added

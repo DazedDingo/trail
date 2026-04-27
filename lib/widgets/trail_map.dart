@@ -2,7 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
-import 'package:maplibre/maplibre.dart';
+import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../models/ping.dart';
 import '../services/mbtiles_service.dart';
@@ -10,11 +10,16 @@ import '../services/trail_style.dart';
 
 /// Interactive map of the user's recent ping trail.
 ///
-/// Renders a `MapLibreMap` over the user's active offline region — the
-/// app is offline-only, so when no region is installed the widget shows
-/// a placeholder pointing at Settings → Offline map → Regions instead
-/// of mounting the map. Passing `activeRegion: null` at the callsite
-/// keeps the widget usable in tests without spinning up a real file.
+/// Renders a `MapLibreMap` (via `maplibre_gl`, the older battle-tested
+/// community plugin) over the user's active offline region. The newer
+/// `maplibre` package was tried first but its local-file URL handling
+/// on Android silently fails for both `.pmtiles` and `.mbtiles` —
+/// confirmed via the diagnostic mode through 0.8.0+37. Switched to
+/// `maplibre_gl` for known-working local-MBTiles support.
+///
+/// The app is offline-only: when no region is installed the widget
+/// shows an "install a region" placeholder instead of mounting the
+/// map.
 class TrailMap extends StatefulWidget {
   final List<Ping> pings;
   final double height;
@@ -32,12 +37,9 @@ class TrailMap extends StatefulWidget {
 }
 
 class _TrailMapState extends State<TrailMap> {
-  MapController? _controller;
+  MapLibreMapController? _controller;
   Future<String?>? _styleFuture;
-  // Diagnostics: surface the most recent MapLibre event so a "white map"
-  // failure can be triaged without adb logcat. Once we see consistent
-  // `MapEventStyleLoaded` in the field this overlay can come out (or
-  // move behind a debug flag).
+  bool _styleReady = false;
   String _lastEvent = 'mounting…';
 
   @override
@@ -51,14 +53,15 @@ class _TrailMapState extends State<TrailMap> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.activeRegion?.path != widget.activeRegion?.path) {
       _styleFuture = TrailStyle.loadForRegion(widget.activeRegion?.path);
+      _styleReady = false;
     }
     final oldFixes = _fixesOf(oldWidget.pings);
     final newFixes = _fixesOf(widget.pings);
-    if (newFixes.isEmpty || _controller == null) return;
+    if (newFixes.isEmpty || _controller == null || !_styleReady) return;
     final newestChanged = oldFixes.isEmpty ||
         oldFixes.first.timestampUtc != newFixes.first.timestampUtc;
     if (newestChanged) {
-      _fitToPings(newFixes);
+      _refreshAnnotations(newFixes);
     }
   }
 
@@ -66,25 +69,77 @@ class _TrailMapState extends State<TrailMap> {
       .where((p) => p.lat != null && p.lon != null)
       .toList(growable: false);
 
-  void _fitToPings(List<Ping> fixes) {
+  Future<void> _refreshAnnotations(List<Ping> fixes) async {
     final c = _controller;
-    if (c == null || fixes.isEmpty) return;
-    if (fixes.length == 1) {
-      c.animateCamera(
-        center: Geographic(lon: fixes.first.lon!, lat: fixes.first.lat!),
-        zoom: 14,
+    if (c == null) return;
+    // Snapshot the colour scheme synchronously — async gaps below mean
+    // we can't safely re-read `Theme.of(context)` later, and the colour
+    // values shouldn't change mid-refresh anyway.
+    final scheme = Theme.of(context).colorScheme;
+    await c.clearLines();
+    await c.clearCircles();
+    if (fixes.isEmpty) return;
+    final points = fixes
+        .map((p) => LatLng(p.lat!, p.lon!))
+        .toList(growable: false);
+    if (points.length >= 2) {
+      await c.addLine(LineOptions(
+        geometry: points,
+        lineColor: scheme.primary.toHexStringRGB(),
+        lineWidth: 3,
+        lineOpacity: 0.85,
+      ));
+    }
+    // Trail dots — small primary-colour markers for older fixes, larger
+    // tertiary marker for the latest.
+    for (var i = 0; i < points.length - 1; i++) {
+      await c.addCircle(CircleOptions(
+        geometry: points[i],
+        circleRadius: 4,
+        circleColor: scheme.primary.toHexStringRGB(),
+        circleStrokeWidth: 1,
+        circleStrokeColor: '#FFFFFF',
+        circleStrokeOpacity: 0.85,
+      ));
+    }
+    await c.addCircle(CircleOptions(
+      geometry: points.last,
+      circleRadius: 8,
+      circleColor: scheme.tertiary.toHexStringRGB(),
+      circleStrokeWidth: 2,
+      circleStrokeColor: '#FFFFFF',
+      circleStrokeOpacity: 0.95,
+    ));
+    _fitToPoints(points);
+  }
+
+  Future<void> _fitToPoints(List<LatLng> points) async {
+    final c = _controller;
+    if (c == null || points.isEmpty) return;
+    if (points.length == 1) {
+      await c.animateCamera(
+        CameraUpdate.newLatLngZoom(points.first, 14),
       );
       return;
     }
-    final bounds = LngLatBounds.fromPoints(
-      fixes
-          .map((p) => Geographic(lon: p.lon!, lat: p.lat!))
-          .toList(growable: false),
-    );
-    c.fitBounds(
-      bounds: bounds,
-      padding: const EdgeInsets.all(32),
-    );
+    var minLat = points.first.latitude, maxLat = minLat;
+    var minLon = points.first.longitude, maxLon = minLon;
+    for (final p in points) {
+      if (p.latitude < minLat) minLat = p.latitude;
+      if (p.latitude > maxLat) maxLat = p.latitude;
+      if (p.longitude < minLon) minLon = p.longitude;
+      if (p.longitude > maxLon) maxLon = p.longitude;
+    }
+    await c.animateCamera(CameraUpdate.newLatLngBounds(
+      LatLngBounds(
+        southwest: LatLng(minLat, minLon),
+        northeast: LatLng(maxLat, maxLon),
+      ),
+      left: 32,
+      top: 32,
+      right: 32,
+      bottom: 32,
+    ));
   }
 
   @override
@@ -119,146 +174,42 @@ class _TrailMapState extends State<TrailMap> {
           if (!snap.hasData) {
             return const Center(child: CircularProgressIndicator());
           }
-          return _buildMap(context, fixes, snap.data!, scheme);
+          return _buildMap(context, fixes, snap.data!);
         },
       ),
     );
   }
 
-  Widget _buildMap(
-    BuildContext context,
-    List<Ping> fixes,
-    String styleJson,
-    ColorScheme scheme,
-  ) {
-    final positions = fixes
-        .map((p) => [p.lon!, p.lat!].xy)
-        .toList(growable: false);
-    final latest = positions.last;
-
+  Widget _buildMap(BuildContext context, List<Ping> fixes, String styleJson) {
+    final initial = LatLng(fixes.last.lat!, fixes.last.lon!);
     return Stack(
       children: [
         MapLibreMap(
-          options: MapOptions(
-            initStyle: styleJson,
-            initCenter: Geographic(lon: latest.x, lat: latest.y),
-            initZoom: 14,
-            minZoom: 2,
-            maxZoom: 18,
-          ),
+          styleString: styleJson,
+          initialCameraPosition: CameraPosition(target: initial, zoom: 14),
+          minMaxZoomPreference: const MinMaxZoomPreference(2, 18),
+          dragEnabled: true,
+          compassEnabled: false,
+          rotateGesturesEnabled: false,
+          tiltGesturesEnabled: false,
+          attributionButtonPosition: AttributionButtonPosition.bottomRight,
           onMapCreated: (c) {
             _controller = c;
             if (mounted) setState(() => _lastEvent = 'mapCreated');
           },
-          onStyleLoaded: (_) {
-            // Style is loaded — fit camera to the trail bbox once vector
-            // tiles can render. Doing this in `onStyleLoaded` rather than
-            // `onMapCreated` avoids a flicker where the camera fits while
-            // the style is still parsing.
-            _fitToPings(fixes);
+          onStyleLoadedCallback: () {
+            _styleReady = true;
+            _refreshAnnotations(fixes);
             if (mounted) setState(() => _lastEvent = 'styleLoaded');
           },
-          onEvent: (e) {
-            if (!mounted) return;
-            final name = e.runtimeType.toString().replaceFirst('MapEvent', '');
-            setState(() => _lastEvent = name);
-          },
-          layers: [
-            if (positions.length >= 2)
-              PolylineLayer(
-                polylines: [
-                  Feature(geometry: LineString.from(positions)),
-                ],
-                color: scheme.primary.withValues(alpha: 0.85),
-                width: 3,
-              ),
-            // All non-latest fixes — small primary-colour dots.
-            if (positions.length > 1)
-              CircleLayer(
-                points: [
-                  for (int i = 0; i < positions.length - 1; i++)
-                    Feature(geometry: Point(positions[i])),
-                ],
-                radius: 4,
-                color: scheme.primary,
-                strokeWidth: 1,
-                strokeColor: Colors.white.withValues(alpha: 0.85),
-              ),
-            // Latest fix — larger tertiary-colour dot, drawn after the
-            // others so it always sits on top.
-            CircleLayer(
-              points: [Feature(geometry: Point(latest))],
-              radius: 8,
-              color: scheme.tertiary,
-              strokeWidth: 2,
-              strokeColor: Colors.white.withValues(alpha: 0.95),
-            ),
-          ],
         ),
         Positioned(
           left: 6,
           right: 6,
           bottom: 6,
-          child: Builder(
-            builder: (context) {
-              final exists =
-                  File(widget.activeRegion!.path).existsSync();
-              final dump = 'last: $_lastEvent\n'
-                  'fileExists: $exists\n'
-                  'path: ${widget.activeRegion!.path}';
-              return Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(6),
-                  onTap: () async {
-                    await Clipboard.setData(ClipboardData(text: dump));
-                    if (!context.mounted) return;
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Map diagnostic copied'),
-                        duration: Duration(seconds: 2),
-                      ),
-                    );
-                  },
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 8, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.7),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: DefaultTextStyle(
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        height: 1.25,
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text('last: $_lastEvent'),
-                          Text('fileExists: $exists'),
-                          Text(
-                            'tail: …${_pathTail(widget.activeRegion!.path)}',
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          const SizedBox(height: 2),
-                          const Text(
-                            '(tap to copy full path)',
-                            style: TextStyle(
-                              fontSize: 10,
-                              color: Colors.white70,
-                              fontStyle: FontStyle.italic,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              );
-            },
+          child: _DiagnosticOverlay(
+            lastEvent: _lastEvent,
+            regionPath: widget.activeRegion!.path,
           ),
         ),
         Positioned(
@@ -269,7 +220,11 @@ class _TrailMapState extends State<TrailMap> {
             shape: const CircleBorder(),
             child: InkWell(
               customBorder: const CircleBorder(),
-              onTap: () => _fitToPings(fixes),
+              onTap: () => _fitToPoints(
+                fixes
+                    .map((p) => LatLng(p.lat!, p.lon!))
+                    .toList(growable: false),
+              ),
               child: const Padding(
                 padding: EdgeInsets.all(6),
                 child: Icon(
@@ -285,14 +240,6 @@ class _TrailMapState extends State<TrailMap> {
     );
   }
 
-  /// Last 60 chars of the path so the diagnostic overlay shows enough
-  /// of the filename + parent dir to spot a wrong target without
-  /// running off the screen on small phones.
-  static String _pathTail(String path) {
-    if (path.length <= 60) return path;
-    return path.substring(path.length - 60);
-  }
-
   BoxDecoration _frame(ColorScheme scheme) => BoxDecoration(
         color: scheme.surfaceContainerHighest.withValues(alpha: 0.4),
         borderRadius: BorderRadius.circular(12),
@@ -301,6 +248,78 @@ class _TrailMapState extends State<TrailMap> {
           width: 1,
         ),
       );
+}
+
+class _DiagnosticOverlay extends StatelessWidget {
+  final String lastEvent;
+  final String regionPath;
+  const _DiagnosticOverlay({
+    required this.lastEvent,
+    required this.regionPath,
+  });
+
+  static String _pathTail(String path) {
+    if (path.length <= 60) return path;
+    return path.substring(path.length - 60);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final exists = File(regionPath).existsSync();
+    final dump =
+        'last: $lastEvent\nfileExists: $exists\npath: $regionPath';
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(6),
+        onTap: () async {
+          await Clipboard.setData(ClipboardData(text: dump));
+          if (!context.mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Map diagnostic copied'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.7),
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: DefaultTextStyle(
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 12,
+              height: 1.25,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('last: $lastEvent'),
+                Text('fileExists: $exists'),
+                Text(
+                  'tail: …${_pathTail(regionPath)}',
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 2),
+                const Text(
+                  '(tap to copy full path)',
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: Colors.white70,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _PlaceholderFrame extends StatelessWidget {

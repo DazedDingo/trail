@@ -14,14 +14,16 @@
 - **Native permissions:** permission_handler (staged: fine → background location)
 - **Battery/network telemetry:** battery_plus, connectivity_plus
 - **Export:** GPX + CSV exporters (share_plus)
-- **Map viewer:** `maplibre` (vector renderer) + sideloaded
-  `.pmtiles` regions activated via `Settings → Offline map → Regions`.
-  When no region is active the viewer renders an "install a region"
-  empty state — there is no online tile fallback (the app is
+- **Map viewer:** `maplibre_gl` 0.26.0 (vector renderer, the older
+  battle-tested community plugin) + sideloaded `.mbtiles` or
+  `.pmtiles` regions activated via `Settings → Offline map →
+  Regions`. When no region is active the viewer renders an "install a
+  region" empty state — there is no online tile fallback (the app is
   offline-only). The logging pipeline has been offline since Phase 1;
-  the viewer is offline whenever a region is active. Switched from
-  raster (`flutter_map` + `flutter_map_mbtiles`) to vector
-  (`maplibre` + PMTiles) in 0.8.0+29.
+  the viewer is offline whenever a region is active. Migration:
+  raster (`flutter_map` + `flutter_map_mbtiles`) → vector via
+  `maplibre` (0.8.0+29 through +37, broke on Android local files) →
+  `maplibre_gl` (0.8.0+38, currently shipping).
 - **Android-only** (no iOS variant planned)
 
 ## Directory Map: `lib/`

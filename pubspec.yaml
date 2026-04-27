@@ -1,7 +1,7 @@
 name: trail
 description: "Trail — personal-safety GPS logger. Offline, encrypted, 4h-cadence background pings."
 publish_to: 'none'
-version: 0.8.0+37
+version: 0.8.0+38
 
 environment:
   sdk: ^3.5.0
@@ -67,11 +67,15 @@ dependencies:
   shared_preferences: ^2.5.5
 
   # Vector-tile renderer for the offline map viewer. Reads sideloaded
-  # `.pmtiles` produced by `planetiler` from the OpenMapTiles schema.
-  # Replaced flutter_map + flutter_map_mbtiles in 0.7.2+28 — vector
-  # tiles are ~10× smaller than raster for the same coverage and let
-  # the app restyle without rebaking.
-  maplibre: ^0.3.5
+  # `.mbtiles` / `.pmtiles` produced by `planetiler` from the
+  # OpenMapTiles schema. The newer `maplibre` package's local-file
+  # support on Android was confirmed broken in 0.8.0+37 (see
+  # CHANGELOG); `maplibre_gl` is the older mapbox_gl-derived community
+  # plugin with a documented PMTiles example and known-working local
+  # MBTiles support. Different API: imperative
+  # `MapLibreMapController.addLine/addCircle/addLayer` rather than
+  # declarative `layers:`.
+  maplibre_gl: ^0.26.0
 
 dev_dependencies:
   flutter_test:
