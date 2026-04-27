@@ -26,6 +26,32 @@ class RegionsScreen extends ConsumerWidget {
           icon: const Icon(Icons.arrow_back),
           onPressed: () => context.go('/settings'),
         ),
+        actions: [
+          // Diagnostic only — flips the active region to a synthetic
+          // "remote demo" entry so the next map render uses the
+          // Protomaps public PMTiles instead of the local file. Lets us
+          // test whether the renderer works at all separately from
+          // local-PMTiles support.
+          IconButton(
+            tooltip: 'Run map renderer diagnostic',
+            icon: const Icon(Icons.bug_report_outlined),
+            onPressed: () async {
+              await TilesService.setActive(const TilesRegion(
+                name: 'Remote demo (diagnostic)',
+                path: TilesService.diagnosticRemoteSentinel,
+                bytes: 0,
+              ));
+              ref.invalidate(activeRegionProvider);
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text(
+                    'Diagnostic mode on — remote demo PMTiles active',
+                  )),
+                );
+              }
+            },
+          ),
+        ],
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () => _installRegion(context, ref),

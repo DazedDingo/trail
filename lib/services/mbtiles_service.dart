@@ -106,6 +106,12 @@ class TilesService {
     await prefs.remove(_activeKey);
   }
 
+  /// Sentinel "path" used by the regions screen's diagnostic-mode
+  /// button to flip the renderer to a remote demo PMTiles URL.
+  /// `getActive` short-circuits the file-existence check for this value
+  /// so the synthetic region survives across app restarts.
+  static const diagnosticRemoteSentinel = '__remote_demo__';
+
   /// Returns the currently active region, or `null` if none is set or
   /// the file on disk is gone. We check existence rather than trusting
   /// the pref so a user who deletes the file from outside the app still
@@ -114,6 +120,13 @@ class TilesService {
     final prefs = await SharedPreferences.getInstance();
     final path = prefs.getString(_activeKey);
     if (path == null) return null;
+    if (path == diagnosticRemoteSentinel) {
+      return const TilesRegion(
+        name: 'Remote demo (diagnostic)',
+        path: diagnosticRemoteSentinel,
+        bytes: 0,
+      );
+    }
     final f = File(path);
     if (!await f.exists()) {
       await prefs.remove(_activeKey);

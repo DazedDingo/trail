@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.8.0+35] — 2026-04-27
+
+### Added
+- **Map renderer diagnostic mode.** The Regions screen now has a bug-icon button in the app bar that flips the active region to a synthetic "remote demo" entry — the next map render uses the public Protomaps demo PMTiles over HTTPS instead of the local file. Lets us tell whether the renderer is broken vs whether local-file PMTiles is broken in the maplibre 0.3.5 Android plugin without writing native code. Tap any installed region tile to leave diagnostic mode.
+
 ## [0.8.0+34] — 2026-04-27
 
 ### Changed
