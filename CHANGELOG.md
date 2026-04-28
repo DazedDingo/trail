@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.10.5+69] — 2026-04-28
+
+### Added
+- **Live-location toggle on the map AppBar.** The Settings tile from 0.10.4+68 stays, but the most useful place to flip the dot is on the map itself — when a busy stretch of trail is hiding behind it. New action between the path-line toggle and Regions, with a `my_location` / `location_disabled` icon pair. Backed by the same `liveLocationDotEnabledProvider`, so both surfaces stay in sync.
+
 ## [0.10.4+68] — 2026-04-28
 
 ### Fixed

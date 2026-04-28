@@ -128,6 +128,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final pingsAsync = ref.watch(pingsByRangeProvider(_dateFilter));
     final activeRegion = ref.watch(activeRegionProvider).valueOrNull;
     final tileServerPort = ref.watch(tileServerProvider).valueOrNull;
+    final liveDotState = ref.watch(liveLocationDotEnabledProvider);
+    final liveDotOn = liveDotState.asData?.value ?? true;
 
     final regionChanged = activeRegion?.path != _activeRegionPath;
     final portChanged = tileServerPort != _tileServerPort;
@@ -191,6 +193,19 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               setState(() => _showPath = !_showPath);
               _refreshAnnotationsIfReady();
             },
+          ),
+          IconButton(
+            tooltip: liveDotOn
+                ? 'Hide live location dot'
+                : 'Show live location dot',
+            icon: Icon(
+              liveDotOn ? Icons.my_location : Icons.location_disabled,
+            ),
+            onPressed: liveDotState.isLoading
+                ? null
+                : () => ref
+                    .read(liveLocationDotEnabledProvider.notifier)
+                    .set(!liveDotOn),
           ),
           IconButton(
             tooltip: 'Regions',
