@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.8.0+41] — 2026-04-28
+
+### Added
+- **Tile-server self-test in the diagnostic overlay.** Two new fields: `port` (`LocalTileServer.instance.port`, or "off") and `serverPing` (Dart-side HTTP fetch of `/tilejson.json` from the loopback — shows `<status> (<bytes>B)` when reachable, `fail: <reason>` otherwise). Long-press the overlay to retest. Lets us tell apart "server didn't start" / "server up but MapLibre can't reach it" / "MapLibre reaches it but tiles still don't render".
+
 ## [0.8.0+40] — 2026-04-28
 
 ### Added

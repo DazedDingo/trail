@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -227,6 +229,7 @@ class _TrailMapState extends ConsumerState<TrailMap> {
           child: _DiagnosticOverlay(
             lastEvent: _lastEvent,
             regionPath: widget.activeRegion!.path,
+            tileServerPort: _tileServerPort,
           ),
         ),
         Positioned(
@@ -267,13 +270,22 @@ class _TrailMapState extends ConsumerState<TrailMap> {
       );
 }
 
-class _DiagnosticOverlay extends StatelessWidget {
+class _DiagnosticOverlay extends StatefulWidget {
   final String lastEvent;
   final String regionPath;
+  final int? tileServerPort;
   const _DiagnosticOverlay({
     required this.lastEvent,
     required this.regionPath,
+    required this.tileServerPort,
   });
+
+  @override
+  State<_DiagnosticOverlay> createState() => _DiagnosticOverlayState();
+}
+
+class _DiagnosticOverlayState extends State<_DiagnosticOverlay> {
+  String _serverPing = '?';
 
   static String _pathTail(String path) {
     if (path.length <= 60) return path;
@@ -281,10 +293,56 @@ class _DiagnosticOverlay extends StatelessWidget {
   }
 
   @override
+  void initState() {
+    super.initState();
+    _runServerPing();
+  }
+
+  @override
+  void didUpdateWidget(covariant _DiagnosticOverlay old) {
+    super.didUpdateWidget(old);
+    if (old.tileServerPort != widget.tileServerPort) {
+      _runServerPing();
+    }
+  }
+
+  Future<void> _runServerPing() async {
+    final port = widget.tileServerPort;
+    if (port == null) {
+      if (mounted) setState(() => _serverPing = 'off');
+      return;
+    }
+    try {
+      final client = HttpClient();
+      final req = await client
+          .getUrl(Uri.parse('http://127.0.0.1:$port/tilejson.json'))
+          .timeout(const Duration(seconds: 2));
+      final resp = await req.close().timeout(const Duration(seconds: 2));
+      final body = await resp
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .join()
+          .timeout(const Duration(seconds: 2));
+      client.close();
+      if (mounted) {
+        setState(() => _serverPing =
+            '${resp.statusCode} (${body.length}B)');
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _serverPing = 'fail: $e');
+      }
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final exists = File(regionPath).existsSync();
-    final dump =
-        'last: $lastEvent\nfileExists: $exists\npath: $regionPath';
+    final exists = File(widget.regionPath).existsSync();
+    final portText = widget.tileServerPort?.toString() ?? 'off';
+    final dump = 'last: ${widget.lastEvent}\n'
+        'fileExists: $exists\n'
+        'tileServerPort: $portText\n'
+        'serverPing: $_serverPing\n'
+        'path: ${widget.regionPath}';
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -299,6 +357,7 @@ class _DiagnosticOverlay extends StatelessWidget {
             ),
           );
         },
+        onLongPress: _runServerPing,
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
@@ -315,15 +374,20 @@ class _DiagnosticOverlay extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text('last: $lastEvent'),
+                Text('last: ${widget.lastEvent}'),
                 Text('fileExists: $exists'),
+                Text('port: $portText'),
                 Text(
-                  'tail: …${_pathTail(regionPath)}',
+                  'serverPing: $_serverPing',
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Text(
+                  'tail: …${_pathTail(widget.regionPath)}',
                   overflow: TextOverflow.ellipsis,
                 ),
                 const SizedBox(height: 2),
                 const Text(
-                  '(tap to copy full path)',
+                  '(tap = copy · long-press = retest)',
                   style: TextStyle(
                     fontSize: 10,
                     color: Colors.white70,
