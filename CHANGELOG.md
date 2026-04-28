@@ -4,6 +4,12 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.8.0+45] — 2026-04-28
+
+### Fixed
+- **Tile delivery: third combination — `Content-Encoding: gzip` + gzipped body.** `+40` (Content-Encoding + gzipped body, with sqflite singleInstance still on its broken default) and `+44` (no header + decompressed body) both rendered white. With the `+43` singleInstance fix in place, the +40 shape — which is the standard "remote vector tile over HTTP" delivery OkHttp is built for — should be the cleanest match for what the renderer wants. Server now declares `Content-Encoding: gzip`, ships the bytes verbatim from MBTiles; OkHttp on Android transparently decompresses and the MVT parser sees plain bytes.
+- The `lastTile` diagnostic now also prints the first 8 raw bytes of the served blob, so we can spot if the tile_data is something other than gzipped MVT (`1f8b08…` = gzip magic).
+
 ## [0.8.0+44] — 2026-04-28
 
 ### Fixed

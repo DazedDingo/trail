@@ -216,32 +216,32 @@ class LocalTileServer {
       await req.response.close();
       return;
     }
-    // MBTiles spec: vector tiles are gzipped at rest. The +40/+42
-    // experiments served the gzipped bytes raw (with and without
-    // Content-Encoding: gzip) and maplibre-native rendered nothing
-    // either way — neither OkHttp transparent decompression nor
-    // maplibre's own magic-bytes sniff fired correctly. Decompress
-    // on the server and send plain MVT, which is what maplibre's
-    // MVT parser expects unconditionally.
-    final List<int> body;
-    try {
-      body = (blob.length >= 2 && blob[0] == 0x1f && blob[1] == 0x8b)
-          ? gzip.decode(blob)
-          : blob;
-    } catch (e) {
-      _lastTileStatus = 'z=$z x=$x y=$y → 500 (gunzip: $e)';
-      req.response.statusCode = HttpStatus.internalServerError;
-      await req.response.close();
-      return;
-    }
+    // MBTiles vector tiles are gzipped at rest. Send them through
+    // exactly the way OkHttp (Android's HTTP client used by
+    // maplibre-native) is built for: response declares
+    // `Content-Encoding: gzip`, body is the gzipped bytes; OkHttp
+    // transparently decompresses, maplibre's MVT parser receives raw
+    // bytes. This is the standard remote-tile delivery shape, so
+    // it's the closest match to the remote-PMTiles diagnostic that
+    // *did* render. (Earlier experiments tried no header + raw
+    // gzipped body, no header + server-decompressed body — both
+    // white. This is the third combination.)
+    final isGz = blob.length >= 2 && blob[0] == 0x1f && blob[1] == 0x8b;
+    final firstBytes = blob
+        .sublist(0, blob.length < 8 ? blob.length : 8)
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
     req.response.headers.contentType =
         ContentType('application', 'x-protobuf');
     req.response.headers.set('Cache-Control', 'no-cache');
-    req.response.headers.contentLength = body.length;
-    req.response.add(body);
+    if (isGz) {
+      req.response.headers.set('Content-Encoding', 'gzip');
+    }
+    req.response.headers.contentLength = blob.length;
+    req.response.add(blob);
     await req.response.close();
     _lastTileStatus =
-        'z=$z x=$x y=$y → 200 (${blob.length}→${body.length}B)';
+        'z=$z x=$x y=$y → 200 (${blob.length}B gz=$isGz $firstBytes)';
   }
 
   static final RegExp _tilePathRegex =
