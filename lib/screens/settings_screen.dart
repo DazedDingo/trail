@@ -13,6 +13,7 @@ import '../services/github_pat_service.dart';
 import '../models/ping.dart';
 import '../providers/backup_provider.dart';
 import '../providers/home_location_provider.dart';
+import '../providers/map_settings_provider.dart';
 import '../providers/panic_provider.dart';
 import '../providers/pings_provider.dart';
 import '../providers/scheduler_provider.dart';
@@ -241,6 +242,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             trailing: const Icon(Icons.chevron_right),
             onTap: () => context.push('/regions'),
           ),
+          const _LiveLocationDotTile(),
           const _GithubPatTile(),
           const Divider(),
           const _SectionHeader('Insights'),
@@ -1116,6 +1118,38 @@ class _MotionAwareTileState extends State<_MotionAwareTile> {
               setState(() => _enabled = v);
               await MotionAwareStore.set(v);
             },
+    );
+  }
+}
+
+/// Toggle for maplibre_gl's native blue-dot live-location indicator
+/// on the full-screen map. The dot is rendered at a fixed pixel
+/// size by the platform, so on a high-DPI phone at zoom 14 it
+/// covers a noticeable fraction of the visible trail. Off doesn't
+/// affect the logger or any other location flow — only whether the
+/// dot is rendered.
+class _LiveLocationDotTile extends ConsumerWidget {
+  const _LiveLocationDotTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final state = ref.watch(liveLocationDotEnabledProvider);
+    final on = state.asData?.value ?? true;
+    return SwitchListTile(
+      secondary: const Icon(Icons.my_location_outlined),
+      title: const Text('Live location dot'),
+      subtitle: const Text(
+        'Show your current location as a blue dot on the full map. '
+        'Turn off if it\'s too prominent on your screen — does not '
+        'affect the trail logger.',
+      ),
+      isThreeLine: true,
+      value: on,
+      onChanged: state.isLoading
+          ? null
+          : (v) => ref
+              .read(liveLocationDotEnabledProvider.notifier)
+              .set(v),
     );
   }
 }

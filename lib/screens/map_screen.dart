@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../models/ping.dart';
+import '../providers/map_settings_provider.dart';
 import '../providers/mbtiles_provider.dart';
 import '../providers/pings_provider.dart';
 import '../providers/tile_server_provider.dart';
@@ -376,6 +377,11 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final initial = visibleFixes.isNotEmpty
         ? LatLng(visibleFixes.last.lat!, visibleFixes.last.lon!)
         : const LatLng(54, -2); // GB centroid fallback
+    // Default-on while the toggle resolves so the existing UI flows
+    // don't flicker on every rebuild — the AsyncNotifier fast-paths
+    // its first read once SharedPreferences is warm.
+    final showLiveDot =
+        ref.watch(liveLocationDotEnabledProvider).valueOrNull ?? true;
 
     return Stack(
       children: [
@@ -391,8 +397,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           // already has fine-location permission so the plugin's
           // FusedLocationProvider source spins up immediately.
           // Tracking mode none = show the dot but don't auto-pan,
-          // since the user is reviewing trail history.
-          myLocationEnabled: true,
+          // since the user is reviewing trail history. User can
+          // toggle this off in Settings → Offline map → Live
+          // location dot if they find the native dot's size
+          // distracting; maplibre_gl's didUpdateWidget propagates
+          // the change without recreating the platform view.
+          myLocationEnabled: showLiveDot,
           myLocationTrackingMode: MyLocationTrackingMode.none,
           attributionButtonPosition: AttributionButtonPosition.bottomRight,
           onMapCreated: (c) {
@@ -764,10 +774,18 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         circleStrokeOpacity: 1.0,
       );
 
+  /// Red Accent 400 — vivid magenta-red that pops against both the
+  /// teal small pins and the amber previous ring, regardless of the
+  /// underlying tile palette (forest / city / wilderness all read
+  /// the same against this hue). Replaces `scheme.tertiary`, which
+  /// derives a muted warm tone from the teal seed and washed out
+  /// against the small pins.
+  static const _headFill = '#FF1744';
+
   CircleOptions _headOptions(LatLng p, ColorScheme scheme) => CircleOptions(
         geometry: p,
-        circleRadius: 8,
-        circleColor: scheme.tertiary.toHexStringRGB(),
+        circleRadius: 11,
+        circleColor: _headFill,
         circleStrokeWidth: 2,
         circleStrokeColor: '#FFFFFF',
         circleStrokeOpacity: 0.95,
@@ -814,9 +832,14 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     }
     await c.addGeoJsonSource(_heatmapSourceId, geo);
     final tertHex = scheme.tertiary.toHexStringRGB();
-    final tertR = scheme.tertiary.r.round();
-    final tertG = scheme.tertiary.g.round();
-    final tertB = scheme.tertiary.b.round();
+    // Flutter's Color.r/g/b/a are 0.0–1.0 doubles since the M3
+    // overhaul. Earlier code rounded them straight to int and got
+    // 0 or 1 — invalid rgba values that maplibre-native's
+    // expression parser crashed on as soon as the first heatmap
+    // tile rendered. Scale to 0–255 before rounding.
+    final tertR = (scheme.tertiary.r * 255).round();
+    final tertG = (scheme.tertiary.g * 255).round();
+    final tertB = (scheme.tertiary.b * 255).round();
     await c.addHeatmapLayer(
       _heatmapSourceId,
       _heatmapLayerId,
@@ -1183,7 +1206,6 @@ class _PlaybackHud extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final fmt = DateFormat('MMM d HH:mm');
     return Material(
       color: Colors.black.withValues(alpha: 0.55),
@@ -1197,7 +1219,7 @@ class _PlaybackHud extends StatelessWidget {
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                _Dot(color: theme.colorScheme.tertiary),
+                _Dot(color: const Color(0xFFFF1744)),
                 const SizedBox(width: 6),
                 Text(
                   'Now ${fmt.format(current.timestampUtc.toLocal())}',

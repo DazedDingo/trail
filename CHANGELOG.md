@@ -4,6 +4,17 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.10.4+68] — 2026-04-28
+
+### Fixed
+- **Heatmap crashed the app on toggle.** The rgba expression passed to `addHeatmapLayer` reads `scheme.tertiary.r/g/b.round()` — but in Flutter 3.27+ those getters are 0.0–1.0 doubles (the M3 colour overhaul), so `.round()` collapsed each channel to 0 or 1. The resulting expression was `rgba(0,0,1,0)` etc; maplibre-native's expression parser threw on it as soon as the first heatmap tile rendered. Now scaled to 0–255 before rounding.
+
+### Added
+- **Settings toggle: "Live location dot"** (Settings → Offline map → Live location dot). Disables maplibre_gl's native blue-dot indicator on the full-screen map for users who find the platform-rendered dot too prominent at high-DPI / zoom 14+. Default on (matches every prior build). The trail logger and every other location flow are unaffected — only the dot is hidden.
+
+### Changed
+- **Head pin is now vivid red (`#FF1744`) at radius 11.** The prior `scheme.tertiary` derived a muted warm tone from the teal seed and washed out against the small primary-tinted earlier pins. A fixed Material Red Accent 400 reads cleanly against any tile palette. The HUD's "Now" legend dot matches.
+
 ## [0.10.3+67] — 2026-04-28
 
 ### Fixed
