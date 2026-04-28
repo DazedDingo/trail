@@ -4,6 +4,12 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.8.0+46] — 2026-04-28
+
+### Changed
+- **Switch the openmaptiles source from `url:` (TileJSON) to `tiles:[]` (URL template).** Bypasses the TileJSON round-trip step entirely; MapLibre fetches MVT directly. Same delivery shape the renderer uses for any vector-tile URL — and the closest match to what worked in the +35 remote-PMTiles diagnostic. The bundled style now declares `minzoom: 0, maxzoom: 13, scheme: xyz` directly on the source.
+- **Tile Content-Type → `application/vnd.mapbox-vector-tile`.** The Mapbox-spec MIME for MVT; some maplibre-native paths key on this exact type for vector parsing.
+
 ## [0.8.0+45] — 2026-04-28
 
 ### Fixed

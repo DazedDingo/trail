@@ -231,8 +231,14 @@ class LocalTileServer {
         .sublist(0, blob.length < 8 ? blob.length : 8)
         .map((b) => b.toRadixString(16).padLeft(2, '0'))
         .join();
-    req.response.headers.contentType =
-        ContentType('application', 'x-protobuf');
+    // application/vnd.mapbox-vector-tile is the Mapbox-spec content
+    // type for MVT; some renderer paths only recognise MVT when this
+    // exact type comes back. application/x-protobuf is also used in
+    // the wild but trying the spec-blessed one first.
+    req.response.headers.contentType = ContentType(
+      'application',
+      'vnd.mapbox-vector-tile',
+    );
     req.response.headers.set('Cache-Control', 'no-cache');
     if (isGz) {
       req.response.headers.set('Content-Encoding', 'gzip');

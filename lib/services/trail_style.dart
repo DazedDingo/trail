@@ -68,7 +68,15 @@ class TrailStyle {
   }) {
     final lower = activeRegionPath.toLowerCase();
     final url = switch ((lower.endsWith('.mbtiles'), tileServerPort)) {
-      (true, final int port) => 'http://127.0.0.1:$port/tilejson.json',
+      // 0.8.0+46: bypass TileJSON entirely. The bundled style now
+      // declares a `tiles: ["pmtiles://__TRAIL_ACTIVE_REGION__"]`
+      // array; we substitute the placeholder with the per-tile URL
+      // template so MapLibre fetches MVT directly without a TileJSON
+      // round-trip first. Reduces the moving parts to "just MVT
+      // bytes from a URL" — same as the remote PMTiles diagnostic
+      // path that rendered cleanly in +35.
+      (true, final int port) =>
+        'http://127.0.0.1:$port/{z}/{x}/{y}.pbf',
       (true, _) => 'mbtiles://$activeRegionPath',
       _ => 'pmtiles://file://$activeRegionPath',
     };

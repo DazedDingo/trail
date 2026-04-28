@@ -9,7 +9,12 @@
   "sources": {
     "openmaptiles": {
       "type": "vector",
-      "url": "pmtiles://__TRAIL_ACTIVE_REGION__"
+      "tiles": [
+        "pmtiles://__TRAIL_ACTIVE_REGION__"
+      ],
+      "minzoom": 0,
+      "maxzoom": 13,
+      "scheme": "xyz"
     }
   },
   "sprite": "asset://flutter_assets/assets/maptiles/sprites/osm-liberty",

@@ -40,14 +40,18 @@ void main() {
         () {
       // 0.8.0+40 workaround: native local-file rendering broken on
       // Android, so the active MBTiles is served via LocalTileServer
-      // and MapLibre fetches as a regular HTTP source.
-      const raw = '"url": "pmtiles://__TRAIL_ACTIVE_REGION__"';
+      // and MapLibre fetches as a regular HTTP source. As of 0.8.0+46
+      // the substitution writes a per-tile URL template (not a
+      // tilejson URL) — the bundled style was switched to a
+      // `tiles[]` array source so MapLibre fetches MVT directly,
+      // skipping the TileJSON round-trip.
+      const raw = '"tiles": ["pmtiles://__TRAIL_ACTIVE_REGION__"]';
       final out = TrailStyle.substituteRegionPath(
         raw,
         '/x/gb.mbtiles',
         tileServerPort: 8327,
       );
-      expect(out, contains('http://127.0.0.1:8327/tilejson.json'));
+      expect(out, contains('http://127.0.0.1:8327/{z}/{x}/{y}.pbf'));
       expect(out, isNot(contains('mbtiles://')));
       expect(out, isNot(contains('__TRAIL_ACTIVE_REGION__')));
     });
