@@ -124,7 +124,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
         title: const Text('Settings'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.go('/home'),
+          // `pop` if there's a stack (came in via push from /home);
+          // fall back to /home only when this screen was reached by
+          // deep-link / replace and there's nothing to pop. Avoids
+          // the previous behaviour where every back button replaced
+          // the stack and lost the user's history (map → regions →
+          // back landing on /settings instead of /map, etc.).
+          onPressed: () => context.canPop() ? context.pop() : context.go('/home'),
         ),
       ),
       body: ListView(

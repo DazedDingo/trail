@@ -87,7 +87,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         title: const Text('Trail map'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.go('/home'),
+          onPressed: () =>
+              context.canPop() ? context.pop() : context.go('/home'),
         ),
         actions: [
           IconButton(
@@ -113,7 +114,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           IconButton(
             tooltip: 'Regions',
             icon: const Icon(Icons.layers_outlined),
-            onPressed: () => context.go('/regions'),
+            // Push so the back button returns to /map rather than
+            // resetting the user to /home or /settings.
+            onPressed: () => context.push('/regions'),
           ),
         ],
       ),

@@ -147,7 +147,8 @@ class _ArchiveScreenState extends ConsumerState<ArchiveScreen> {
         title: const Text('Archive older pings'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.go('/settings'),
+          onPressed: () =>
+              context.canPop() ? context.pop() : context.go('/settings'),
         ),
       ),
       body: ListView(

@@ -28,7 +28,8 @@ class RegionsScreen extends ConsumerWidget {
         title: const Text('Offline map regions'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.go('/settings'),
+          onPressed: () =>
+              context.canPop() ? context.pop() : context.go('/settings'),
         ),
         actions: [
           // Diagnostic only — flips the active region to a synthetic

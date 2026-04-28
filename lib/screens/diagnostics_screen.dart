@@ -143,7 +143,8 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
         title: const Text('Diagnostics'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.go('/settings'),
+          onPressed: () =>
+              context.canPop() ? context.pop() : context.go('/settings'),
         ),
         actions: [
           IconButton(

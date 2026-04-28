@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.8.3+55] — 2026-04-28
+
+### Fixed
+- **AppBar back arrows landed on the wrong screen.** Every back button used `context.go('/parent')`, which *replaces* the GoRouter stack with the destination — so `/home → /map → tap Regions icon → back` landed on `/settings` instead of `/map`, and any deep-nested screen lost its history. Switched the leading arrows on Map / Settings / Regions / Archive / Diagnostics / Home-location to `context.pop()` (with a fallback to the natural parent route only when nothing's on the stack), and changed the Map screen's Regions actions icon from `go` to `push` so it nests under `/map` rather than wiping the stack.
+
 ## [0.8.3+54] — 2026-04-28
 
 ### Fixed

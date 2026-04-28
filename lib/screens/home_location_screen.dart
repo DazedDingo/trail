@@ -136,7 +136,8 @@ class _HomeLocationScreenState extends ConsumerState<HomeLocationScreen> {
         title: const Text('Home location'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.go('/settings'),
+          onPressed: () =>
+              context.canPop() ? context.pop() : context.go('/settings'),
         ),
       ),
       body: ListView(
