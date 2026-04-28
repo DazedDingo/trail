@@ -164,6 +164,39 @@ class CadenceStore {
   }
 }
 
+/// Persists the user's opt-in for motion-aware skipping. When on, the
+/// periodic worker checks the most-recent two pings; if they're
+/// within `stationaryThresholdMeters` of each other AND the latest
+/// is younger than `confirmAfter`, the worker logs a `no_fix` row
+/// with the "motion-aware skip" note and skips the GPS warm-up
+/// entirely. After `confirmAfter` worth of consecutive skips the
+/// next call falls through to a real fix so a slow drift can't go
+/// undetected. Off by default — preserves the legacy every-tick-is
+/// -real behaviour for users who'd rather have full data over
+/// battery savings.
+class MotionAwareStore {
+  static const _key = 'trail_motion_aware_v1';
+
+  /// Distance threshold (m) below which two consecutive pings count
+  /// as "stationary". 50 m comfortably covers GPS jitter at typical
+  /// outdoor accuracy and indoor cell-only fixes.
+  static const double stationaryThresholdMeters = 50;
+
+  /// How long we'll keep skipping GPS while stationary before forcing
+  /// a real fix to confirm.
+  static const Duration confirmAfter = Duration(hours: 2);
+
+  static Future<bool> isEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_key) ?? false;
+  }
+
+  static Future<void> set(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_key, value);
+  }
+}
+
 /// High-level mode switch. Call this from the Settings toggle.
 ///
 /// WorkManager mode: cancels any pending exact alarm, then re-enqueues

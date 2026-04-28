@@ -178,6 +178,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           const _SectionHeader('Scheduling'),
           const _SchedulerModeTile(),
           const _CadenceTile(),
+          const _MotionAwareTile(),
           const _SchedulerEventsTile(),
           const Divider(),
           const _SectionHeader('Permissions'),
@@ -1056,6 +1057,53 @@ class _GithubPatTileState extends State<_GithubPatTile> {
                 ),
               ],
             ),
+    );
+  }
+}
+
+/// Motion-aware skip toggle. When on, the periodic worker skips the
+/// GPS warm-up entirely (logs a `no_fix` row with note "motion-aware
+/// skip") if the two most-recent fixes are within 50 m of each other
+/// AND the latest is < 2 h old. Saves the bulk of a stationary
+/// day's battery cost; re-confirms with a real fix after 2 h of
+/// consecutive skips so slow drift can't go undetected.
+class _MotionAwareTile extends StatefulWidget {
+  const _MotionAwareTile();
+
+  @override
+  State<_MotionAwareTile> createState() => _MotionAwareTileState();
+}
+
+class _MotionAwareTileState extends State<_MotionAwareTile> {
+  bool? _enabled;
+
+  @override
+  void initState() {
+    super.initState();
+    MotionAwareStore.isEnabled().then((v) {
+      if (mounted) setState(() => _enabled = v);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final on = _enabled ?? false;
+    return SwitchListTile(
+      secondary: const Icon(Icons.directions_walk_outlined),
+      title: const Text('Motion-aware skipping'),
+      subtitle: const Text(
+        'Skip GPS when the last two fixes are within 50 m and the '
+        'newest is fresh. Logs a no_fix row instead. Big battery '
+        'saver on stationary days; full fix re-confirms after 2 h.',
+      ),
+      isThreeLine: true,
+      value: on,
+      onChanged: _enabled == null
+          ? null
+          : (v) async {
+              setState(() => _enabled = v);
+              await MotionAwareStore.set(v);
+            },
     );
   }
 }

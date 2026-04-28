@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.9.3+60] — 2026-04-28
+
+### Added
+- **Motion-aware skip mode** (Settings → Scheduling → Motion-aware skipping; off by default). When the periodic worker fires, if the two most-recent fixes are within 50 m of each other AND the newest is < 2 h old, the worker logs a `no_fix` row with note `motion-aware skip (Xm, Ym old)` and skips the GPS warm-up entirely. GPS warm-up is the most expensive part of every periodic tick, so on a stationary day at home you skip the bulk of the cost; the next real fix is forced after 2 h of consecutive skips so a slow drift can't go undetected. Manual "Run ping now" and the no-fix retry path are unaffected — only the periodic 4 h / 30 min worker is allowed to skip.
+
 ## [0.9.2+59] — 2026-04-28
 
 ### Added

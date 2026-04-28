@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/widgets.dart';
 import 'package:workmanager/workmanager.dart';
 
@@ -183,11 +185,31 @@ Future<bool> _handleScheduled() async {
   // ~30s on GPS. `TrailDatabase.open` throws [PassphraseNeededException]
   // in that case, caught by the dispatcher.
   final db = await TrailDatabase.open();
-  final location = LocationService();
-  // Grab battery first — we need it even if we skip the fix entirely.
-  final snapshot = await location.getScheduledPing();
   try {
     final dao = PingDao(db);
+
+    // Motion-aware short-circuit. When the user has it on AND the last
+    // two real fixes are < 50 m apart AND the latest is < 2 h old we
+    // log a no_fix row with note "motion-aware skip" and *don't* warm
+    // up GPS — that's the most expensive part of every periodic tick.
+    // Falls through to the normal fix path after 2 h of consecutive
+    // skips so slow drift can't go undetected forever.
+    if (await MotionAwareStore.isEnabled()) {
+      final motionSkip = await _maybeMotionAwareSkip(dao);
+      if (motionSkip != null) {
+        await dao.insert(motionSkip);
+        await WorkerRunLog.record(
+          task: WorkmanagerScheduler.periodicTaskName,
+          outcome: 'motion_aware_skip',
+          note: motionSkip.note,
+        );
+        return true;
+      }
+    }
+
+    final location = LocationService();
+    // Grab battery first — we need it even if we skip the fix entirely.
+    final snapshot = await location.getScheduledPing();
     if (SchedulerPolicy.shouldSkipForLowBattery(snapshot.batteryPct)) {
       await dao.insert(Ping(
         timestampUtc: DateTime.now().toUtc(),
@@ -296,3 +318,58 @@ Future<bool> _handleBoot() async {
   // And immediately attempt a fresh ping without waiting for the 4h window.
   return _handleScheduled();
 }
+
+/// Decides whether the periodic worker should short-circuit GPS for
+/// this tick because the user is plausibly stationary. Returns a
+/// pre-built `no_fix` Ping to log when skipping; null when the worker
+/// should proceed to a real fix.
+///
+/// Heuristic: the two most-recent pings have GPS fixes within
+/// `MotionAwareStore.stationaryThresholdMeters` of each other AND the
+/// newest is younger than `MotionAwareStore.confirmAfter`. A fix
+/// outside that window forces a real ping so a slow drift can't go
+/// undetected.
+Future<Ping?> _maybeMotionAwareSkip(PingDao dao) async {
+  final recent = await dao.recent(limit: 2);
+  if (recent.length < 2) return null;
+  final newest = recent[0]; // recent() returns newest-first
+  final older = recent[1];
+  if (newest.lat == null ||
+      newest.lon == null ||
+      older.lat == null ||
+      older.lon == null) {
+    return null;
+  }
+  final dist = _greatCircleMeters(
+    newest.lat!,
+    newest.lon!,
+    older.lat!,
+    older.lon!,
+  );
+  if (dist >= MotionAwareStore.stationaryThresholdMeters) return null;
+
+  final age = DateTime.now().toUtc().difference(newest.timestampUtc);
+  if (age >= MotionAwareStore.confirmAfter) return null;
+
+  return Ping(
+    timestampUtc: DateTime.now().toUtc(),
+    source: PingSource.noFix,
+    note: 'motion-aware skip '
+        '(${dist.toStringAsFixed(0)}m, '
+        '${age.inMinutes}m old)',
+  );
+}
+
+double _greatCircleMeters(double lat1, double lon1, double lat2, double lon2) {
+  const r = 6371000.0; // earth radius (m)
+  final dLat = _toRad(lat2 - lat1);
+  final dLon = _toRad(lon2 - lon1);
+  final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
+      math.cos(_toRad(lat1)) *
+          math.cos(_toRad(lat2)) *
+          math.sin(dLon / 2) *
+          math.sin(dLon / 2);
+  return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+}
+
+double _toRad(double deg) => deg * (math.pi / 180);
