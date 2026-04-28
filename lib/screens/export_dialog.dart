@@ -1,8 +1,9 @@
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../db/database.dart';
@@ -122,14 +123,14 @@ class _ExportDialogState extends State<ExportDialog> {
 
       final shareFiles = passphrase == null
           ? files
-          : await _encryptFiles(files, passphrase);
+          : <String>[await _bundleEncryptedZip(files, passphrase)];
 
       if (!mounted) return;
       Navigator.of(context).pop();
       await Share.shareXFiles(
         shareFiles.map(XFile.new).toList(),
         subject: 'Trail export ($_rangeLabel)'
-            '${_encrypt ? ' — encrypted' : ''}',
+            '${_encrypt ? ' — encrypted zip' : ''}',
       );
     } catch (e) {
       if (!mounted) return;
@@ -140,31 +141,28 @@ class _ExportDialogState extends State<ExportDialog> {
     }
   }
 
-  /// Reads each file at [paths] from disk, encrypts it with
-  /// [passphrase], writes a `<original>.enc` sibling, and returns
-  /// the encrypted paths. Plaintext temp files are best-effort
-  /// deleted afterwards so a careless OS file manager can't surface
-  /// them.
-  Future<List<String>> _encryptFiles(
+  /// Bundles every file in [paths] into a single AES-256 encrypted
+  /// zip via the native zip4j plugin and returns the zip path. The
+  /// plaintext temp files are best-effort deleted afterwards so a
+  /// careless OS file manager can't surface them.
+  Future<String> _bundleEncryptedZip(
     List<String> paths,
     String passphrase,
   ) async {
-    final out = <String>[];
+    final dir = await getTemporaryDirectory();
+    final ts = DateTime.now().toUtc().millisecondsSinceEpoch;
+    final zipPath = p.join(dir.path, 'trail_export_$ts.zip');
+    await EncryptedExportService.createZip(
+      inputPaths: paths,
+      outputPath: zipPath,
+      passphrase: passphrase,
+    );
     for (final path in paths) {
-      final file = File(path);
-      final bytes = await file.readAsBytes();
-      final encrypted = EncryptedExportService.encrypt(
-        Uint8List.fromList(bytes),
-        passphrase,
-      );
-      final encPath = '$path.enc';
-      await File(encPath).writeAsBytes(encrypted, flush: true);
-      out.add(encPath);
       try {
-        await file.delete();
+        await File(path).delete();
       } catch (_) {/* best-effort */}
     }
-    return out;
+    return zipPath;
   }
 
   /// Bottom-sheet-style passphrase dialog with the same validation
@@ -184,9 +182,10 @@ class _ExportDialogState extends State<ExportDialog> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               const Text(
-                'Pick a passphrase. The file is AES-256-GCM with a '
-                'PBKDF2-derived key (210k iterations). Decrypt with '
-                'docs/decrypt-export.py from this repo.',
+                'Pick a passphrase. Output is a standard AES-256 '
+                'encrypted zip — open it with 7-Zip, macOS Archive '
+                'Utility, or Linux `7z x`. No Trail-specific tooling '
+                'needed on the recipient side.',
                 style: TextStyle(fontSize: 12),
               ),
               const SizedBox(height: 12),
@@ -294,8 +293,7 @@ class _ExportDialogState extends State<ExportDialog> {
               secondary: const Icon(Icons.lock_outline),
               title: const Text('Encrypt with passphrase'),
               subtitle: const Text(
-                'AES-256-GCM, PBKDF2 (210k). Decrypt with '
-                'docs/decrypt-export.py.',
+                'AES-256 zip. Open with 7-Zip / Archive Utility / 7z.',
               ),
               isThreeLine: true,
               value: _encrypt,

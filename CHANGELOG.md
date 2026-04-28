@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.9.6+63] — 2026-04-27
+
+### Changed
+- **Encrypted export switched from `TRLENC01` to a standard AES-256 zip.** The previous format required a Python decrypt script — too much friction. Now the toggle produces a single `trail_export_<ts>.zip` containing every GPX/CSV in the run, AES-256 encrypted via zip4j on the native side (new `EncryptedZipPlugin` Kotlin MethodChannel + `net.lingala.zip4j:zip4j:2.11.5`). Opens directly with 7-Zip, macOS Archive Utility, or Linux `7z x` — no Trail-specific tooling on the recipient side. Plaintext temp files are still best-effort deleted after the zip is built. `docs/decrypt-export.py` removed.
+
 ## [0.9.5+62] — 2026-04-28
 
 ### Added

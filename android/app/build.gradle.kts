@@ -73,6 +73,14 @@ dependencies {
     // resolution still goes through maplibre_gl + the resolutionStrategy
     // override above (13.0.3-pre0).
     compileOnly("org.maplibre.gl:android-sdk-opengl:13.0.+")
+
+    // zip4j writes the standard AES-256 encrypted zips that 7-Zip,
+    // macOS Archive Utility (with the StuffIt-friendly variant) and
+    // Linux `7z x` open out of the box. EncryptedZipPlugin wraps the
+    // exported GPX/CSV files in one of these so the recipient never
+    // needs Trail-specific tooling — the previous TRLENC01 format
+    // required a Python decrypt script and was friction.
+    implementation("net.lingala.zip4j:zip4j:2.11.5")
 }
 
 // Pin the maplibre-native Android SDK to the latest pre-release on top
