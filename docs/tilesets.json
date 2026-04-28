@@ -1,5 +1,16 @@
 {
   "$comment": "Curated tileset catalog read by the in-app Regions browser. Each entry must have id/name/description/url/sizeBytes; url should be a stable direct download (e.g. a GitHub Release asset under DazedDingo/trail's `tilesets-v1` release). Add or remove entries here and the next app launch picks them up.",
   "version": 1,
-  "regions": []
+  "regions": [
+    {
+      "id": "dartmoor",
+      "name": "dartmoor",
+      "description": "Dartmoor \u00b7 Devon \u00b7 National Park",
+      "url": "https://github.com/DazedDingo/trail/releases/download/tilesets-v1/dartmoor.mbtiles",
+      "sizeBytes": 2641920,
+      "bbox": "-4.131,50.439,-3.713,50.695",
+      "maxzoom": 13,
+      "area": "great-britain"
+    }
+  ]
 }
