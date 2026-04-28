@@ -216,20 +216,32 @@ class LocalTileServer {
       await req.response.close();
       return;
     }
+    // MBTiles spec: vector tiles are gzipped at rest. The +40/+42
+    // experiments served the gzipped bytes raw (with and without
+    // Content-Encoding: gzip) and maplibre-native rendered nothing
+    // either way — neither OkHttp transparent decompression nor
+    // maplibre's own magic-bytes sniff fired correctly. Decompress
+    // on the server and send plain MVT, which is what maplibre's
+    // MVT parser expects unconditionally.
+    final List<int> body;
+    try {
+      body = (blob.length >= 2 && blob[0] == 0x1f && blob[1] == 0x8b)
+          ? gzip.decode(blob)
+          : blob;
+    } catch (e) {
+      _lastTileStatus = 'z=$z x=$x y=$y → 500 (gunzip: $e)';
+      req.response.statusCode = HttpStatus.internalServerError;
+      await req.response.close();
+      return;
+    }
     req.response.headers.contentType =
         ContentType('application', 'x-protobuf');
-    // Planetiler-emitted MVT blobs are gzip-compressed at rest. We do
-    // *not* set `Content-Encoding: gzip` — that would make Android's
-    // OkHttp transparently decompress, but maplibre-native then tries
-    // to gzip-decompress the *already-decompressed* bytes (it sniffs
-    // the magic itself per spec) and fails to parse. Sending the raw
-    // gzipped bytes without the header keeps OkHttp's hands off and
-    // lets maplibre-native decompress once.
     req.response.headers.set('Cache-Control', 'no-cache');
-    req.response.headers.contentLength = blob.length;
-    req.response.add(blob);
+    req.response.headers.contentLength = body.length;
+    req.response.add(body);
     await req.response.close();
-    _lastTileStatus = 'z=$z x=$x y=$y → 200 (${blob.length}B)';
+    _lastTileStatus =
+        'z=$z x=$x y=$y → 200 (${blob.length}→${body.length}B)';
   }
 
   static final RegExp _tilePathRegex =

@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.8.0+44] — 2026-04-28
+
+### Fixed
+- **Server-side gunzip of MVT tiles.** With `+43`'s diagnostic showing 200 OK + 138 KB tile blobs reaching MapLibre, the renderer was still drawing nothing. Both Content-Encoding settings tried in `+40`/`+42` failed: with `Content-Encoding: gzip` OkHttp transparently decompressed but maplibre-native double-decompressed the result; without the header maplibre-native didn't auto-detect gzip from the magic bytes (despite the spec saying it should). `LocalTileServer` now decompresses on the server and ships plain MVT bytes — what maplibre's MVT parser expects unconditionally. The `lastTile` line in the diagnostic now reads `<compressed>→<decompressed>B` so the gunzip is visible.
+
 ## [0.8.0+43] — 2026-04-28
 
 ### Fixed
