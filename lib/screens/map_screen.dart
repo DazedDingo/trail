@@ -46,6 +46,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   DateTime? _sliderMax;
   bool _initialFitDone = false;
 
+  /// Optional explicit start/end filter; both null means "show every
+  /// ping ever logged". When set, the time slider's range and the
+  /// rendered annotations are clamped to this window. Cleared by
+  /// tapping the calendar icon → "Clear filter".
+  DateTimeRange? _dateFilter;
+
   /// Playback: advances `_sliderMax` one ping at a time until it reaches
   /// the last fix, then auto-pauses. Step interval = `_basePlaybackStep
   /// / _playbackSpeed`, so 1× shows each ping for ~350ms, 4× for ~90ms,
@@ -92,6 +98,17 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         ),
         actions: [
           IconButton(
+            tooltip: _dateFilter == null
+                ? 'Filter by date range'
+                : 'Filter active — tap to change/clear',
+            icon: Icon(
+              _dateFilter == null
+                  ? Icons.date_range_outlined
+                  : Icons.event_available,
+            ),
+            onPressed: _openDateFilterSheet,
+          ),
+          IconButton(
             tooltip: _showHeatmap ? 'Hide heatmap' : 'Show heatmap',
             icon: Icon(
               _showHeatmap
@@ -124,10 +141,10 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(child: Text('Error: $e')),
         data: (pings) {
-          final fixes = pings
+          final allFixes = pings
               .where((p) => p.lat != null && p.lon != null)
               .toList(growable: false);
-          if (fixes.isEmpty) {
+          if (allFixes.isEmpty) {
             return const _EmptyState(
               message: 'No fixes yet — trail will appear after a few pings.',
             );
@@ -139,10 +156,90 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   'Tap the Regions icon (top right) → Install.',
             );
           }
+          // Apply the optional date filter. The filtered list is what
+          // the slider, annotation refresh, and bbox-fit all see; the
+          // unfiltered tail outside the window is invisible to the
+          // map for as long as the filter is active.
+          final fixes = _dateFilter == null
+              ? allFixes
+              : allFixes
+                  .where((p) =>
+                      !p.timestampUtc.isBefore(_dateFilter!.start) &&
+                      !p.timestampUtc
+                          .isAfter(_dateFilter!.end.add(
+                              const Duration(days: 1) -
+                                  const Duration(milliseconds: 1))))
+                  .toList(growable: false);
+          if (fixes.isEmpty) {
+            return _EmptyState(
+              message:
+                  'No fixes in '
+                  '${_formatRange(_dateFilter!)}. '
+                  'Tap the calendar icon to clear or change the filter.',
+            );
+          }
           return _buildBody(context, fixes, activeRegion);
         },
       ),
     );
+  }
+
+  Future<void> _openDateFilterSheet() async {
+    final allPings = ref.read(allPingsProvider).valueOrNull ?? const [];
+    final fixes = allPings
+        .where((p) => p.lat != null && p.lon != null)
+        .toList(growable: false);
+    final earliest = fixes.isEmpty
+        ? DateTime.now().toUtc().subtract(const Duration(days: 365))
+        : fixes.first.timestampUtc;
+    final latest = fixes.isEmpty
+        ? DateTime.now().toUtc()
+        : fixes.last.timestampUtc;
+    final initial = _dateFilter ??
+        DateTimeRange(
+          start: latest.subtract(const Duration(days: 7)).toLocal(),
+          end: latest.toLocal(),
+        );
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: earliest.toLocal().subtract(const Duration(days: 1)),
+      lastDate: latest.toLocal().add(const Duration(days: 1)),
+      initialDateRange: DateTimeRange(
+        start: initial.start.isBefore(earliest.toLocal())
+            ? earliest.toLocal()
+            : initial.start,
+        end: initial.end.isAfter(latest.toLocal())
+            ? latest.toLocal()
+            : initial.end,
+      ),
+      helpText: 'Filter trail by date',
+      saveText: 'Apply',
+    );
+    if (picked == null) return;
+    if (!mounted) return;
+    _pausePlayback();
+    setState(() {
+      _dateFilter = picked;
+      _sliderMax = null;
+      _initialFitDone = false; // re-fit camera to the new bbox
+    });
+    _refreshAnnotationsIfReady();
+  }
+
+  void _clearDateFilter() {
+    if (_dateFilter == null) return;
+    _pausePlayback();
+    setState(() {
+      _dateFilter = null;
+      _sliderMax = null;
+      _initialFitDone = false;
+    });
+    _refreshAnnotationsIfReady();
+  }
+
+  String _formatRange(DateTimeRange r) {
+    final fmt = DateFormat.yMMMd();
+    return '${fmt.format(r.start)} – ${fmt.format(r.end)}';
   }
 
   Widget _buildBody(
@@ -172,6 +269,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             },
           ),
         ),
+        if (_dateFilter != null)
+          _DateFilterBanner(
+            range: _dateFilter!,
+            label: _formatRange(_dateFilter!),
+            onClear: _clearDateFilter,
+          ),
         _TimeSlider(
           first: first,
           last: last,
@@ -595,6 +698,54 @@ class _TimeSlider extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _DateFilterBanner extends StatelessWidget {
+  final DateTimeRange range;
+  final String label;
+  final VoidCallback onClear;
+  const _DateFilterBanner({
+    required this.range,
+    required this.label,
+    required this.onClear,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.secondaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
+        child: Row(
+          children: [
+            Icon(Icons.event_available,
+                size: 18, color: scheme.onSecondaryContainer),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Filter: $label',
+                style: TextStyle(
+                  color: scheme.onSecondaryContainer,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+            TextButton(
+              onPressed: onClear,
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+              ),
+              child: const Text('Clear'),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -34,6 +35,7 @@ class LocalTileServer {
   String? _activePath;
   int _tileRequestCount = 0;
   String _lastTileStatus = '—';
+  final _TileCache _tileCache = _TileCache(maxBytes: 50 * 1024 * 1024);
 
   /// Returns the bound port, or `null` if the server isn't running.
   int? get port => _server?.port;
@@ -91,6 +93,7 @@ class LocalTileServer {
     }
     _activePath = null;
     _metadata = const {};
+    _tileCache.clear();
   }
 
   Future<Map<String, dynamic>> _readMetadata(Database db) async {
@@ -234,6 +237,18 @@ class LocalTileServer {
 
   Future<void> _serveTile(HttpRequest req, int z, int x, int y) async {
     _tileRequestCount++;
+    final cacheKey = '$z/$x/$y';
+    // Hot-path cache: panning back over an already-fetched viewport
+    // is the common case; reading from the SQLite + gunzip path
+    // every time is wasted work. ~50 MB LRU cap holds 1000+ typical
+    // vector tiles; eviction is invisible to the user since misses
+    // just fall through to the original SQL query.
+    final cached = _tileCache.get(cacheKey);
+    if (cached != null) {
+      _writeTileResponse(req, cached);
+      _lastTileStatus = 'z=$z x=$x y=$y → 200 cached (${cached.length}B)';
+      return;
+    }
     final db = _db;
     if (db == null) {
       _lastTileStatus = 'z=$z x=$x y=$y → 503 (db closed)';
@@ -273,38 +288,37 @@ class LocalTileServer {
       await req.response.close();
       return;
     }
-    // MBTiles vector tiles are gzipped at rest. Send them through
-    // exactly the way OkHttp (Android's HTTP client used by
-    // maplibre-native) is built for: response declares
-    // `Content-Encoding: gzip`, body is the gzipped bytes; OkHttp
-    // transparently decompresses, maplibre's MVT parser receives raw
-    // bytes. This is the standard remote-tile delivery shape, so
-    // it's the closest match to the remote-PMTiles diagnostic that
-    // *did* render. (Earlier experiments tried no header + raw
-    // gzipped body, no header + server-decompressed body — both
-    // white. This is the third combination.)
+    _tileCache.put(cacheKey, blob);
+    _writeTileResponse(req, blob);
     final isGz = blob.length >= 2 && blob[0] == 0x1f && blob[1] == 0x8b;
-    final firstBytes = blob
-        .sublist(0, blob.length < 8 ? blob.length : 8)
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join();
-    // application/vnd.mapbox-vector-tile is the Mapbox-spec content
-    // type for MVT; some renderer paths only recognise MVT when this
-    // exact type comes back. application/x-protobuf is also used in
-    // the wild but trying the spec-blessed one first.
+    _lastTileStatus =
+        'z=$z x=$x y=$y → 200 (${blob.length}B gz=$isGz, cached)';
+  }
+
+  /// Writes the tile response with the headers maplibre-native expects
+  /// for MVT vector tiles. MBTiles stores tiles gzipped; we ship the
+  /// bytes verbatim with `Content-Encoding: gzip` so OkHttp on Android
+  /// transparently decompresses (same delivery shape as the remote
+  /// PMTiles demo that proved the pipeline in 0.8.0+35). Cache-Control
+  /// is long because the URL embeds the tile-server's random port,
+  /// which changes on every app launch — within a session it's
+  /// effectively a fresh origin so revalidation is wasted work.
+  void _writeTileResponse(HttpRequest req, List<int> blob) {
+    final isGz = blob.length >= 2 && blob[0] == 0x1f && blob[1] == 0x8b;
     req.response.headers.contentType = ContentType(
       'application',
       'vnd.mapbox-vector-tile',
     );
-    req.response.headers.set('Cache-Control', 'no-cache');
+    req.response.headers.set(
+      'Cache-Control',
+      'public, max-age=31536000, immutable',
+    );
     if (isGz) {
       req.response.headers.set('Content-Encoding', 'gzip');
     }
     req.response.headers.contentLength = blob.length;
     req.response.add(blob);
-    await req.response.close();
-    _lastTileStatus =
-        'z=$z x=$x y=$y → 200 (${blob.length}B gz=$isGz $firstBytes)';
+    req.response.close();
   }
 
   static final RegExp _tilePathRegex =
@@ -315,4 +329,41 @@ class LocalTileServer {
       RegExp(r'^/glyphs/([^/]+)/([^/.]+)\.pbf$');
   static final RegExp _spritePathRegex =
       RegExp(r'^/sprites/([^/.]+)(@2x)?(\.json|\.png)?$');
+}
+
+/// Per-process LRU cache for served tile blobs. Insertion order in a
+/// `LinkedHashMap` IS the LRU order — `get` re-inserts to bump
+/// recency, `put` evicts oldest entries until the byte budget is
+/// satisfied. Reset on `LocalTileServer.stop` so a region swap never
+/// serves stale tiles from a previous file.
+class _TileCache {
+  _TileCache({required this.maxBytes});
+
+  final int maxBytes;
+  final LinkedHashMap<String, List<int>> _entries = LinkedHashMap();
+  int _bytes = 0;
+
+  List<int>? get(String key) {
+    final value = _entries.remove(key);
+    if (value == null) return null;
+    _entries[key] = value; // move to MRU end
+    return value;
+  }
+
+  void put(String key, List<int> value) {
+    final old = _entries.remove(key);
+    if (old != null) _bytes -= old.length;
+    _entries[key] = value;
+    _bytes += value.length;
+    while (_bytes > maxBytes && _entries.isNotEmpty) {
+      final lruKey = _entries.keys.first;
+      final lru = _entries.remove(lruKey)!;
+      _bytes -= lru.length;
+    }
+  }
+
+  void clear() {
+    _entries.clear();
+    _bytes = 0;
+  }
 }

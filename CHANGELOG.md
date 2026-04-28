@@ -4,6 +4,16 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.9.1+57] — 2026-04-28
+
+### Added
+- **Explicit date-range filter on the full-screen map.** New calendar icon in the app bar opens a `showDateRangePicker` bounded to your actual ping history. Picking a range hides every fix outside the window — the time slider's first/last clamp to the window, the bbox-fit reframes to the filtered subset, and a banner above the slider shows `Filter: Apr 18 – Apr 25` with a one-tap Clear. Empty range gets its own empty-state.
+- **In-process LRU cache for served tiles.** `LocalTileServer` keeps the last ~50 MB of decompressed tile blobs in a `LinkedHashMap` (insertion order = LRU order). Repeat panning over the same viewport now skips the SQLite query + gunzip on every hit. Diagnostic's `lastTile` line marks `cached` for cache-served responses. Cleared on every `stop()` so a region swap can never serve a stale tile.
+- **Long Cache-Control on tile / glyph / sprite responses** (`public, max-age=31536000, immutable`). Each app launch picks a fresh random server port, so the URL itself is effectively a new origin per session — caching forever within a session is safe and lets MapLibre's OkHttp cache skip revalidation. Was `no-cache` before.
+
+### Changed
+- **Encrypted DB now opens in WAL journal mode** (`PRAGMA journal_mode=WAL` in `onOpen`). SQLCipher 3+ supports it. Lets the WorkManager worker's per-tick insert run concurrently with UI reads on the same path instead of serialising them. Idempotent on every open; no schema change.
+
 ## [0.9.0+56] — 2026-04-28
 
 ### Added

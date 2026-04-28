@@ -74,6 +74,15 @@ class TrailDatabase {
       version: _schemaVersion,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
+      onOpen: (db) async {
+        // WAL mode — concurrent reader/writer support so the
+        // WorkManager worker's per-tick insert doesn't block UI
+        // queries on the same path. SQLCipher 3+ supports WAL; the
+        // PRAGMA runs *after* the encryption key is provided so the
+        // mode-switch operates on the unlocked DB. Idempotent on
+        // every open.
+        await db.rawQuery('PRAGMA journal_mode=WAL');
+      },
       // `singleInstance: true` (sqflite's default) makes the platform
       // plugin return the *same* native database handle whenever
       // openDatabase is called for the same path — even from a
