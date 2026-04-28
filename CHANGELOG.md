@@ -4,6 +4,17 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.8.1+50] — 2026-04-28
+
+The renderer migration is finally settled — 0.8.1 is the first build of the rewrite the user has been able to actually use.
+
+### Fixed
+- **`@2x` sprite 404s.** The `LocalTileServer` regex was capturing the file extension into the wrong group, so `/sprites/osm-liberty@2x.json` and `.png` requests built an asset key without the extension and 404'd. Group accounting fixed; the user's log capture in +49 surfaced this immediately.
+- **Glyph range U+2000-U+20FF (General Punctuation) was missing.** Some UK place labels reference characters in this block (en/em dashes, primes); maplibre-native logged a 404 per affected font stack. Bundled `8192-8447.pbf` for Roboto Regular / Medium / Condensed Italic.
+
+### Removed
+- **Diagnostic overlay on the home-screen trail preview.** Now that the renderer works, the bottom-left attribution strip goes back to the simple `Offline: <name> · © OpenMapTiles © OSM contributors` line. The supporting plumbing (`MapLibreLogTrap`, `LocalTileServer.tileRequestCount`/`lastTileStatus`, `MapLibreLogReader`) stays — zero runtime cost when nothing reads it, and worth keeping around for the next time something on the renderer side breaks.
+
 ## [0.8.0+49] — 2026-04-28
 
 ### Fixed

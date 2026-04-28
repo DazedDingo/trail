@@ -1,16 +1,9 @@
-import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
-
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../models/ping.dart';
 import '../providers/tile_server_provider.dart';
-import '../services/local_tile_server.dart';
-import '../services/maplibre_log_reader.dart';
 import '../services/mbtiles_service.dart';
 import '../services/trail_style.dart';
 
@@ -46,7 +39,6 @@ class _TrailMapState extends ConsumerState<TrailMap> {
   MapLibreMapController? _controller;
   Future<String?>? _styleFuture;
   bool _styleReady = false;
-  String _lastEvent = 'mounting…';
   int? _tileServerPort;
 
   @override
@@ -216,22 +208,27 @@ class _TrailMapState extends ConsumerState<TrailMap> {
           attributionButtonPosition: AttributionButtonPosition.bottomRight,
           onMapCreated: (c) {
             _controller = c;
-            if (mounted) setState(() => _lastEvent = 'mapCreated');
           },
           onStyleLoadedCallback: () {
             _styleReady = true;
             _refreshAnnotations(fixes);
-            if (mounted) setState(() => _lastEvent = 'styleLoaded');
           },
         ),
         Positioned(
           left: 6,
-          right: 6,
           bottom: 6,
-          child: _DiagnosticOverlay(
-            lastEvent: _lastEvent,
-            regionPath: widget.activeRegion!.path,
-            tileServerPort: _tileServerPort,
+          child: Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.55),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              'Offline: ${widget.activeRegion!.name} · '
+              '© OpenMapTiles © OSM contributors',
+              style: const TextStyle(color: Colors.white, fontSize: 10),
+            ),
           ),
         ),
         Positioned(
@@ -272,196 +269,6 @@ class _TrailMapState extends ConsumerState<TrailMap> {
       );
 }
 
-class _DiagnosticOverlay extends StatefulWidget {
-  final String lastEvent;
-  final String regionPath;
-  final int? tileServerPort;
-  const _DiagnosticOverlay({
-    required this.lastEvent,
-    required this.regionPath,
-    required this.tileServerPort,
-  });
-
-  @override
-  State<_DiagnosticOverlay> createState() => _DiagnosticOverlayState();
-}
-
-class _DiagnosticOverlayState extends State<_DiagnosticOverlay> {
-  String _serverPing = '?';
-  List<String> _mapLogs = const [];
-  Timer? _refreshTimer;
-
-  static String _pathTail(String path) {
-    if (path.length <= 60) return path;
-    return path.substring(path.length - 60);
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _runServerPing();
-    // Poll the LocalTileServer counters every 2s so the user can
-    // pan the map and watch `tileReqs` and `lastTile` update — vital
-    // for telling apart "MapLibre never asked the server" from
-    // "MapLibre asked but the response was rejected".
-    _refreshTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
-      final logs = await MapLibreLogReader.getRecent();
-      if (mounted) setState(() => _mapLogs = logs);
-    });
-  }
-
-  @override
-  void dispose() {
-    _refreshTimer?.cancel();
-    super.dispose();
-  }
-
-  @override
-  void didUpdateWidget(covariant _DiagnosticOverlay old) {
-    super.didUpdateWidget(old);
-    if (old.tileServerPort != widget.tileServerPort) {
-      _runServerPing();
-    }
-  }
-
-  Future<void> _runServerPing() async {
-    final port = widget.tileServerPort;
-    if (port == null) {
-      if (mounted) setState(() => _serverPing = 'off');
-      return;
-    }
-    try {
-      final client = HttpClient();
-      final req = await client
-          .getUrl(Uri.parse('http://127.0.0.1:$port/tilejson.json'))
-          .timeout(const Duration(seconds: 2));
-      final resp = await req.close().timeout(const Duration(seconds: 2));
-      final body = await resp
-          .transform(const Utf8Decoder(allowMalformed: true))
-          .join()
-          .timeout(const Duration(seconds: 2));
-      client.close();
-      if (mounted) {
-        setState(() => _serverPing =
-            '${resp.statusCode} (${body.length}B)');
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _serverPing = 'fail: $e');
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final exists = File(widget.regionPath).existsSync();
-    final portText = widget.tileServerPort?.toString() ?? 'off';
-    final reqs = LocalTileServer.instance.tileRequestCount;
-    final lastStatus = LocalTileServer.instance.lastTileStatus;
-    // Last few maplibre log lines for the inline preview.
-    final logTail = _mapLogs.length <= 3
-        ? _mapLogs.join('\n')
-        : _mapLogs.sublist(_mapLogs.length - 3).join('\n');
-    final logFull = _mapLogs.isEmpty
-        ? '(no maplibre logs yet)'
-        : _mapLogs.join('\n');
-    final dump = 'last: ${widget.lastEvent}\n'
-        'fileExists: $exists\n'
-        'tileServerPort: $portText\n'
-        'serverPing: $_serverPing\n'
-        'tileReqs: $reqs\n'
-        'lastTile: $lastStatus\n'
-        'path: ${widget.regionPath}\n'
-        '\n--- maplibre logs (last ${_mapLogs.length}) ---\n'
-        '$logFull';
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(6),
-        onTap: () async {
-          await Clipboard.setData(ClipboardData(text: dump));
-          if (!context.mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Map diagnostic copied'),
-              duration: Duration(seconds: 2),
-            ),
-          );
-        },
-        onLongPress: _runServerPing,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-          decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.7),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          child: DefaultTextStyle(
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 12,
-              height: 1.25,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text('last: ${widget.lastEvent}'),
-                Text('fileExists: $exists'),
-                Text('port: $portText'),
-                Text(
-                  'serverPing: $_serverPing',
-                  overflow: TextOverflow.ellipsis,
-                ),
-                Text('tileReqs: $reqs'),
-                Text(
-                  'lastTile: $lastStatus',
-                  overflow: TextOverflow.ellipsis,
-                ),
-                Text(
-                  'tail: …${_pathTail(widget.regionPath)}',
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'mapLogs (${_mapLogs.length}):',
-                  style: const TextStyle(fontWeight: FontWeight.w600),
-                ),
-                if (_mapLogs.isEmpty)
-                  const Text(
-                    '(none yet)',
-                    style: TextStyle(color: Colors.white60),
-                  )
-                else
-                  // SelectableText so the log lines can be selected and
-                  // copied directly without going through the
-                  // clipboard-dump action; useful for grabbing a single
-                  // error message quickly. The tap handler below still
-                  // copies the WHOLE diagnostic + log buffer.
-                  SelectableText(
-                    logTail,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 11,
-                      height: 1.2,
-                    ),
-                  ),
-                const SizedBox(height: 2),
-                const Text(
-                  '(tap = copy ALL · long-press = retest+refresh)',
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: Colors.white70,
-                    fontStyle: FontStyle.italic,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
 
 class _PlaceholderFrame extends StatelessWidget {
   final double height;

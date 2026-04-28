@@ -133,13 +133,23 @@ class LocalTileServer {
         );
         return;
       }
-      // Sprites: /sprites/osm-liberty(.json|.png|@2x.json|@2x.png)
+      // Sprites: /sprites/<name>(@2x)?(.json|.png)
+      // Group 1 = base name (e.g. "osm-liberty"),
+      // Group 2 = "@2x" or null,
+      // Group 3 = ".json" or ".png" or null.
+      // The asset key needs ALL THREE (the previous `.png`/`.json`
+      // suffix wasn't being concatenated, which 404'd every @2x
+      // request — see the +49 log).
       final spriteMatch = _spritePathRegex.firstMatch(path);
       if (spriteMatch != null) {
-        final isJson = spriteMatch.group(2)?.endsWith('.json') ?? false;
+        final ext = spriteMatch.group(3) ?? '';
+        final isJson = ext == '.json';
+        final assetKey =
+            'assets/maptiles/sprites/${spriteMatch.group(1)}'
+            '${spriteMatch.group(2) ?? ''}$ext';
         await _serveAsset(
           req,
-          'assets/maptiles/sprites/${spriteMatch.group(1)}${spriteMatch.group(2) ?? ''}',
+          assetKey,
           isJson ? ContentType.json : ContentType('image', 'png'),
         );
         return;
