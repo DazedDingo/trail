@@ -4,6 +4,14 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.9.0+56] — 2026-04-28
+
+### Added
+- **Live "you are here" indicator on both maps.** maplibre_gl's native blue-dot location source is now enabled on the home-screen trail preview and the full-screen history map (`myLocationEnabled: true`, tracking mode `none` so it doesn't auto-pan — you're reviewing history, not navigating). No new permissions needed; uses Trail's existing fine-location grant. Position is live and unsaved — there's no DB write, the indicator just reflects whatever Android's FusedLocationProvider currently has.
+
+### Changed
+- **Curated regions now build at z14 by default.** The earlier z13 presets duplicated the GB-wide z13 file you already have installed. z14 unlocks footpath / fence / wall / building-outline detail you can't get from the GB tileset (which doesn't fit in a Releases asset at z14), so the catalog is now genuinely additive. Approximate sizes scaled ~2.5× — Lake District ~125 MB, Cairngorms ~200 MB, Cotswolds ~175 MB; smallest (Dartmoor / Exmoor / Northumberland / New Forest) ~60 MB. All comfortably fit GitHub's 2 GB per-asset Release cap.
+
 ## [0.8.3+55] — 2026-04-28
 
 ### Fixed

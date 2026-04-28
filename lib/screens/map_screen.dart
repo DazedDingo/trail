@@ -232,6 +232,13 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           compassEnabled: false,
           rotateGesturesEnabled: false,
           tiltGesturesEnabled: false,
+          // Native blue-dot live-location indicator. Trail's logger
+          // already has fine-location permission so the plugin's
+          // FusedLocationProvider source spins up immediately.
+          // Tracking mode none = show the dot but don't auto-pan,
+          // since the user is reviewing trail history.
+          myLocationEnabled: true,
+          myLocationTrackingMode: MyLocationTrackingMode.none,
           attributionButtonPosition: AttributionButtonPosition.bottomRight,
           onMapCreated: (c) => _controller = c,
           onStyleLoadedCallback: () {

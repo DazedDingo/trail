@@ -205,6 +205,13 @@ class _TrailMapState extends ConsumerState<TrailMap> {
           compassEnabled: false,
           rotateGesturesEnabled: false,
           tiltGesturesEnabled: false,
+          // Native blue-dot live-location indicator. The plugin uses
+          // Android's FusedLocationProvider which already has Trail's
+          // logger-required permissions. Tracking mode none = render
+          // the dot but don't auto-pan the camera; the user is
+          // reviewing trail history, not navigating.
+          myLocationEnabled: true,
+          myLocationTrackingMode: MyLocationTrackingMode.none,
           attributionButtonPosition: AttributionButtonPosition.bottomRight,
           onMapCreated: (c) {
             _controller = c;
