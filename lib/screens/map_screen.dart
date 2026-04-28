@@ -611,7 +611,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       _pathLine = await c.addLine(LineOptions(
         geometry: points,
         lineColor: scheme.primary.toHexStringRGB(),
-        lineWidth: 4,
+        lineWidth: 2,
         lineOpacity: 0.85,
       ));
     }
@@ -720,7 +720,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       _pathLine = await c.addLine(LineOptions(
         geometry: points,
         lineColor: scheme.primary.toHexStringRGB(),
-        lineWidth: 4,
+        lineWidth: 2,
         lineOpacity: 0.85,
       ));
     }
@@ -737,7 +737,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       _pathLine = await c.addLine(LineOptions(
         geometry: points,
         lineColor: scheme.primary.toHexStringRGB(),
-        lineWidth: 4,
+        lineWidth: 2,
         lineOpacity: 0.85,
       ));
     } else {
@@ -761,11 +761,13 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     return _smallOptions(points[i], scheme);
   }
 
-  // Pin sizes in this redesign sit subordinate to the trail line:
-  // earlier (3) < prev (5) < head (7) < line width (4 — visually
-  // wider since it's a stroke not a dot). The earlier-version sizes
-  // (4 / 10 / 11) competed with the line and dominated the screen
-  // on a phone at zoom 14. Down-scaled by ~40% across the board.
+  // All three pin tiers share radius 3 — hierarchy is encoded by
+  // colour only (teal / amber / red), not by size. Earlier
+  // iterations bumped head and prev up to 7/5 to make them obvious
+  // but they crowded the screen on a phone at zoom 14 and made the
+  // trail itself hard to follow. With uniform 3-pt radii and a
+  // 2-pt line the trail reads as the primary visual; the warm
+  // colours on the head and prev pins do the rest.
 
   CircleOptions _smallOptions(LatLng p, ColorScheme scheme) => CircleOptions(
         geometry: p,
@@ -773,16 +775,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         circleColor: scheme.primary.toHexStringRGB(),
         circleStrokeWidth: 0.5,
         circleStrokeColor: '#FFFFFF',
-        circleStrokeOpacity: 0.7,
+        circleStrokeOpacity: 0.6,
       );
 
-  /// Filled amber dot (no longer a ring) at radius 5 — the warm
-  /// hue is what makes it read as "previous", not the size or
-  /// stroke. Hollow rings at radius 10 worked semantically but
-  /// dominated the visual real estate.
   CircleOptions _prevOptions(LatLng p, ColorScheme scheme) => CircleOptions(
         geometry: p,
-        circleRadius: 5,
+        circleRadius: 3,
         circleColor: '#FFB300',
         circleStrokeWidth: 1,
         circleStrokeColor: '#FFFFFF',
@@ -790,15 +788,14 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       );
 
   /// Material Red Accent 400 (`#FF1744`) — vivid red that reads
-  /// cleanly on any tile palette. Radius 7 (down from 11) so it's
-  /// distinct without swallowing the trail.
+  /// cleanly on any tile palette without needing extra size.
   static const _headFill = '#FF1744';
 
   CircleOptions _headOptions(LatLng p, ColorScheme scheme) => CircleOptions(
         geometry: p,
-        circleRadius: 7,
+        circleRadius: 3,
         circleColor: _headFill,
-        circleStrokeWidth: 1.5,
+        circleStrokeWidth: 1,
         circleStrokeColor: '#FFFFFF',
         circleStrokeOpacity: 0.95,
       );

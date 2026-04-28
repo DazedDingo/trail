@@ -4,6 +4,12 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.10.7+71] — 2026-04-28
+
+### Changed
+- **All three pin tiers share radius 3 — hierarchy is colour only.** Head and prev had been bumped to 7/5 across the last few builds to make them visually obvious, but on a phone screen at zoom 14 they crowded the trail and the line was hard to follow. Now uniform 3-pt radii (red head / amber prev / teal earlier); the warm colours on the head and prev pins do the differentiation, no size signalling.
+- **Trail line down to 2 pt** (from 4). The thicker line was effectively a thick highlighter over the underlying tile detail; thin reads as a route, not a shouted-at line.
+
 ## [0.10.6+70] — 2026-04-28
 
 ### Changed
