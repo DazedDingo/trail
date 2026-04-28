@@ -1,0 +1,5 @@
+{
+  "$comment": "Curated tileset catalog read by the in-app Regions browser. Each entry must have id/name/description/url/sizeBytes; url should be a stable direct download (e.g. a GitHub Release asset under DazedDingo/trail's `tilesets-v1` release). Add or remove entries here and the next app launch picks them up.",
+  "version": 1,
+  "regions": []
+}

@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.8.2+51] — 2026-04-28
+
+### Added
+- **In-app region download — from URL or curated catalog.** The Regions screen's "Add region" FAB now opens a sheet with three sources: pick an existing file (the previous behaviour), download from a direct URL, or browse the curated catalog. URL downloads stream into `<docs>/tiles/<filename>` with a cancellable progress dialog and an atomic `.partial → .mbtiles` rename so a killed app never leaves a stale half-file. The catalog reads `docs/tilesets.json` from the GitHub `main` branch (currently empty — populated as regions get built); each entry shows name, description, and file size, and tapping it kicks off a download with the same UI as the URL flow. After install a SnackBar offers a one-tap "Set active". `TileDownloader` and `TileCatalog` are split out as standalone services for future reuse.
+
 ## [0.8.1+50] — 2026-04-28
 
 The renderer migration is finally settled — 0.8.1 is the first build of the rewrite the user has been able to actually use.
