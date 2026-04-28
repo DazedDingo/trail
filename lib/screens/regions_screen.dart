@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../providers/mbtiles_provider.dart';
 import '../services/github_api.dart';
 import '../services/mbtiles_service.dart';
+import '../services/region_presets.dart';
 import '../services/tile_catalog.dart';
 import '../services/tile_downloader.dart';
 
@@ -293,6 +294,16 @@ enum _RegionAction { setActive, clearActive, delete }
 
 enum _AddSource { filePicker, url, catalog, build }
 
+/// Discriminator returned by the build-picker bottom sheet — either a
+/// preset (one-tap → confirm → dispatch) or "custom area" (open the
+/// bbox form). A nullable `preset` avoids needing a sealed class for
+/// just two cases.
+class _BuildPickerResult {
+  final RegionPreset? preset;
+  const _BuildPickerResult.preset(RegionPreset this.preset);
+  const _BuildPickerResult.custom() : preset = null;
+}
+
 /// Add this method on `RegionsScreen` via extension below — keeps the
 /// main class file readable; the URL / catalog flows are noticeably
 /// longer than the file-picker one.
@@ -438,17 +449,151 @@ extension _RegionsScreenAddFlows on RegionsScreen {
     );
   }
 
+  /// Preset-picker primary flow. Renders UK national parks and AONBs
+  /// as a tappable list — one tap and the build kicks off. Power users
+  /// can tap "Custom area" at the bottom for the bbox form.
   Future<void> _requestBuild(BuildContext context, WidgetRef ref) async {
+    final choice = await showModalBottomSheet<_BuildPickerResult>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (c) {
+        final mq = MediaQuery.of(c);
+        return SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: mq.size.height * 0.8),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Padding(
+                  padding:
+                      EdgeInsets.fromLTRB(20, 4, 20, 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Build a region',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      SizedBox(height: 4),
+                      Text(
+                        'Pick a national park / AONB and GitHub Actions '
+                        'will build the offline map (~10–20 min). It '
+                        'lands in the catalog when ready.',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
+                Expanded(
+                  child: ListView.separated(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    itemCount: kUkRegionPresets.length + 1,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (_, i) {
+                      if (i == kUkRegionPresets.length) {
+                        return ListTile(
+                          leading:
+                              const Icon(Icons.edit_location_outlined),
+                          title: const Text('Custom area…'),
+                          subtitle: const Text(
+                            'Type your own bounding box',
+                          ),
+                          onTap: () => Navigator.pop(
+                            c,
+                            const _BuildPickerResult.custom(),
+                          ),
+                        );
+                      }
+                      final r = kUkRegionPresets[i];
+                      return ListTile(
+                        leading: const Icon(Icons.terrain_outlined),
+                        title: Text(r.name),
+                        subtitle: Text(
+                          '${r.region} · ${r.sizeLabel}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        onTap: () => Navigator.pop(
+                          c,
+                          _BuildPickerResult.preset(r),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (choice == null) return;
+    if (!context.mounted) return;
+    if (choice.preset != null) {
+      await _confirmAndBuildPreset(context, choice.preset!);
+    } else {
+      await _customBuildForm(context, ref);
+    }
+  }
+
+  Future<void> _confirmAndBuildPreset(
+    BuildContext context,
+    RegionPreset r,
+  ) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: Text('Build ${r.name}?'),
+        content: Text(
+          '${r.region}\n\n'
+          'Approx ${r.approxSizeMb} MB at zoom ${r.defaultZoom}. '
+          'Build runs on GitHub Actions and takes ~10–20 minutes; you '
+          "don't need to keep the app open. The new region will appear "
+          'under "Browse curated catalog" once ready.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('Start build'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    if (!context.mounted) return;
+    await _dispatchBuild(
+      context: context,
+      name: r.id,
+      bbox: r.bbox,
+      maxzoom: r.defaultZoom.toString(),
+      area: r.area,
+      description: '${r.name} · ${r.region}',
+      displayName: r.name,
+    );
+  }
+
+  /// The advanced-user form — shown only behind "Custom area".
+  /// Same fields as before but laid out as a single dialog with help
+  /// text and a link out to bboxfinder.com.
+  Future<void> _customBuildForm(BuildContext context, WidgetRef ref) async {
     final nameController = TextEditingController();
     final bboxController = TextEditingController();
     final descController = TextEditingController();
     String maxzoom = '13';
-    String area = 'great-britain';
     final formKey = GlobalKey<FormState>();
-    final go = await showDialog<bool>(
+    final ok = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
-        title: const Text('Build a region'),
+        title: const Text('Custom region'),
         content: StatefulBuilder(
           builder: (c, setLocal) => SingleChildScrollView(
             child: Form(
@@ -456,12 +601,22 @@ extension _RegionsScreenAddFlows on RegionsScreen {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Use bboxfinder.com to draw an area on a map and '
+                      'copy the four numbers — paste them below.',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
                   TextFormField(
                     controller: nameController,
                     autofocus: true,
                     decoration: const InputDecoration(
-                      labelText: 'Name (filename, lower-case)',
-                      hintText: 'lake-district',
+                      labelText: 'Short name',
+                      hintText: 'e.g. cambridge-walks',
+                      helperText: 'Lower-case, no spaces',
                     ),
                     validator: (v) {
                       final t = v?.trim() ?? '';
@@ -472,12 +627,13 @@ extension _RegionsScreenAddFlows on RegionsScreen {
                       return null;
                     },
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 12),
                   TextFormField(
                     controller: bboxController,
                     decoration: const InputDecoration(
-                      labelText: 'bbox (minLon,minLat,maxLon,maxLat)',
+                      labelText: 'Bounding box',
                       hintText: '-3.5,54.3,-2.7,54.8',
+                      helperText: 'minLon,minLat,maxLon,maxLat',
                     ),
                     validator: (v) {
                       final t = v?.trim() ?? '';
@@ -493,59 +649,39 @@ extension _RegionsScreenAddFlows on RegionsScreen {
                       return null;
                     },
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 12),
                   TextFormField(
                     controller: descController,
                     decoration: const InputDecoration(
                       labelText: 'Description (optional)',
                     ),
                   ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: DropdownButtonFormField<String>(
-                          initialValue: maxzoom,
-                          decoration: const InputDecoration(
-                            labelText: 'Max zoom',
-                          ),
-                          items: const [
-                            DropdownMenuItem(value: '10', child: Text('10')),
-                            DropdownMenuItem(value: '11', child: Text('11')),
-                            DropdownMenuItem(value: '12', child: Text('12')),
-                            DropdownMenuItem(value: '13', child: Text('13')),
-                            DropdownMenuItem(value: '14', child: Text('14')),
-                          ],
-                          onChanged: (v) =>
-                              setLocal(() => maxzoom = v ?? '13'),
-                        ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: maxzoom,
+                    decoration: const InputDecoration(
+                      labelText: 'Detail level',
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: '11',
+                        child: Text('11 — region overview'),
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: DropdownButtonFormField<String>(
-                          initialValue: area,
-                          decoration: const InputDecoration(
-                            labelText: 'OSM area',
-                          ),
-                          items: const [
-                            DropdownMenuItem(
-                              value: 'great-britain',
-                              child: Text('GB'),
-                            ),
-                            DropdownMenuItem(
-                              value: 'europe/ireland-and-northern-ireland',
-                              child: Text('Ireland'),
-                            ),
-                            DropdownMenuItem(
-                              value: 'europe',
-                              child: Text('Europe'),
-                            ),
-                          ],
-                          onChanged: (v) =>
-                              setLocal(() => area = v ?? 'great-britain'),
-                        ),
+                      DropdownMenuItem(
+                        value: '12',
+                        child: Text('12 — major roads'),
+                      ),
+                      DropdownMenuItem(
+                        value: '13',
+                        child: Text('13 — streets + tracks (recommended)'),
+                      ),
+                      DropdownMenuItem(
+                        value: '14',
+                        child: Text('14 — every footpath (largest file)'),
                       ),
                     ],
+                    onChanged: (v) =>
+                        setLocal(() => maxzoom = v ?? '13'),
                   ),
                 ],
               ),
@@ -563,28 +699,49 @@ extension _RegionsScreenAddFlows on RegionsScreen {
                 Navigator.pop(c, true);
               }
             },
-            child: const Text('Build'),
+            child: const Text('Start build'),
           ),
         ],
       ),
     );
-    if (go != true) return;
+    if (ok != true) return;
     if (!context.mounted) return;
+    final name = nameController.text.trim();
+    await _dispatchBuild(
+      context: context,
+      name: name,
+      bbox: bboxController.text.trim(),
+      maxzoom: maxzoom,
+      area: 'great-britain',
+      description: descController.text.trim(),
+      displayName: name,
+    );
+  }
+
+  Future<void> _dispatchBuild({
+    required BuildContext context,
+    required String name,
+    required String bbox,
+    required String maxzoom,
+    required String area,
+    required String description,
+    required String displayName,
+  }) async {
     try {
       await GithubApi.dispatchRegionBuild(
-        name: nameController.text.trim(),
-        bbox: bboxController.text.trim(),
+        name: name,
+        bbox: bbox,
         maxzoom: maxzoom,
         area: area,
-        description: descController.text.trim(),
+        description: description,
       );
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           duration: const Duration(seconds: 6),
           content: Text(
-            'Build started for "${nameController.text.trim()}". '
-            'Check the catalog in ~10–20 min.',
+            'Build started for $displayName. Check the catalog '
+            'in ~10–20 min.',
           ),
         ),
       );

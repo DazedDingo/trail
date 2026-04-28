@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.8.3+53] — 2026-04-28
+
+### Changed
+- **"Build a region" UX rebuilt around a preset list of UK national parks and AONBs.** Bbox / zoom / area is exactly the wrong vocabulary for a hiking app — the "Build a region" entry now opens a tappable list of 15 UK national parks and AONBs (Lake District, Snowdonia, Peak District, Dartmoor, Cairngorms, Cotswolds, etc.) with each row showing the region's parent county and the approximate file size at zoom 13. Tap a row → confirm dialog → build dispatched. The bbox form moves behind a "Custom area…" tail entry with a hint pointing at bboxfinder.com and a "Detail level" dropdown that explains each zoom (`13 — streets + tracks (recommended)`).
+
 ## [0.8.3+52] — 2026-04-28
 
 ### Added
