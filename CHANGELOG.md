@@ -4,6 +4,13 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.10.2+66] — 2026-04-28
+
+### Added
+- **Playback HUD: "Now" and "Prev" timestamps in the top-left of the map.** Translucent badge with a tertiary-tinted dot for the head fix and a secondary-tinted dot for the previous one, alongside the gap between them (`30m`, `2h 15m`, `3d`). Updates on every slider drag and every playback tick — useful when fast playback blurs which fix is current vs. just-passed.
+- **Distinct "previous" pin styling on the map.** The fix immediately before the head now renders as a medium secondary-tinted circle (radius 6) instead of the standard small primary one. At a glance you can see which way you've just come from, especially during fast playback.
+- **Slider drag is now incrementally rendered in both directions.** The 0.10.1+65 fix only short-circuited forward steps; backward drag still fell through to the full clear+rebuild path. Now backward drag pops trailing circles via `removeCircle` and re-promotes the new tail to head + previous styles in place. Drag-back at hundreds of fixes is as smooth as drag-forward.
+
 ## [0.10.1+65] — 2026-04-28
 
 ### Fixed

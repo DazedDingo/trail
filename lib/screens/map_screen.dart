@@ -75,12 +75,18 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   /// changes faster than maplibre_gl's annotation channel can clear
   /// + re-add hundreds of circles, so playback at high ping counts
   /// went choppy. Tracking these refs lets the next refresh decide
-  /// between "incremental: add the new circles + nudge the old head"
-  /// (cheap) or "different filter / mode / backward step: full
-  /// rebuild" (expensive). Reset on style swap or mode change.
+  /// between "incremental forward" (add the delta circles + nudge
+  /// styling), "incremental backward" (pop trailing circles), or
+  /// "full rebuild" (filter / mode change). Reset on style swap.
+  ///
+  /// `_renderedCircles` is in chrono order (oldest first). The last
+  /// element is the *head* (highest-styled, current playback position
+  /// or slider tip). The second-to-last is the *previous* (medium
+  /// styling) so you can see "where you came from" during fast
+  /// playback. Everything earlier is small.
   List<Ping>? _renderedPathFixes;
   Line? _pathLine;
-  Circle? _pathHead;
+  List<Circle> _renderedCircles = [];
   String? _pathRenderKey;
 
   /// Playback: advances `_sliderMax` one ping at a time until it reaches
@@ -128,7 +134,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       _circleToPing.clear();
       _renderedPathFixes = null;
       _pathLine = null;
-      _pathHead = null;
+      _renderedCircles = [];
       _pathRenderKey = null;
     }
 
@@ -412,6 +418,17 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             ),
           ),
         ),
+        if (visibleFixes.isNotEmpty)
+          Positioned(
+            left: 8,
+            top: 8,
+            child: _PlaybackHud(
+              current: visibleFixes.last,
+              previous: visibleFixes.length >= 2
+                  ? visibleFixes[visibleFixes.length - 2]
+                  : null,
+            ),
+          ),
       ],
     );
   }
@@ -463,7 +480,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       _circleToPing.clear();
       _renderedPathFixes = null;
       _pathLine = null;
-      _pathHead = null;
+      _renderedCircles = [];
       _pathRenderKey = renderKey;
     }
 
@@ -482,24 +499,25 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     await _setHeatmap(c, false, const [], scheme);
 
     final prev = _renderedPathFixes;
-    final canIncrement = !renderKeyChanged &&
+    final samePrefix = !renderKeyChanged &&
         prev != null &&
-        visibleFixes.length > prev.length &&
-        identical(prev.first, visibleFixes.first) &&
-        identical(prev.last, visibleFixes[prev.length - 1]);
+        prev.isNotEmpty &&
+        visibleFixes.isNotEmpty &&
+        identical(prev.first, visibleFixes.first);
 
-    if (prev != null &&
-        !renderKeyChanged &&
-        visibleFixes.length == prev.length &&
-        identical(prev.last, visibleFixes.last)) {
-      // sliderMax tick that didn't change the visible window (e.g.
-      // landed inside a duplicate-timestamp run). No platform work
-      // needed.
+    if (samePrefix && visibleFixes.length == prev.length) {
+      // No-op tick — sliderMax landed inside a duplicate-timestamp
+      // run, or the same forward step was queued twice. Bail before
+      // touching the platform side.
       return;
     }
 
-    if (canIncrement) {
-      await _renderPathIncremental(c, visibleFixes, prev.length, scheme);
+    if (samePrefix && visibleFixes.length > prev.length) {
+      await _renderPathIncrementalForward(
+        c, visibleFixes, prev.length, scheme);
+    } else if (samePrefix && visibleFixes.length < prev.length) {
+      await _renderPathIncrementalBackward(
+        c, visibleFixes, prev.length, scheme);
     } else {
       await _renderPathFromScratch(c, visibleFixes, scheme);
     }
@@ -507,9 +525,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   }
 
   /// Full clear+rebuild of the path-mode annotations. Called on
-  /// render-key change, backward step, or first render. Also resets
-  /// the head/line refs so the next incremental call has fresh
-  /// anchors.
+  /// render-key change or first render. Resets the line + circle
+  /// list so the next incremental call has fresh anchors.
   Future<void> _renderPathFromScratch(
     MapLibreMapController c,
     List<Ping> visibleFixes,
@@ -519,7 +536,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     await c.clearCircles();
     _circleToPing.clear();
     _pathLine = null;
-    _pathHead = null;
+    _renderedCircles = [];
 
     final points = visibleFixes
         .map((p) => LatLng(p.lat!, p.lon!))
@@ -533,20 +550,21 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         lineOpacity: 0.85,
       ));
     }
-    for (var i = 0; i < points.length - 1; i++) {
-      final circle = await c.addCircle(_smallCircleOptions(points[i], scheme));
+    for (var i = 0; i < points.length; i++) {
+      final circle = await c.addCircle(
+        _circleOptionsForIndex(i, points, scheme),
+      );
       _circleToPing[circle.id] = visibleFixes[i];
+      _renderedCircles.add(circle);
     }
-    _pathHead = await c.addCircle(_headCircleOptions(points.last, scheme));
-    _circleToPing[_pathHead!.id] = visibleFixes.last;
   }
 
-  /// Add only the delta circles since the last render, demote the
-  /// previous head to small, and update the line geometry. Three
-  /// platform calls (line update + demote + add new head) plus one
-  /// addCircle per intermediate fix added — usually one when called
-  /// from the playback timer at 1× speed.
-  Future<void> _renderPathIncremental(
+  /// Slider advanced (or grew during playback). Demote the previous
+  /// head into a "previous" circle, demote the old "previous" into a
+  /// small one, append small circles for any in-betweens, then add a
+  /// new head. Constant per-tick cost regardless of how many fixes
+  /// are on the map already.
+  Future<void> _renderPathIncrementalForward(
     MapLibreMapController c,
     List<Ping> visibleFixes,
     int oldLength,
@@ -557,47 +575,119 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         .map((p) => LatLng(p.lat!, p.lon!))
         .toList(growable: false);
 
-    // Demote the previous head to a small circle in place.
-    final oldHead = _pathHead;
-    if (oldHead != null) {
+    // Old "previous" (i = oldLength - 2, if it existed) — drop to small.
+    if (oldLength >= 2) {
+      final oldPrev = _renderedCircles[oldLength - 2];
+      await c.updateCircle(oldPrev, _smallOptions(points[oldLength - 2], scheme));
+    }
+    // Old head (i = oldLength - 1) — drop to "previous" tier. It's
+    // about to no longer be the most recent fix, so the bright
+    // tertiary hue would lie about playback direction.
+    if (oldLength >= 1) {
+      final oldHead = _renderedCircles[oldLength - 1];
+      await c.updateCircle(oldHead, _prevOptions(points[oldLength - 1], scheme));
+    }
+
+    // Add small circles for the in-betweens (delta > 1, e.g. user
+    // grabbed the slider and dragged forward several fixes at once).
+    for (var i = oldLength; i < newLength - 1; i++) {
+      final circle = await c.addCircle(_smallOptions(points[i], scheme));
+      _circleToPing[circle.id] = visibleFixes[i];
+      _renderedCircles.add(circle);
+    }
+    // New head.
+    final head = await c.addCircle(_headOptions(points.last, scheme));
+    _circleToPing[head.id] = visibleFixes.last;
+    _renderedCircles.add(head);
+
+    await _updatePathLine(c, points, scheme);
+  }
+
+  /// Slider moved backwards (drag-back, step prev, jump to start with
+  /// some left). Drop the trailing circles via [removeCircle], then
+  /// promote the new last back to head and the new second-to-last
+  /// back to "previous". Same constant per-tick cost as forward.
+  Future<void> _renderPathIncrementalBackward(
+    MapLibreMapController c,
+    List<Ping> visibleFixes,
+    int oldLength,
+    ColorScheme scheme,
+  ) async {
+    final newLength = visibleFixes.length;
+    final points = visibleFixes
+        .map((p) => LatLng(p.lat!, p.lon!))
+        .toList(growable: false);
+
+    // Pop trailing circles.
+    while (_renderedCircles.length > newLength) {
+      final circle = _renderedCircles.removeLast();
+      _circleToPing.remove(circle.id);
+      try {
+        await c.removeCircle(circle);
+      } catch (_) {/* best-effort — platform may have already cleared */}
+    }
+
+    // Promote new tip + new previous to their respective styles.
+    if (newLength >= 1) {
+      final newHead = _renderedCircles[newLength - 1];
+      await c.updateCircle(newHead, _headOptions(points.last, scheme));
+    }
+    if (newLength >= 2) {
+      final newPrev = _renderedCircles[newLength - 2];
       await c.updateCircle(
-        oldHead,
-        _smallCircleOptions(points[oldLength - 1], scheme),
+        newPrev,
+        _prevOptions(points[newLength - 2], scheme),
       );
     }
 
-    // Add small circles for any intermediate fixes that landed
-    // between the old head and the new head (delta > 1).
-    for (var i = oldLength; i < newLength - 1; i++) {
-      final circle =
-          await c.addCircle(_smallCircleOptions(points[i], scheme));
-      _circleToPing[circle.id] = visibleFixes[i];
-    }
-
-    // Add the new head.
-    final head = await c.addCircle(_headCircleOptions(points.last, scheme));
-    _circleToPing[head.id] = visibleFixes.last;
-    _pathHead = head;
-
-    // Update the line geometry. If the line didn't exist yet (we
-    // crossed the 2-point threshold this tick), add it; otherwise
-    // updateLine is one platform call and replaces just geometry.
-    if (_showPath) {
-      if (_pathLine == null && points.length >= 2) {
-        _pathLine = await c.addLine(LineOptions(
-          geometry: points,
-          lineColor: scheme.primary.toHexStringRGB(),
-          lineWidth: 3,
-          lineOpacity: 0.85,
-        ));
-      } else if (_pathLine != null) {
-        await c.updateLine(_pathLine!, LineOptions(geometry: points));
+    if (newLength <= 1) {
+      // Line needs at least 2 points; when we shrink past that
+      // threshold, drop the line entirely. Re-added next forward step.
+      if (_pathLine != null) {
+        await c.removeLine(_pathLine!);
+        _pathLine = null;
       }
+    } else {
+      await _updatePathLine(c, points, scheme);
     }
   }
 
-  CircleOptions _smallCircleOptions(LatLng p, ColorScheme scheme) =>
-      CircleOptions(
+  Future<void> _updatePathLine(
+    MapLibreMapController c,
+    List<LatLng> points,
+    ColorScheme scheme,
+  ) async {
+    if (!_showPath) return;
+    if (points.length < 2) return;
+    if (_pathLine == null) {
+      _pathLine = await c.addLine(LineOptions(
+        geometry: points,
+        lineColor: scheme.primary.toHexStringRGB(),
+        lineWidth: 3,
+        lineOpacity: 0.85,
+      ));
+    } else {
+      await c.updateLine(_pathLine!, LineOptions(geometry: points));
+    }
+  }
+
+  /// Three styling tiers, indexed by position within the visible
+  /// chrono trail. Last = head (current playback / slider tip),
+  /// second-to-last = previous (one step back), everything earlier
+  /// = small. Calling this with `i == points.length - 1` returns the
+  /// head style, etc.
+  CircleOptions _circleOptionsForIndex(
+    int i,
+    List<LatLng> points,
+    ColorScheme scheme,
+  ) {
+    final last = points.length - 1;
+    if (i == last) return _headOptions(points[i], scheme);
+    if (i == last - 1) return _prevOptions(points[i], scheme);
+    return _smallOptions(points[i], scheme);
+  }
+
+  CircleOptions _smallOptions(LatLng p, ColorScheme scheme) => CircleOptions(
         geometry: p,
         circleRadius: 4,
         circleColor: scheme.primary.toHexStringRGB(),
@@ -606,8 +696,16 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         circleStrokeOpacity: 0.85,
       );
 
-  CircleOptions _headCircleOptions(LatLng p, ColorScheme scheme) =>
-      CircleOptions(
+  CircleOptions _prevOptions(LatLng p, ColorScheme scheme) => CircleOptions(
+        geometry: p,
+        circleRadius: 6,
+        circleColor: scheme.secondary.toHexStringRGB(),
+        circleStrokeWidth: 1.5,
+        circleStrokeColor: '#FFFFFF',
+        circleStrokeOpacity: 0.9,
+      );
+
+  CircleOptions _headOptions(LatLng p, ColorScheme scheme) => CircleOptions(
         geometry: p,
         circleRadius: 8,
         circleColor: scheme.tertiary.toHexStringRGB(),
@@ -1009,6 +1107,96 @@ class _EmptyState extends StatelessWidget {
           style: Theme.of(context).textTheme.bodyMedium,
         ),
       ),
+    );
+  }
+}
+
+/// Small translucent badge in the top-left of the map showing the
+/// timestamp of the current (head) fix and, when there's a second
+/// fix to compare against, the previous one with the gap between
+/// them. Mirrors the on-map circle styles: tertiary tint for "now",
+/// secondary for "prev". Updates every refresh, including during
+/// playback ticks and slider drags.
+class _PlaybackHud extends StatelessWidget {
+  final Ping current;
+  final Ping? previous;
+  const _PlaybackHud({required this.current, this.previous});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final fmt = DateFormat('MMM d HH:mm');
+    return Material(
+      color: Colors.black.withValues(alpha: 0.55),
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _Dot(color: theme.colorScheme.tertiary),
+                const SizedBox(width: 6),
+                Text(
+                  'Now ${fmt.format(current.timestampUtc.toLocal())}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+            if (previous != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _Dot(color: theme.colorScheme.secondary),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Prev ${fmt.format(previous!.timestampUtc.toLocal())} · '
+                      '${_humanGap(current.timestampUtc.difference(previous!.timestampUtc))}',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.85),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  static String _humanGap(Duration d) {
+    if (d.isNegative) d = -d;
+    if (d.inMinutes < 1) return '${d.inSeconds}s';
+    if (d.inHours < 1) return '${d.inMinutes}m';
+    if (d.inDays < 1) {
+      final m = d.inMinutes % 60;
+      return m == 0 ? '${d.inHours}h' : '${d.inHours}h ${m}m';
+    }
+    return '${d.inDays}d';
+  }
+}
+
+class _Dot extends StatelessWidget {
+  final Color color;
+  const _Dot({required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 8,
+      height: 8,
+      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
     );
   }
 }
