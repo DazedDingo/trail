@@ -52,6 +52,19 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   /// tapping the calendar icon → "Clear filter".
   DateTimeRange? _dateFilter;
 
+  /// Maps each rendered Circle annotation back to the underlying Ping
+  /// row so taps can pop a detail sheet. Cleared on every
+  /// `_refreshAnnotations` call (clearCircles wipes the platform side
+  /// too) and re-built as circles are added back.
+  final Map<String, Ping> _circleToPing = {};
+
+  /// Whether the heatmap GeoJSON source + layer are currently mounted
+  /// on the platform side. Tracked so we don't try to add twice or
+  /// remove a non-existent layer.
+  bool _heatmapMounted = false;
+  static const _heatmapSourceId = 'trail-heatmap-src';
+  static const _heatmapLayerId = 'trail-heatmap-lyr';
+
   /// Playback: advances `_sliderMax` one ping at a time until it reaches
   /// the last fix, then auto-pauses. Step interval = `_basePlaybackStep
   /// / _playbackSpeed`, so 1× shows each ping for ~350ms, 4× for ~90ms,
@@ -86,6 +99,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       );
       if (regionChanged) _initialFitDone = false;
       _styleReady = false;
+      // Style swap → fresh controller → any platform-side annotation
+      // state we tracked is gone. Reset our bookkeeping so we don't
+      // try to remove/update layers on the new instance that don't
+      // exist there.
+      _heatmapMounted = false;
+      _circleToPing.clear();
     }
 
     return Scaffold(
@@ -343,7 +362,13 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           myLocationEnabled: true,
           myLocationTrackingMode: MyLocationTrackingMode.none,
           attributionButtonPosition: AttributionButtonPosition.bottomRight,
-          onMapCreated: (c) => _controller = c,
+          onMapCreated: (c) {
+            _controller = c;
+            // Wire tap-to-inspect — every Circle annotation we add
+            // gets recorded in `_circleToPing`; tapping the rendered
+            // circle pops a detail sheet for that ping.
+            c.onCircleTapped.add(_handleCircleTap);
+          },
           onStyleLoadedCallback: () {
             _styleReady = true;
             _refreshAnnotations(visibleFixes, Theme.of(context).colorScheme);
@@ -407,27 +432,25 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     if (c == null) return;
     await c.clearLines();
     await c.clearCircles();
-    if (visibleFixes.isEmpty) return;
+    _circleToPing.clear();
+    if (visibleFixes.isEmpty) {
+      await _setHeatmap(c, false, const [], scheme);
+      return;
+    }
     final points = visibleFixes
         .map((p) => LatLng(p.lat!, p.lon!))
         .toList(growable: false);
 
     if (_showHeatmap) {
-      // Heatmap mode: one translucent blurred dot per fix; overlapping
-      // circles produce hot spots at frequently-visited locations
-      // automatically. Replaces the pre-MapLibre custom 0.001°-grid
-      // bucketing.
-      for (final p in points) {
-        await c.addCircle(CircleOptions(
-          geometry: p,
-          circleRadius: 18,
-          circleColor: scheme.tertiary.toHexStringRGB(),
-          circleOpacity: 0.18,
-          circleBlur: 0.5,
-        ));
-      }
+      // Real maplibre-native heatmap layer driven by a GeoJSON source.
+      // Replaces the pre-0.9.1 per-ping CircleLayer fudge — proper
+      // density-weighted Gaussian blending, scales to thousands of
+      // fixes without a thousand annotations on the platform side.
+      await _setHeatmap(c, true, visibleFixes, scheme);
       return;
     }
+
+    await _setHeatmap(c, false, const [], scheme);
 
     if (_showPath && points.length >= 2) {
       await c.addLine(LineOptions(
@@ -438,7 +461,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       ));
     }
     for (var i = 0; i < points.length - 1; i++) {
-      await c.addCircle(CircleOptions(
+      final circle = await c.addCircle(CircleOptions(
         geometry: points[i],
         circleRadius: 4,
         circleColor: scheme.primary.toHexStringRGB(),
@@ -446,8 +469,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         circleStrokeColor: '#FFFFFF',
         circleStrokeOpacity: 0.85,
       ));
+      _circleToPing[circle.id] = visibleFixes[i];
     }
-    await c.addCircle(CircleOptions(
+    final lastCircle = await c.addCircle(CircleOptions(
       geometry: points.last,
       circleRadius: 8,
       circleColor: scheme.tertiary.toHexStringRGB(),
@@ -455,6 +479,88 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       circleStrokeColor: '#FFFFFF',
       circleStrokeOpacity: 0.95,
     ));
+    _circleToPing[lastCircle.id] = visibleFixes.last;
+  }
+
+  /// Mount or unmount the heatmap source + layer. Idempotent — checks
+  /// `_heatmapMounted` so a no-op call doesn't fight the platform side.
+  /// When mounting, builds a GeoJSON FeatureCollection from the
+  /// visible fixes and a tertiary-tinted density gradient.
+  Future<void> _setHeatmap(
+    MapLibreMapController c,
+    bool show,
+    List<Ping> visibleFixes,
+    ColorScheme scheme,
+  ) async {
+    if (!show) {
+      if (!_heatmapMounted) return;
+      try {
+        await c.removeLayer(_heatmapLayerId);
+      } catch (_) {/* layer already gone */}
+      try {
+        await c.removeSource(_heatmapSourceId);
+      } catch (_) {/* source already gone */}
+      _heatmapMounted = false;
+      return;
+    }
+    final geo = {
+      'type': 'FeatureCollection',
+      'features': [
+        for (final p in visibleFixes)
+          {
+            'type': 'Feature',
+            'geometry': {
+              'type': 'Point',
+              'coordinates': [p.lon, p.lat],
+            },
+            'properties': const <String, Object?>{},
+          },
+      ],
+    };
+    if (_heatmapMounted) {
+      await c.setGeoJsonSource(_heatmapSourceId, geo);
+      return;
+    }
+    await c.addGeoJsonSource(_heatmapSourceId, geo);
+    final tertHex = scheme.tertiary.toHexStringRGB();
+    final tertR = scheme.tertiary.r.round();
+    final tertG = scheme.tertiary.g.round();
+    final tertB = scheme.tertiary.b.round();
+    await c.addHeatmapLayer(
+      _heatmapSourceId,
+      _heatmapLayerId,
+      HeatmapLayerProperties(
+        heatmapRadius: 30,
+        heatmapIntensity: 1,
+        heatmapOpacity: 0.7,
+        heatmapColor: [
+          'interpolate',
+          ['linear'],
+          ['heatmap-density'],
+          0.0, 'rgba($tertR,$tertG,$tertB,0)',
+          0.2, 'rgba($tertR,$tertG,$tertB,0.4)',
+          0.6, tertHex,
+          1.0, '#ffffff',
+        ],
+      ),
+    );
+    _heatmapMounted = true;
+  }
+
+  /// Tap handler for trail-ping circles — pops a bottom sheet with the
+  /// underlying ping's full row (timestamp, accuracy, battery, etc.).
+  /// Heatmap circles are not in the mapping (different code path)
+  /// so taps on them silently do nothing.
+  void _handleCircleTap(Circle circle) {
+    final ping = _circleToPing[circle.id];
+    if (ping == null) return;
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (c) => SafeArea(
+        child: _PingDetailSheet(ping: ping),
+      ),
+    );
   }
 
   Future<void> _fitToFixes(List<Ping> visibleFixes) async {
@@ -765,6 +871,72 @@ class _EmptyState extends StatelessWidget {
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.bodyMedium,
         ),
+      ),
+    );
+  }
+}
+
+class _PingDetailSheet extends StatelessWidget {
+  final Ping ping;
+  const _PingDetailSheet({required this.ping});
+
+  @override
+  Widget build(BuildContext context) {
+    final fmt = DateFormat('EEE MMM d, HH:mm:ss');
+    final tsLocal = ping.timestampUtc.toLocal();
+    final lat = ping.lat?.toStringAsFixed(5) ?? '—';
+    final lon = ping.lon?.toStringAsFixed(5) ?? '—';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            fmt.format(tsLocal),
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          Text(
+            ping.source.name,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+          ),
+          const SizedBox(height: 12),
+          _row('Lat / Lon', '$lat, $lon'),
+          if (ping.accuracy != null)
+            _row('Accuracy', '±${ping.accuracy!.toStringAsFixed(0)} m'),
+          if (ping.altitude != null)
+            _row('Altitude', '${ping.altitude!.toStringAsFixed(0)} m'),
+          if (ping.speed != null)
+            _row('Speed', '${ping.speed!.toStringAsFixed(1)} m/s'),
+          if (ping.batteryPct != null)
+            _row('Battery', '${ping.batteryPct}%'),
+          if (ping.networkState != null)
+            _row('Network', ping.networkState!),
+          if (ping.cellId != null) _row('Cell', ping.cellId!),
+          if (ping.wifiSsid != null) _row('Wi-Fi', ping.wifiSsid!),
+          if (ping.note != null) _row('Note', ping.note!),
+        ],
+      ),
+    );
+  }
+
+  Widget _row(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 90,
+            child: Text(
+              label,
+              style: const TextStyle(fontWeight: FontWeight.w500),
+            ),
+          ),
+          Expanded(child: SelectableText(value)),
+        ],
       ),
     );
   }

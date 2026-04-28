@@ -9,6 +9,7 @@ import '../services/mbtiles_service.dart';
 import '../services/region_presets.dart';
 import '../services/tile_catalog.dart';
 import '../services/tile_downloader.dart';
+import 'bbox_picker_screen.dart';
 
 /// Offline-map region library.
 ///
@@ -629,26 +630,48 @@ extension _RegionsScreenAddFlows on RegionsScreen {
                     },
                   ),
                   const SizedBox(height: 12),
-                  TextFormField(
-                    controller: bboxController,
-                    decoration: const InputDecoration(
-                      labelText: 'Bounding box',
-                      hintText: '-3.5,54.3,-2.7,54.8',
-                      helperText: 'minLon,minLat,maxLon,maxLat',
-                    ),
-                    validator: (v) {
-                      final t = v?.trim() ?? '';
-                      final parts = t.split(',');
-                      if (parts.length != 4) {
-                        return 'Need 4 comma-separated numbers';
-                      }
-                      for (final p in parts) {
-                        if (double.tryParse(p.trim()) == null) {
-                          return 'Each part must be a number';
-                        }
-                      }
-                      return null;
-                    },
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          controller: bboxController,
+                          decoration: const InputDecoration(
+                            labelText: 'Bounding box',
+                            hintText: '-3.5,54.3,-2.7,54.8',
+                            helperText: 'minLon,minLat,maxLon,maxLat',
+                          ),
+                          validator: (v) {
+                            final t = v?.trim() ?? '';
+                            final parts = t.split(',');
+                            if (parts.length != 4) {
+                              return 'Need 4 comma-separated numbers';
+                            }
+                            for (final p in parts) {
+                              if (double.tryParse(p.trim()) == null) {
+                                return 'Each part must be a number';
+                              }
+                            }
+                            return null;
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: IconButton.filledTonal(
+                          tooltip: 'Pick on a map',
+                          icon: const Icon(Icons.map_outlined),
+                          onPressed: () async {
+                            final picked = await BboxPickerScreen.pick(c);
+                            if (picked != null) {
+                              bboxController.text = picked;
+                              formKey.currentState?.validate();
+                            }
+                          },
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 12),
                   TextFormField(

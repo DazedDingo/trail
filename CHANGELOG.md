@@ -4,6 +4,13 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.9.2+59] — 2026-04-28
+
+### Added
+- **Tap a ping marker → bottom sheet with the row's full detail.** `MapLibreMapController.onCircleTapped` is now subscribed; each rendered Circle is recorded against its underlying Ping in `_circleToPing`, and a tap pops a sheet showing timestamp, lat/lon, accuracy, altitude, speed, battery, network state, cell ID, Wi-Fi SSID, source, and note. Heatmap circles are not in the mapping (different code path), so taps there silently do nothing.
+- **Real `HeatmapStyleLayer` for heatmap mode.** Replaces the per-ping CircleLayer fudge with a proper `addHeatmapLayer` driven by a GeoJSON source — density-weighted Gaussian blending, tertiary-tinted gradient over a transparent base, scales to thousands of fixes without thousands of platform-side annotations. Mounted lazily; toggling off cleanly removes both the source and the layer.
+- **Pinch-zoom map picker for the "Custom area" build flow.** `BboxPickerScreen` mounts a `MapLibreMap` at the active region's style with a centre crosshair and a "Use this area" button; tapping captures `getVisibleRegion` and pops with a `minLon,minLat,maxLon,maxLat` string. The Custom area dialog now has a tonal map-icon button next to the bbox text field that launches the picker — bypasses the bboxfinder.com round-trip entirely.
+
 ## [0.9.1+58] — 2026-04-28
 
 ### Fixed
