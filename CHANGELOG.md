@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.9.1+58] — 2026-04-28
+
+### Fixed
+- **Home-screen mini-map went white in `0.9.0+56`.** Two changes from that build interact badly with maplibre_gl's Android platform view inside a small (180 px) widget: turning on `myLocationEnabled` and the parent `Container`'s `clipBehavior: Clip.antiAlias` (rounded-corner clip on a platform view forces an off-the-default composition path that, on the small home preview, left the render surface blank). Both are off on the mini view now — clipping is gone (the rounded background decoration still draws, the map's square edges sit inside it, visually fine), and the live-location dot stays only on the full-screen map where it's more useful anyway.
+
 ## [0.9.1+57] — 2026-04-28
 
 ### Added

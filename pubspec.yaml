@@ -1,7 +1,7 @@
 name: trail
 description: "Trail — personal-safety GPS logger. Offline, encrypted, 4h-cadence background pings."
 publish_to: 'none'
-version: 0.9.1+57
+version: 0.9.1+58
 
 environment:
   sdk: ^3.5.0

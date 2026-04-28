@@ -180,7 +180,12 @@ class _TrailMapState extends ConsumerState<TrailMap> {
     return Container(
       height: widget.height,
       decoration: _frame(scheme),
-      clipBehavior: Clip.antiAlias,
+      // Intentionally NO `clipBehavior` here. An antialias-clip on a
+      // Container wrapping an Android platform view (MapLibreMap)
+      // forces a recomposition path that left the map's render
+      // surface blank in 0.9.0+56. The map's own square edges sit
+      // slightly inside the rounded border decoration — visually
+      // negligible, far better than a white render.
       child: FutureBuilder<String?>(
         future: _styleFuture,
         builder: (context, snap) {
@@ -205,13 +210,11 @@ class _TrailMapState extends ConsumerState<TrailMap> {
           compassEnabled: false,
           rotateGesturesEnabled: false,
           tiltGesturesEnabled: false,
-          // Native blue-dot live-location indicator. The plugin uses
-          // Android's FusedLocationProvider which already has Trail's
-          // logger-required permissions. Tracking mode none = render
-          // the dot but don't auto-pan the camera; the user is
-          // reviewing trail history, not navigating.
-          myLocationEnabled: true,
-          myLocationTrackingMode: MyLocationTrackingMode.none,
+          // Live-location dot stays *off* on the mini view — enabling
+          // it broke render in 0.9.0+56, almost certainly a platform-
+          // view recomposition bug specific to small clipped widgets
+          // on maplibre_gl 0.26.0. The full-screen map keeps it on,
+          // which is the more useful place for it anyway.
           attributionButtonPosition: AttributionButtonPosition.bottomRight,
           onMapCreated: (c) {
             _controller = c;
