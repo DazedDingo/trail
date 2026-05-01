@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -675,59 +676,88 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     List<Ping> visibleFixes,
     ColorScheme scheme,
   ) async {
-    if (!show) {
-      if (!_heatmapMounted) return;
-      try {
-        await c.removeLayer(_heatmapLayerId);
-      } catch (_) {/* layer already gone */}
-      try {
-        await c.removeSource(_heatmapSourceId);
-      } catch (_) {/* source already gone */}
-      _heatmapMounted = false;
-      return;
-    }
-    final geo = {
-      'type': 'FeatureCollection',
-      'features': [
-        for (final p in visibleFixes)
-          {
-            'type': 'Feature',
-            'geometry': {
-              'type': 'Point',
-              'coordinates': [p.lon, p.lat],
+    // Wrap every platform-channel call in defensive try/catch — maplibre_gl
+    // 0.26's heatmap layer has been observed to crash the engine on some
+    // Android Flutter combos (the symptom looked like Chrome briefly
+    // opening then the app crashing). Failing this surface should never
+    // take down the rest of Home; we degrade silently and reset the
+    // _showHeatmap toggle so the user can try again or fall back to path
+    // mode without the toggle getting stuck "on" but visually empty.
+    try {
+      if (!show) {
+        if (!_heatmapMounted) return;
+        try {
+          await c.removeLayer(_heatmapLayerId);
+        } catch (_) {/* layer already gone */}
+        try {
+          await c.removeSource(_heatmapSourceId);
+        } catch (_) {/* source already gone */}
+        _heatmapMounted = false;
+        return;
+      }
+      final geo = {
+        'type': 'FeatureCollection',
+        'features': [
+          for (final p in visibleFixes)
+            {
+              'type': 'Feature',
+              'geometry': {
+                'type': 'Point',
+                'coordinates': [p.lon, p.lat],
+              },
+              'properties': const <String, Object?>{},
             },
-            'properties': const <String, Object?>{},
-          },
-      ],
-    };
-    if (_heatmapMounted) {
-      await c.setGeoJsonSource(_heatmapSourceId, geo);
-      return;
-    }
-    await c.addGeoJsonSource(_heatmapSourceId, geo);
-    final tertHex = scheme.tertiary.toHexStringRGB();
-    final tertR = (scheme.tertiary.r * 255).round();
-    final tertG = (scheme.tertiary.g * 255).round();
-    final tertB = (scheme.tertiary.b * 255).round();
-    await c.addHeatmapLayer(
-      _heatmapSourceId,
-      _heatmapLayerId,
-      HeatmapLayerProperties(
-        heatmapRadius: 30,
-        heatmapIntensity: 1,
-        heatmapOpacity: 0.7,
-        heatmapColor: [
-          'interpolate',
-          ['linear'],
-          ['heatmap-density'],
-          0.0, 'rgba($tertR,$tertG,$tertB,0)',
-          0.2, 'rgba($tertR,$tertG,$tertB,0.4)',
-          0.6, tertHex,
-          1.0, '#ffffff',
         ],
-      ),
-    );
-    _heatmapMounted = true;
+      };
+      if (_heatmapMounted) {
+        await c.setGeoJsonSource(_heatmapSourceId, geo);
+        return;
+      }
+      await c.addGeoJsonSource(_heatmapSourceId, geo);
+      final tertHex = scheme.tertiary.toHexStringRGB();
+      final tertR = (scheme.tertiary.r * 255).round();
+      final tertG = (scheme.tertiary.g * 255).round();
+      final tertB = (scheme.tertiary.b * 255).round();
+      await c.addHeatmapLayer(
+        _heatmapSourceId,
+        _heatmapLayerId,
+        HeatmapLayerProperties(
+          heatmapRadius: 30,
+          heatmapIntensity: 1,
+          heatmapOpacity: 0.7,
+          heatmapColor: [
+            'interpolate',
+            ['linear'],
+            ['heatmap-density'],
+            0.0, 'rgba($tertR,$tertG,$tertB,0)',
+            0.2, 'rgba($tertR,$tertG,$tertB,0.4)',
+            0.6, tertHex,
+            1.0, '#ffffff',
+          ],
+        ),
+      );
+      _heatmapMounted = true;
+    } catch (e, st) {
+      developer.log(
+        'Heatmap toggle failed (show=$show, fixes=${visibleFixes.length}): $e',
+        name: 'trail-map',
+        stackTrace: st,
+      );
+      // Reset internal state so the next toggle starts from a known-good
+      // baseline rather than trying to mount on top of a half-failed
+      // attempt.
+      _heatmapMounted = false;
+      if (_showHeatmap) {
+        if (mounted) {
+          setState(() => _showHeatmap = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Heatmap unavailable on this device.'),
+            ),
+          );
+        }
+      }
+    }
   }
 
   void _handleCircleTap(Circle circle) {
