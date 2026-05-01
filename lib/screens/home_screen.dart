@@ -10,12 +10,11 @@ import '../models/emergency_contact.dart';
 import '../models/ping.dart';
 import '../providers/contacts_provider.dart';
 import '../providers/home_location_provider.dart';
-import '../providers/mbtiles_provider.dart';
 import '../providers/panic_provider.dart';
 import '../providers/pings_provider.dart';
 import '../services/panic/panic_service.dart';
+import '../widgets/full_map_panel.dart';
 import '../widgets/help_button.dart';
-import '../widgets/trail_map.dart';
 
 /// The app's primary screen.
 ///
@@ -40,7 +39,6 @@ class HomeScreen extends ConsumerWidget {
     final healthy = ref.watch(heartbeatHealthyProvider);
     final count = ref.watch(pingCountProvider);
     final recent = ref.watch(recentPingsProvider);
-    final activeRegion = ref.watch(activeRegionProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -78,13 +76,13 @@ class HomeScreen extends ConsumerWidget {
               ),
               HelpSection(
                 icon: Icons.map_outlined,
-                title: 'Map preview',
+                title: 'Inline map',
                 body:
-                    'Mini map below the export row shows recent fixes on '
-                    'your active offline region. "Full map" opens the '
-                    'playback / filter / heatmap screen. Install a region '
-                    'in Settings → Offline map → Regions if the map is '
-                    'empty.',
+                    'The map between the heartbeat card and the recent-'
+                    'pings list has the full playback / filter / heatmap '
+                    'controls — same as the dedicated /map screen, just '
+                    'embedded inline. Install a region in Settings → '
+                    'Offline map → Regions if the map is empty.',
               ),
               HelpSection(
                 icon: Icons.refresh,
@@ -120,36 +118,21 @@ class HomeScreen extends ConsumerWidget {
       body: Padding(
         padding: const EdgeInsets.all(16),
         // Pinned top block + a self-contained scrolling Recent-pings
-        // list. The map preview was the bulk of the pinned height —
-        // dropped it from the home screen so the Expanded list has
-        // room to breathe. "Map" tile in the export/quick-actions row
-        // and the AppBar back-flow still take you to the full map
-        // screen in one tap.
+        // list. As of 0.10.13+ the mini map preview is gone — the full
+        // map panel (playback + filter + heatmap) is hosted inline at
+        // 320 px, tall enough to be useful and short enough to keep
+        // the heartbeat card + a couple of recent rows above the
+        // fold. "View all" still opens the paginated history.
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _LastPingCard(last: last, healthy: healthy),
             const SizedBox(height: 12),
-            // Mini map sits above the panic button (per user
-            // preference) — gives an at-a-glance "where am I" before
-            // the safety/quick-action affordances. Trimmed to 140 px
-            // (down from the original 180 px) so the inner Recent
-            // pings scroller still has visible vertical space on
-            // typical phone viewports. Tap to open the full map
-            // screen via the "Map" link in the Recent-pings header.
-            recent.when(
-              data: (pings) => TrailMap(
-                pings: pings,
-                activeRegion: activeRegion.valueOrNull,
-                height: 140,
-              ),
-              loading: () => const SizedBox(
-                height: 140,
-                child: Center(child: CircularProgressIndicator()),
-              ),
-              error: (_, __) => const SizedBox.shrink(),
+            FullMapPanel(
+              height: 320,
+              onExpand: () => context.push('/map'),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 16),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -157,18 +140,9 @@ class HomeScreen extends ConsumerWidget {
                   'Recent pings',
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
-                Row(
-                  children: [
-                    TextButton.icon(
-                      onPressed: () => context.push('/map'),
-                      icon: const Icon(Icons.map_outlined, size: 16),
-                      label: const Text('Map'),
-                    ),
-                    TextButton(
-                      onPressed: () => context.push('/history'),
-                      child: const Text('View all'),
-                    ),
-                  ],
+                TextButton(
+                  onPressed: () => context.push('/history'),
+                  child: const Text('View all'),
                 ),
               ],
             ),
@@ -222,52 +196,29 @@ class _LastPingCard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final isHealthy = healthy.asData?.value ?? true;
     final p = last.asData?.value;
+    final scheme = Theme.of(context).colorScheme;
+    // 1.5 px error-coloured border when not healthy, transparent
+    // otherwise. The pre-0.10.13 card wrapped this in an outer
+    // RoundedRectangleBorder + side: 2 — drop both, the Card's own
+    // outline is enough.
     return Card(
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
         side: BorderSide(
-          color: isHealthy
-              ? Colors.transparent
-              : Theme.of(context).colorScheme.error,
-          width: 2,
+          color: isHealthy ? Colors.transparent : scheme.error,
+          width: 1.5,
         ),
       ),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Row(
-              children: [
-                Icon(
-                  isHealthy ? Icons.favorite : Icons.warning_amber_rounded,
-                  color: isHealthy
-                      ? Theme.of(context).colorScheme.primary
-                      : Theme.of(context).colorScheme.error,
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  isHealthy ? 'Heartbeat healthy' : 'No ping in 5+ hours',
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            if (p == null)
-              const Text('No successful pings yet.')
-            else ...[
-              Text(
-                DateFormat.yMMMd().add_Hms().format(p.timestampUtc.toLocal()),
-                style: Theme.of(context).textTheme.headlineSmall,
-              ),
-              const SizedBox(height: 4),
-              Text(
-                '${p.lat!.toStringAsFixed(5)}, ${p.lon!.toStringAsFixed(5)}'
-                '${p.accuracy != null ? "  ±${p.accuracy!.toStringAsFixed(0)}m" : ""}',
-                style: Theme.of(context).textTheme.bodyMedium,
-              ),
-              _ApproxLocationLine(lat: p.lat!, lon: p.lon!),
-              _HomeDistanceLine(lat: p.lat!, lon: p.lon!),
+            _HeartbeatLine(isHealthy: isHealthy, ping: p),
+            if (p != null) ...[
+              const SizedBox(height: 2),
+              _LastPingDetailLine(ping: p),
             ],
           ],
         ),
@@ -276,82 +227,97 @@ class _LastPingCard extends ConsumerWidget {
   }
 }
 
-/// Reverse-geocoded city/region label under the raw coordinates.
-///
-/// Silent while loading (we'd rather the number pop in cold than the card
-/// flicker a "Resolving…" placeholder for 200ms). Silent on null too —
-/// offline with no cached geocoder data is a normal state, not an error.
-class _ApproxLocationLine extends ConsumerWidget {
-  final double lat;
-  final double lon;
-  const _ApproxLocationLine({required this.lat, required this.lon});
+class _HeartbeatLine extends StatelessWidget {
+  final bool isHealthy;
+  final Ping? ping;
+  const _HeartbeatLine({required this.isHealthy, required this.ping});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final label = ref.watch(approxLocationProvider((lat: lat, lon: lon)));
-    return label.when(
-      data: (name) {
-        if (name == null) return const SizedBox.shrink();
-        return Padding(
-          padding: const EdgeInsets.only(top: 4),
-          child: Row(
-            children: [
-              Icon(
-                Icons.place_outlined,
-                size: 14,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-              const SizedBox(width: 4),
-              Flexible(
-                child: Text(
-                  name,
-                  style: Theme.of(context).textTheme.bodySmall,
-                  overflow: TextOverflow.ellipsis,
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final tsFmt = DateFormat.MMMd().add_Hms();
+    final ts = ping == null
+        ? null
+        : tsFmt.format(ping!.timestampUtc.toLocal());
+    final title = isHealthy ? 'Heartbeat healthy' : 'No ping in 5+ hours';
+    final body = ts == null
+        ? title
+        // Middle-dot separator matches the convention in the
+        // map-screen HUD + recent-tile bottom row.
+        : '$title  ·  $ts';
+    return Row(
+      children: [
+        Icon(
+          isHealthy ? Icons.favorite : Icons.warning_amber_rounded,
+          size: 16,
+          color: isHealthy ? scheme.primary : scheme.error,
+        ),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            body,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                  fontFeatures: const [FontFeature.tabularFigures()],
                 ),
-              ),
-            ],
           ),
-        );
-      },
-      loading: () => const SizedBox.shrink(),
-      error: (_, __) => const SizedBox.shrink(),
+        ),
+      ],
     );
   }
 }
 
-/// "X km from home" annotation under the coords. Silent when the user
-/// hasn't set a home location (Settings → Home location), so the card
-/// reads identically for users who never opt in.
-class _HomeDistanceLine extends ConsumerWidget {
-  final double lat;
-  final double lon;
-  const _HomeDistanceLine({required this.lat, required this.lon});
+/// Single-line detail row: coords + accuracy + reverse-geocoded place
+/// name + km-from-home, with middle-dot separators between non-empty
+/// segments. Drops segments cleanly when geocoding has nothing or the
+/// user hasn't set a home location, so the line renders identically
+/// for users who never opted in.
+class _LastPingDetailLine extends ConsumerWidget {
+  final Ping ping;
+  const _LastPingDetailLine({required this.ping});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final home = ref.watch(homeLocationProvider);
-    final h = home.asData?.value;
-    if (h == null) return const SizedBox.shrink();
-    final metres = h.distanceMetersTo(lat, lon);
-    final label = metres < 1000
-        ? '${metres.round()} m from home'
-        : '${(metres / 1000).toStringAsFixed(metres < 10000 ? 1 : 0)} km from home';
-    return Padding(
-      padding: const EdgeInsets.only(top: 2),
-      child: Row(
-        children: [
-          Icon(
-            Icons.home_outlined,
-            size: 14,
-            color: Theme.of(context).colorScheme.secondary,
+    final lat = ping.lat;
+    final lon = ping.lon;
+    if (lat == null || lon == null) {
+      return Text(
+        ping.note ?? 'No fix',
+        style: Theme.of(context).textTheme.bodySmall,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      );
+    }
+    final approx = ref
+        .watch(approxLocationProvider((lat: lat, lon: lon)))
+        .asData
+        ?.value;
+    final home = ref.watch(homeLocationProvider).asData?.value;
+
+    final segments = <String>[];
+    final coordSeg = StringBuffer(
+      '${lat.toStringAsFixed(5)}, ${lon.toStringAsFixed(5)}',
+    );
+    if (ping.accuracy != null) {
+      coordSeg.write(' ±${ping.accuracy!.toStringAsFixed(0)}m');
+    }
+    segments.add(coordSeg.toString());
+    if (approx != null && approx.isNotEmpty) segments.add(approx);
+    if (home != null) {
+      final metres = home.distanceMetersTo(lat, lon);
+      final label = metres < 1000
+          ? '${metres.round()} m from home'
+          : '${(metres / 1000).toStringAsFixed(metres < 10000 ? 1 : 0)} km from home';
+      segments.add(label);
+    }
+    return Text(
+      segments.join('  ·  '),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            fontFeatures: const [FontFeature.tabularFigures()],
           ),
-          const SizedBox(width: 4),
-          Text(
-            label,
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-        ],
-      ),
     );
   }
 }
@@ -696,12 +662,20 @@ class _DbErrorCard extends StatelessWidget {
   }
 }
 
+/// One row in the recent-pings list.
+///
+/// Pre-0.10.13 this was a `ListTile(dense: true)` with a 2-line
+/// subtitle — comfortable but ate ~64 px per row. Now it's a flat
+/// `Padding + Row` at ~36 px so 4–5 rows fit in the visible space
+/// below the inline map. Density is fully under our control instead
+/// of subject to ListTile's internal min-height.
 class _PingTile extends ConsumerWidget {
   final Ping ping;
   const _PingTile({required this.ping});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final scheme = Theme.of(context).colorScheme;
     final isNoFix = ping.source == PingSource.noFix;
     final hasFix = ping.lat != null && ping.lon != null;
     final approx = hasFix
@@ -710,47 +684,48 @@ class _PingTile extends ConsumerWidget {
             .asData
             ?.value
         : null;
-    final ts = DateFormat.MMMd().add_Hms().format(ping.timestampUtc.toLocal());
-    return ListTile(
-      dense: true,
-      leading: Icon(
-        _iconFor(ping.source),
-        color: isNoFix ? Theme.of(context).colorScheme.error : null,
-      ),
-      title: Text(
-        hasFix
-            ? '${ping.lat!.toStringAsFixed(4)}, ${ping.lon!.toStringAsFixed(4)}'
-            : (ping.note ?? ping.source.dbValue),
-      ),
-      subtitle: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (approx != null && approx.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 2, bottom: 2),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.place_outlined,
-                    size: 12,
-                    color: Theme.of(context).colorScheme.primary,
-                  ),
-                  const SizedBox(width: 4),
-                  Flexible(
-                    child: Text(
-                      approx,
-                      style: Theme.of(context).textTheme.bodySmall,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
+    final time = DateFormat.Hms().format(ping.timestampUtc.toLocal());
+    final coordsOrNote = hasFix
+        ? '${ping.lat!.toStringAsFixed(4)}, ${ping.lon!.toStringAsFixed(4)}'
+        : (ping.note ?? 'No fix');
+
+    final tabularSmall = Theme.of(context).textTheme.bodySmall?.copyWith(
+          fontFeatures: const [FontFeature.tabularFigures()],
+        );
+    final placeStyle = Theme.of(context).textTheme.bodySmall;
+    final sourceStyle = Theme.of(context).textTheme.labelSmall?.copyWith(
+          color: scheme.onSurfaceVariant,
+        );
+
+    return InkWell(
+      onTap: () {/* tap-to-inspect lives on /map for now */},
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Row(
+          children: [
+            Icon(
+              _iconFor(ping.source),
+              size: 16,
+              color: isNoFix ? scheme.error : null,
+            ),
+            const SizedBox(width: 8),
+            Text(time, style: tabularSmall),
+            const SizedBox(width: 8),
+            Text(coordsOrNote, style: tabularSmall),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                approx ?? '',
+                style: placeStyle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
-          Text(ts),
-        ],
+            const SizedBox(width: 4),
+            Text(ping.source.dbValue, style: sourceStyle),
+          ],
+        ),
       ),
-      trailing: Text(ping.source.dbValue),
     );
   }
 
