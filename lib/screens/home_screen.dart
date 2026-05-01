@@ -10,10 +10,12 @@ import '../models/emergency_contact.dart';
 import '../models/ping.dart';
 import '../providers/contacts_provider.dart';
 import '../providers/home_location_provider.dart';
+import '../providers/mbtiles_provider.dart';
 import '../providers/panic_provider.dart';
 import '../providers/pings_provider.dart';
 import '../services/panic/panic_service.dart';
 import '../widgets/help_button.dart';
+import '../widgets/trail_map.dart';
 import 'export_dialog.dart';
 
 /// The app's primary screen.
@@ -39,6 +41,7 @@ class HomeScreen extends ConsumerWidget {
     final healthy = ref.watch(heartbeatHealthyProvider);
     final count = ref.watch(pingCountProvider);
     final recent = ref.watch(recentPingsProvider);
+    final activeRegion = ref.watch(activeRegionProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -118,6 +121,26 @@ class HomeScreen extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _LastPingCard(last: last, healthy: healthy),
+            const SizedBox(height: 12),
+            // Mini map sits above the panic button (per user
+            // preference) — gives an at-a-glance "where am I" before
+            // the safety/quick-action affordances. Trimmed to 140 px
+            // (down from the original 180 px) so the inner Recent
+            // pings scroller still has visible vertical space on
+            // typical phone viewports. Tap to open the full map
+            // screen via the "Map" link in the Recent-pings header.
+            recent.when(
+              data: (pings) => TrailMap(
+                pings: pings,
+                activeRegion: activeRegion.valueOrNull,
+                height: 140,
+              ),
+              loading: () => const SizedBox(
+                height: 140,
+                child: Center(child: CircularProgressIndicator()),
+              ),
+              error: (_, __) => const SizedBox.shrink(),
+            ),
             const SizedBox(height: 12),
             const _PanicButton(),
             const SizedBox(height: 12),

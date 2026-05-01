@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.10.11+75] — 2026-05-01
+
+### Changed
+- **Mini map preview is back on the home screen, now above the panic button.** Trimmed to 140 px (from the original 180) so the inner Recent-pings scroller still has visible vertical space on typical phone viewports. Tap "Map" in the Recent-pings header to open the full map screen.
+
 ## [0.10.10+74] — 2026-05-01
 
 ### Changed
