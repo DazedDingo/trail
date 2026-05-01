@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.11.3+81] — 2026-05-01
+
+### Fixed
+- **Heatmap toggle no longer crashes the app on retry.** A failure in `maplibre_gl`'s heatmap path was kicking the app into a bad state — Chrome briefly opened on the first tap, then the app crashed on the second. Wrapped every heatmap mount/unmount call in defensive error handling so a platform-side failure resets the toggle to "off" with a "Heatmap unavailable on this device." message instead of taking the whole map down. Note: this catches Dart-side throws; if the Chrome launch is triggered from the native maplibre_gl renderer (e.g. failing to fetch a tile source after the layer mounts) we'll need a separate fix — please share the trail-map log entries from Profile → Diagnostics if the crash persists after this build.
+
 ## [0.11.2+80] — 2026-05-01
 
 ### Added
