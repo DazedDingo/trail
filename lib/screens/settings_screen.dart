@@ -24,6 +24,7 @@ import '../providers/pings_provider.dart';
 import '../providers/scheduler_provider.dart';
 import '../services/how_is_it_service.dart';
 import '../services/panic/panic_service.dart';
+import 'photo_backfill_sheet.dart';
 import '../services/passphrase_service.dart';
 import '../services/permissions_service.dart';
 import '../services/scheduler/scheduler_mode.dart';
@@ -309,6 +310,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           const _HomeLocationTile(),
           const _HomeMapHeightTile(),
           const _AutoPhotosTile(),
+          const _PhotoBackfillTile(),
           const Divider(),
           const _SectionHeader('Offline map'),
           ListTile(
@@ -1339,6 +1341,28 @@ class _AutoPhotosTile extends ConsumerWidget {
               await ref.read(autoPhotoServiceProvider).setEnabled(v);
               ref.invalidate(autoPhotosEnabledProvider);
             },
+    );
+  }
+}
+
+/// "Backfill older pings" entry — walks every past real-fix ping with
+/// no Wikimedia photos and runs the online fetcher on each. Throttled
+/// + cancellable; UI in `photo_backfill_sheet.dart`. One-shot user-tap
+/// operation; never runs automatically.
+class _PhotoBackfillTile extends StatelessWidget {
+  const _PhotoBackfillTile();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: const Icon(Icons.cloud_download_outlined),
+      title: const Text('Backfill photos for older pings'),
+      subtitle: const Text(
+        'Run the Wikimedia fetcher across pings that don\'t have photos '
+        'yet. Throttled to ~1/sec; can be stopped mid-way.',
+      ),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () => PhotoBackfillSheet.show(context),
     );
   }
 }

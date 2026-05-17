@@ -140,17 +140,37 @@ class HomeScreen extends ConsumerWidget {
                   HomeMapHeight.standard.pixels,
               onExpand: () => context.push('/map'),
             ),
+            const SizedBox(height: 12),
+            // Top-level surfaces — Trips graduates out of Settings →
+            // Insights so the user can find their detected trips with
+            // one tap from Home. Two equal-weight pills; the recent-
+            // pings header moves below into its own row so the pills
+            // own the row above the list.
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => context.push('/trips'),
+                    icon: const Icon(Icons.explore_outlined, size: 18),
+                    label: const Text('Trips'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => context.push('/history'),
+                    icon: const Icon(Icons.list_alt_outlined, size: 18),
+                    label: const Text('History'),
+                  ),
+                ),
+              ],
+            ),
             const SizedBox(height: 16),
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
                   'Recent pings',
                   style: Theme.of(context).textTheme.titleMedium,
-                ),
-                TextButton(
-                  onPressed: () => context.push('/history'),
-                  child: const Text('View all'),
                 ),
               ],
             ),

@@ -16,6 +16,7 @@ import '../services/mbtiles_service.dart';
 import '../services/trail_style.dart';
 import 'inline_date_filter_panel.dart';
 import 'ping_photos_gallery.dart';
+import 'slideshow_view.dart';
 
 /// Reusable map panel with playback / heatmap / path / filter controls.
 ///
@@ -83,6 +84,13 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   /// modal is still reachable via the panel's "Custom range…" chip
   /// for granular two-ended selection).
   bool _calendarOpen = false;
+
+  /// Picture-mode playback. When true, the map body is replaced with a
+  /// `SlideshowView` slaved to the same `_sliderMax` cursor that drives
+  /// path-mode annotations. Toggling does NOT reset playback state —
+  /// the timer, current frame, and speed cycle keep their values so the
+  /// user can flip back and forth mid-trail without losing position.
+  bool _slideshowMode = false;
 
   /// Maps each rendered Circle annotation back to the underlying Ping
   /// row so taps can pop a detail sheet. Cleared on every
@@ -263,6 +271,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
           showPath: _showPath,
           liveDotOn: liveDotOn,
           liveDotLoading: liveDotLoading,
+          slideshowMode: _slideshowMode,
           onOpenFilter: _toggleCalendar,
           onToggleHeatmap: () {
             setState(() => _showHeatmap = !_showHeatmap);
@@ -276,6 +285,8 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
               .read(liveLocationDotEnabledProvider.notifier)
               .set(!liveDotOn),
           onOpenRegions: () => context.push('/regions'),
+          onToggleSlideshow: () =>
+              setState(() => _slideshowMode = !_slideshowMode),
           onExpand: widget.onExpand,
         ),
         InlineDateFilterPanel(
@@ -293,15 +304,21 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
           },
         ),
         Expanded(
-          child: FutureBuilder<String?>(
-            future: _styleFuture,
-            builder: (context, snap) {
-              if (!snap.hasData) {
-                return const Center(child: CircularProgressIndicator());
-              }
-              return _buildMap(context, visible, snap.data!, region);
-            },
-          ),
+          child: _slideshowMode
+              ? SlideshowView(
+                  visibleFixes: visible,
+                  sliderMax: sliderMax,
+                  hasAnyFixes: chrono.isNotEmpty,
+                )
+              : FutureBuilder<String?>(
+                  future: _styleFuture,
+                  builder: (context, snap) {
+                    if (!snap.hasData) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+                    return _buildMap(context, visible, snap.data!, region);
+                  },
+                ),
         ),
         _TimeSlider(
           first: first,
@@ -1016,11 +1033,15 @@ class _ControlRow extends StatelessWidget {
   final bool showPath;
   final bool liveDotOn;
   final bool liveDotLoading;
+  /// Picture-mode playback toggle. True swaps the map body for the
+  /// SlideshowView; the same play/pause + speed cycle drives both.
+  final bool slideshowMode;
   final VoidCallback onOpenFilter;
   final VoidCallback onToggleHeatmap;
   final VoidCallback onTogglePath;
   final VoidCallback onToggleLiveDot;
   final VoidCallback onOpenRegions;
+  final VoidCallback onToggleSlideshow;
   // Null when the panel already fills the screen (i.e. it IS the full
   // map screen). Non-null on Home, where the panel is embedded inline
   // and we want a one-tap escape hatch to a full-screen variant.
@@ -1033,10 +1054,12 @@ class _ControlRow extends StatelessWidget {
     required this.showPath,
     required this.liveDotOn,
     required this.liveDotLoading,
+    required this.slideshowMode,
     required this.onOpenFilter,
     required this.onToggleHeatmap,
     required this.onTogglePath,
     required this.onToggleLiveDot,
+    required this.onToggleSlideshow,
     required this.onOpenRegions,
     this.onExpand,
   });
@@ -1093,6 +1116,16 @@ class _ControlRow extends StatelessWidget {
               liveDotOn ? Icons.my_location : Icons.location_disabled,
             ),
             onPressed: liveDotLoading ? null : onToggleLiveDot,
+          ),
+          IconButton(
+            tooltip:
+                slideshowMode ? 'Back to map view' : 'Picture slideshow',
+            visualDensity: VisualDensity.compact,
+            iconSize: 20,
+            icon: Icon(
+              slideshowMode ? Icons.map_outlined : Icons.slideshow_outlined,
+            ),
+            onPressed: onToggleSlideshow,
           ),
           IconButton(
             tooltip: 'Regions',
