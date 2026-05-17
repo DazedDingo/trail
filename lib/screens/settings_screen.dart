@@ -16,6 +16,7 @@ import '../models/ping.dart';
 import '../providers/backup_provider.dart';
 import '../providers/home_location_provider.dart';
 import '../providers/home_map_height_provider.dart';
+import '../providers/how_is_it_provider.dart';
 import '../providers/map_settings_provider.dart';
 import '../providers/panic_provider.dart';
 import '../providers/pings_provider.dart';
@@ -252,6 +253,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           const _SchedulerModeTile(),
           const _CadenceTile(),
           const _MotionAwareTile(),
+          const _HowIsItTile(),
           const _SchedulerEventsTile(),
           const Divider(),
           const _SectionHeader('Permissions'),
@@ -1256,6 +1258,38 @@ class _MotionAwareTileState extends State<_MotionAwareTile> {
           : (v) async {
               setState(() => _enabled = v);
               await MotionAwareStore.set(v);
+            },
+    );
+  }
+}
+
+/// Toggle for the "How is it?" post-ping quick-comment notification
+/// (#4, schema v2). Opt-in — defaults off on install. When on, every
+/// successful scheduled ping fires a low-priority notification with a
+/// text-reply action; the reply text lands on the ping's `comment`
+/// column via the background notification-response handler.
+class _HowIsItTile extends ConsumerWidget {
+  const _HowIsItTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(howIsItEnabledProvider);
+    final on = async.valueOrNull ?? false;
+    return SwitchListTile(
+      secondary: const Icon(Icons.chat_bubble_outline),
+      title: const Text('"How is it?" prompts'),
+      subtitle: const Text(
+        'After every successful scheduled ping, post a quiet notification '
+        'with a Reply box. Your reply is saved as a comment on that ping '
+        'and shows up in the trail history.',
+      ),
+      isThreeLine: true,
+      value: on,
+      onChanged: async.isLoading
+          ? null
+          : (v) async {
+              await ref.read(howIsItServiceProvider).setEnabled(v);
+              ref.invalidate(howIsItEnabledProvider);
             },
     );
   }

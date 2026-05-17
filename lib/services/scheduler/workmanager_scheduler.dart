@@ -8,6 +8,7 @@ import 'package:geolocator/geolocator.dart';
 import '../../db/database.dart';
 import '../../db/ping_dao.dart';
 import '../../models/ping.dart';
+import '../how_is_it_service.dart';
 import '../location_service.dart';
 import '../notification_service.dart';
 import '../panic/panic_service.dart';
@@ -225,7 +226,19 @@ Future<bool> _handleScheduled() async {
       );
       return true;
     }
-    await dao.insert(snapshot);
+    final insertedId = await dao.insert(snapshot);
+
+    // "How is it?" prompt (#4). Opt-in via Settings; off on install.
+    // Only fires on a real fix — no-fix rows aren't worth commenting
+    // on, and the dispatcher reaches this line on real-fix paths only
+    // (low-battery / motion-aware-skip both return earlier above).
+    if (snapshot.source != PingSource.noFix &&
+        await HowIsItService().isEnabled()) {
+      // Rebuild a Ping with the assigned rowid so the notification
+      // payload carries the right target for the reply handler.
+      final stored = Ping.fromMap({...snapshot.toMap(), 'id': insertedId});
+      await NotificationService.postHowIsItPrompt(stored);
+    }
 
     final userCadence = await CadenceStore.get();
     await WorkmanagerScheduler.enqueuePeriodic(
