@@ -22,6 +22,7 @@ import '../providers/photos_provider.dart';
 import '../providers/panic_provider.dart';
 import '../providers/pings_provider.dart';
 import '../providers/scheduler_provider.dart';
+import '../services/how_is_it_service.dart';
 import '../services/panic/panic_service.dart';
 import '../services/passphrase_service.dart';
 import '../services/permissions_service.dart';
@@ -1265,34 +1266,44 @@ class _MotionAwareTileState extends State<_MotionAwareTile> {
   }
 }
 
-/// Toggle for the "How is it?" post-ping quick-comment notification
-/// (#4, schema v2). Opt-in — defaults off on install. When on, every
-/// successful scheduled ping fires a low-priority notification with a
-/// text-reply action; the reply text lands on the ping's `comment`
-/// column via the background notification-response handler.
+/// Frequency picker for the "How is it?" post-ping quick-comment
+/// notification (#4, schema v2). Default off on install — and "off" is
+/// always the first entry in the picker so the user has a single tap
+/// to silence prompts. The non-off entries enforce a rate-limit gate
+/// in the WorkManager dispatcher so high-cadence (30 min) ping setups
+/// don't bury the user in prompts.
 class _HowIsItTile extends ConsumerWidget {
   const _HowIsItTile();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final async = ref.watch(howIsItEnabledProvider);
-    final on = async.valueOrNull ?? false;
-    return SwitchListTile(
-      secondary: const Icon(Icons.chat_bubble_outline),
+    final async = ref.watch(howIsItFrequencyProvider);
+    final current = async.valueOrNull ?? HowIsItFrequency.off;
+    return ListTile(
+      leading: const Icon(Icons.chat_bubble_outline),
       title: const Text('"How is it?" prompts'),
-      subtitle: const Text(
-        'After every successful scheduled ping, post a quiet notification '
-        'with a Reply box. Your reply is saved as a comment on that ping '
-        'and shows up in the trail history.',
+      subtitle: Text(
+        current == HowIsItFrequency.off
+            ? 'Off — no post-ping prompts.'
+            : '${current.label}. Your reply attaches as a comment to the '
+                'ping and shows up in the trail history.',
       ),
-      isThreeLine: true,
-      value: on,
-      onChanged: async.isLoading
-          ? null
-          : (v) async {
-              await ref.read(howIsItServiceProvider).setEnabled(v);
-              ref.invalidate(howIsItEnabledProvider);
-            },
+      isThreeLine: current != HowIsItFrequency.off,
+      trailing: DropdownButton<HowIsItFrequency>(
+        value: current,
+        underline: const SizedBox.shrink(),
+        items: [
+          for (final f in HowIsItFrequency.values)
+            DropdownMenuItem(value: f, child: Text(f.label)),
+        ],
+        onChanged: async.isLoading
+            ? null
+            : (v) async {
+                if (v == null) return;
+                await ref.read(howIsItServiceProvider).setFrequency(v);
+                ref.invalidate(howIsItFrequencyProvider);
+              },
+      ),
     );
   }
 }

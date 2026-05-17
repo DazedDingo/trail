@@ -235,15 +235,26 @@ Future<bool> _handleScheduled() async {
     final insertedId = await dao.insert(snapshot);
 
     // "How is it?" prompt (#4). Opt-in via Settings; off on install.
-    // Only fires on a real fix — no-fix rows aren't worth commenting
-    // on, and the dispatcher reaches this line on real-fix paths only
-    // (low-battery / motion-aware-skip both return earlier above).
-    if (snapshot.source != PingSource.noFix &&
-        await HowIsItService().isEnabled()) {
-      // Rebuild a Ping with the assigned rowid so the notification
-      // payload carries the right target for the reply handler.
-      final stored = Ping.fromMap({...snapshot.toMap(), 'id': insertedId});
-      await NotificationService.postHowIsItPrompt(stored);
+    // Frequency picker rate-limits — `everyPing` keeps the v1 cadence,
+    // `hourly`/`every4h`/`daily` enforce a min-elapsed gate against the
+    // last-posted timestamp. Off short-circuits before any DAO work.
+    // Real-fix only — no_fix rows aren't worth commenting on.
+    if (snapshot.source != PingSource.noFix) {
+      final hisService = HowIsItService();
+      final frequency = await hisService.getFrequency();
+      final lastPosted = await hisService.getLastPostedAt();
+      if (shouldPostHowIsIt(
+        frequency: frequency,
+        lastPostedAt: lastPosted,
+        now: DateTime.now().toUtc(),
+      )) {
+        // Rebuild a Ping with the assigned rowid so the notification
+        // payload carries the right target for the reply handler.
+        final stored =
+            Ping.fromMap({...snapshot.toMap(), 'id': insertedId});
+        await NotificationService.postHowIsItPrompt(stored);
+        await hisService.setLastPostedAt(DateTime.now().toUtc());
+      }
     }
 
     // Online auto-photos (#6). Default ON; user can opt out via
