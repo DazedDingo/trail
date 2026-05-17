@@ -55,6 +55,11 @@ class Ping {
   final String? wifiSsid;
   final PingSource source;
   final String? note;
+  /// Free-form quick comment attached to the ping after-the-fact via the
+  /// "How is it?" notification reply (schema v2, shipped 0.12.0). Distinct
+  /// from [note], which carries system-generated text only (e.g. "no_fix"
+  /// reasons). Reads as `null` on every legacy row inserted before v2.
+  final String? comment;
 
   const Ping({
     this.id,
@@ -71,7 +76,29 @@ class Ping {
     this.wifiSsid,
     required this.source,
     this.note,
+    this.comment,
   });
+
+  /// Returns a copy with the named fields overridden. Used by the
+  /// `attachComment` path so the comment is preserved across re-reads
+  /// without re-querying the DB.
+  Ping copyWith({String? comment}) => Ping(
+        id: id,
+        timestampUtc: timestampUtc,
+        lat: lat,
+        lon: lon,
+        accuracy: accuracy,
+        altitude: altitude,
+        heading: heading,
+        speed: speed,
+        batteryPct: batteryPct,
+        networkState: networkState,
+        cellId: cellId,
+        wifiSsid: wifiSsid,
+        source: source,
+        note: note,
+        comment: comment ?? this.comment,
+      );
 
   Map<String, Object?> toMap() => {
         'id': id,
@@ -88,6 +115,7 @@ class Ping {
         'wifi_ssid': wifiSsid,
         'source': source.dbValue,
         'note': note,
+        'comment': comment,
       };
 
   factory Ping.fromMap(Map<String, Object?> m) => Ping(
@@ -108,5 +136,6 @@ class Ping {
         wifiSsid: m['wifi_ssid'] as String?,
         source: PingSource.fromDb(m['source'] as String? ?? 'scheduled'),
         note: m['note'] as String?,
+        comment: m['comment'] as String?,
       );
 }

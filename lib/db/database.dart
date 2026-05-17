@@ -30,7 +30,11 @@ class PassphraseNeededException implements Exception {
 ///    they live in separate Dart VMs.
 class TrailDatabase {
   static const _fileName = 'trail.db';
-  static const _schemaVersion = 1;
+  // v2 (0.12.0): adds `pings.comment` (for the "How is it?" reply-attach
+  // flow) and a new `ping_photos` table (for online auto-fetched + user-
+  // supplied photos, many-per-ping). Migration is additive; the existing
+  // pings table is untouched, the new column defaults to NULL.
+  static const _schemaVersion = 2;
 
   /// Cached handle for the UI isolate. Kept as a `Future` (not a resolved
   /// `Database`) so parallel first-callers all await the same open — avoids
@@ -204,7 +208,8 @@ class TrailDatabase {
         cell_id TEXT,
         wifi_ssid TEXT,
         source TEXT NOT NULL,
-        note TEXT
+        note TEXT,
+        comment TEXT
       );
     ''');
     await db.execute(
@@ -217,6 +222,8 @@ class TrailDatabase {
         phone_e164 TEXT NOT NULL
       );
     ''');
+    await db.execute(_pingPhotosCreateSql);
+    await db.execute(_pingPhotosIndexSql);
   }
 
   static Future<void> _onUpgrade(
@@ -224,7 +231,48 @@ class TrailDatabase {
     int oldVersion,
     int newVersion,
   ) async {
-    // No-op in Phase 1 — schema is v1. Future phases append new tables /
-    // ALTER statements here, guarded by oldVersion checks.
+    if (oldVersion < 2) {
+      // v1 → v2: add the "How is it?" comment column and the ping_photos
+      // join table. Both are additive — existing rows stay untouched, the
+      // new column defaults to NULL. Use a transaction so partial failure
+      // doesn't leave the DB half-migrated (caller may retry on next open).
+      await db.transaction((txn) async {
+        await txn.execute('ALTER TABLE pings ADD COLUMN comment TEXT;');
+        await txn.execute(_pingPhotosCreateSql);
+        await txn.execute(_pingPhotosIndexSql);
+      });
+    }
   }
+
+  // ─── ping_photos schema (v2) ─────────────────────────────────────────
+  //
+  // One row per photo attached to a ping. A pin can have many photos:
+  //   - online-fetched (source = 'wikimedia') auto-populated after each
+  //     ping when the user has online-photos enabled.
+  //   - user-supplied (source = 'user_camera' / 'user_gallery') attached
+  //     explicitly via the gallery sheet's "Add your photo" entry.
+  //
+  // `uri` is the absolute resolvable URL (https://... for online,
+  // file://... for user). `attribution` + `license` are required for
+  // online (Wikimedia Commons license terms); user photos store the
+  // empty string. `fetched_at` is the wall-clock time the photo was
+  // discovered/captured, not the photo's own timestamp.
+  // `ordinal` is the display order in the gallery, 0-indexed.
+  static const _pingPhotosCreateSql = '''
+    CREATE TABLE ping_photos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ping_id INTEGER NOT NULL,
+      uri TEXT NOT NULL,
+      source TEXT NOT NULL,
+      attribution TEXT,
+      license TEXT,
+      thumb_uri TEXT,
+      fetched_at INTEGER NOT NULL,
+      ordinal INTEGER NOT NULL,
+      FOREIGN KEY (ping_id) REFERENCES pings(id) ON DELETE CASCADE
+    );
+  ''';
+
+  static const _pingPhotosIndexSql =
+      'CREATE INDEX idx_ping_photos_ping_id ON ping_photos(ping_id);';
 }

@@ -68,6 +68,18 @@
          still never touches the network. -->
     <uses-permission android:name="android.permission.INTERNET"/>
 
+    <!-- Pin-photos feature (schema v2): user-supplied photos go through
+         `image_picker`. Camera path needs CAMERA at runtime; gallery
+         path needs READ_MEDIA_IMAGES on Android 13+ (older devices read
+         from public media via the legacy storage scope). image_picker
+         requests both at prompt time — but the manifest declaration is
+         required up front for the permission_handler check to return a
+         meaningful status. The auto-fetch online-photos path (Wikimedia
+         Commons) reuses the already-declared INTERNET permission. -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"
+        android:minSdkVersion="33"/>
+
     <application
         android:label="Trail"
         android:name="${applicationName}"

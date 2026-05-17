@@ -172,6 +172,31 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     );
   }
 
+  /// Drop every piece of annotation-tracking state so the next render
+  /// starts from a clean slate. Used by both `_openDateFilterSheet` and
+  /// `_clearDateFilter` — the bug they're fixing is that without this
+  /// reset, stale `_renderedCircles` references survive across map
+  /// remounts (which happen when `pingsByRangeProvider`'s family key
+  /// changes and `pingsAsync.when` flips through `loading` to `data`,
+  /// disposing the MapLibreMap and recreating it). The old controller's
+  /// in-flight refresh would race with the new controller's
+  /// `onStyleLoaded` → `_scheduleRefresh`, and the previous filter's
+  /// circles could leak onto the new map.
+  void _resetAnnotationTrackingOnFilterChange() {
+    _styleReady = false;
+    _controller = null;
+    _heatmapMounted = false;
+    _circleToPing.clear();
+    _renderedPathFixes = null;
+    _pathLine = null;
+    _renderedCircles = [];
+    _pathRenderKey = null;
+    // Drop any pending refresh job — the new controller will get its
+    // own _scheduleRefresh from onStyleLoadedCallback once it mounts.
+    _pendingRefreshFixes = null;
+    _pendingRefreshScheme = null;
+  }
+
   Future<void> _openDateFilterSheet() async {
     final allPings = ref.read(allPingsProvider).valueOrNull ?? const [];
     final fixes = allPings
@@ -210,8 +235,23 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
       _dateFilter = picked;
       _sliderMax = null;
       _initialFitDone = false; // re-fit camera to the new bbox
+      _resetAnnotationTrackingOnFilterChange();
     });
-    _refreshAnnotationsIfReady();
+    // Don't call _refreshAnnotationsIfReady directly — `_styleReady` is
+    // now false. The next build's pingsAsync.when may show a loading
+    // spinner, dispose this map, mount a new one; that new map's
+    // onStyleLoadedCallback will fire _scheduleRefresh with the
+    // filtered fixes. If pingsByRangeProvider has the new key cached
+    // (no loading flicker), MapLibreMap keeps its current widget, but
+    // _styleReady stays false until onStyleLoadedCallback fires again
+    // on the (possibly-already-loaded) style — maplibre_gl re-fires
+    // onStyleLoadedCallback when its style is reset, which it is via
+    // the styleString rebuild downstream of `_styleFuture`. In the
+    // edge case where the same style + same widget survive, a
+    // post-frame nudge forces the refresh on the existing controller.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _refreshAnnotationsIfReady();
+    });
   }
 
   void _clearDateFilter() {
@@ -221,8 +261,11 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
       _dateFilter = null;
       _sliderMax = null;
       _initialFitDone = false;
+      _resetAnnotationTrackingOnFilterChange();
     });
-    _refreshAnnotationsIfReady();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _refreshAnnotationsIfReady();
+    });
   }
 
   String _formatRange(DateTimeRange r) {
@@ -451,7 +494,11 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     final mode = _showHeatmap ? 'heatmap' : 'path';
     final renderKey = '$mode|${_dateFilter?.start}|${_dateFilter?.end}'
         '|$_showPath';
-    final renderKeyChanged = renderKey != _pathRenderKey;
+    // Capture the previous key BEFORE we mutate it — the strategy
+    // helper below relies on the comparison to decide between
+    // from-scratch and incremental render paths.
+    final prevRenderKey = _pathRenderKey;
+    final renderKeyChanged = renderKey != prevRenderKey;
 
     if (renderKeyChanged) {
       await c.clearLines();
@@ -476,24 +523,23 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     await _setHeatmap(c, false, const [], scheme);
 
     final prev = _renderedPathFixes;
-    final samePrefix = !renderKeyChanged &&
-        prev != null &&
-        prev.isNotEmpty &&
-        visibleFixes.isNotEmpty &&
-        identical(prev.first, visibleFixes.first);
-
-    if (samePrefix && visibleFixes.length == prev.length) {
-      return;
-    }
-
-    if (samePrefix && visibleFixes.length > prev.length) {
-      await _renderPathIncrementalForward(
-          c, visibleFixes, prev.length, scheme);
-    } else if (samePrefix && visibleFixes.length < prev.length) {
-      await _renderPathIncrementalBackward(
-          c, visibleFixes, prev.length, scheme);
-    } else {
-      await _renderPathFromScratch(c, visibleFixes, scheme);
+    final strategy = choosePathRenderStrategy(
+      prevRenderKey: prevRenderKey,
+      currentRenderKey: renderKey,
+      prev: prev,
+      visible: visibleFixes,
+    );
+    switch (strategy) {
+      case PathRenderStrategy.noOp:
+        return;
+      case PathRenderStrategy.incrementalForward:
+        await _renderPathIncrementalForward(
+            c, visibleFixes, prev!.length, scheme);
+      case PathRenderStrategy.incrementalBackward:
+        await _renderPathIncrementalBackward(
+            c, visibleFixes, prev!.length, scheme);
+      case PathRenderStrategy.fromScratch:
+        await _renderPathFromScratch(c, visibleFixes, scheme);
     }
     _renderedPathFixes = visibleFixes;
   }
@@ -827,11 +873,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
 
   void _startPlaybackTimer(List<Ping> chrono) {
     _playbackTimer?.cancel();
-    final interval = Duration(
-      milliseconds: (_basePlaybackStep.inMilliseconds / _playbackSpeed)
-          .round()
-          .clamp(16, 2000),
-    );
+    final interval = playbackInterval(_basePlaybackStep, _playbackSpeed);
     _playbackTimer = Timer.periodic(interval, (_) {
       if (!mounted) return;
       final current = _sliderMax ?? chrono.last.timestampUtc;
@@ -853,13 +895,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   }
 
   void _cycleSpeed() {
-    final next = switch (_playbackSpeed) {
-      1.0 => 2.0,
-      2.0 => 4.0,
-      4.0 => 8.0,
-      8.0 => 16.0,
-      _ => 1.0,
-    };
+    final next = nextPlaybackSpeed(_playbackSpeed);
     setState(() => _playbackSpeed = next);
     if (_playing) {
       final pings =
@@ -872,6 +908,109 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
       }
     }
   }
+}
+
+/// The three possible render strategies for the path-mode annotation
+/// pass. Exposed for unit tests so the decision tree is locked.
+enum PathRenderStrategy {
+  /// Filter / mode / path-toggle changed — wipe every existing line
+  /// and circle, then add the new fixes from scratch.
+  fromScratch,
+
+  /// Same render key, visibleFixes extends the previous list — add
+  /// just the new tail circles + nudge the previous head's styling.
+  incrementalForward,
+
+  /// Same render key, visibleFixes is a prefix of the previous list —
+  /// pop trailing circles + reset path line.
+  incrementalBackward,
+
+  /// Same render key + same fix count + same prefix — already
+  /// rendered, nothing to do.
+  noOp,
+}
+
+/// Picks the render strategy for the next path-mode refresh. The
+/// "same-prefix" test uses `identical(prev.first, visible.first)`
+/// deliberately — different DAO reads produce different `Ping`
+/// instances even for the same row, so identity tells us "yes this is
+/// the same in-memory list, just one step longer / shorter".
+PathRenderStrategy choosePathRenderStrategy({
+  required String? prevRenderKey,
+  required String currentRenderKey,
+  required List<Ping>? prev,
+  required List<Ping> visible,
+}) {
+  if (currentRenderKey != prevRenderKey) {
+    return PathRenderStrategy.fromScratch;
+  }
+  if (prev == null || prev.isEmpty || visible.isEmpty) {
+    return PathRenderStrategy.fromScratch;
+  }
+  if (!identical(prev.first, visible.first)) {
+    return PathRenderStrategy.fromScratch;
+  }
+  if (visible.length == prev.length) return PathRenderStrategy.noOp;
+  if (visible.length > prev.length) {
+    return PathRenderStrategy.incrementalForward;
+  }
+  return PathRenderStrategy.incrementalBackward;
+}
+
+/// Ordered playback-speed cycle. Tapping the speed chip in the playback
+/// HUD walks through these values; tapping past the fastest wraps to the
+/// slowest. Order is **slow → fast** so the chip's label reads naturally
+/// as the user increases speed. Sub-1× speeds were added in 0.12.0 so
+/// the user can study high-frequency panic-burst pings frame by frame.
+const List<double> kPlaybackSpeeds = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
+
+/// Returns the next speed in [kPlaybackSpeeds] after [current], wrapping
+/// past 16× back to 0.25×. Tolerates a [current] that isn't in the cycle
+/// (e.g. a persisted value from a future build with more speeds) by
+/// snapping to the closest cycle entry first.
+double nextPlaybackSpeed(double current) {
+  var bestIdx = 0;
+  var bestDelta = double.infinity;
+  for (var i = 0; i < kPlaybackSpeeds.length; i++) {
+    final d = (kPlaybackSpeeds[i] - current).abs();
+    if (d < bestDelta) {
+      bestDelta = d;
+      bestIdx = i;
+    }
+  }
+  return kPlaybackSpeeds[(bestIdx + 1) % kPlaybackSpeeds.length];
+}
+
+/// Computes the Timer.periodic interval for a given playback speed.
+/// Clamps to `[16ms, 4000ms]` — the lower bound matches one display
+/// frame at 60Hz so faster speeds don't queue overlapping callbacks; the
+/// upper bound (4s) lets the 0.25× speed render naturally
+/// (`350ms / 0.25 = 1400ms` per step, well inside the cap) while still
+/// catching pathological inputs (e.g. speed=0 returning Infinity).
+///
+/// Pure + exported so unit tests can hit it without a widget tree.
+Duration playbackInterval(Duration baseStep, double speed) {
+  if (speed <= 0) speed = 1.0; // defensive — speed=0 → infinity loop
+  return Duration(
+    milliseconds:
+        (baseStep.inMilliseconds / speed).round().clamp(16, 4000),
+  );
+}
+
+/// Human-facing label for the playback HUD's speed chip. Integer speeds
+/// render as `2×`, `16×`; sub-integer speeds with one decimal (`0.5×`)
+/// unless they need two (`0.25×`). Kept consistent with the cycle so the
+/// chip never collapses two different speeds to the same label.
+String formatPlaybackSpeedLabel(double speed) {
+  if (speed == speed.roundToDouble()) {
+    return '${speed.toStringAsFixed(0)}×';
+  }
+  // Match the cycle's two distinct sub-1× speeds explicitly — anything
+  // tightening from 0.25 to 0.2 would alias against 0.25.
+  if ((speed * 100).round() % 10 != 0) {
+    return '${speed.toStringAsFixed(2)}×';
+  }
+  return '${speed.toStringAsFixed(1)}×';
 }
 
 /// Slider step logic — public so unit tests can hit it without a
@@ -1037,9 +1176,7 @@ class _TimeSlider extends StatelessWidget {
     final disabled = totalMs <= 0;
     final scheme = Theme.of(context).colorScheme;
     final fmt = DateFormat('MMM d, HH:mm');
-    final speedLabel = playbackSpeed == playbackSpeed.roundToDouble()
-        ? '${playbackSpeed.toStringAsFixed(0)}×'
-        : '${playbackSpeed.toStringAsFixed(1)}×';
+    final speedLabel = formatPlaybackSpeedLabel(playbackSpeed);
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
       color: scheme.surfaceContainerHighest.withValues(alpha: 0.4),

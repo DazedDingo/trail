@@ -77,6 +77,24 @@ dependencies:
   # declarative `layers:`.
   maplibre_gl: ^0.26.0
 
+  # HTTP client — for the Wikimedia Commons GeoSearch lookups powering
+  # the auto-photo feature (schema v2). Trail is otherwise offline-only,
+  # but the photo-lookup is an opt-in-and-default-on toggle in Settings;
+  # the INTERNET permission is already declared for the local tile
+  # server, so this is just adding a new outbound destination rather
+  # than a new permission. See `services/online_photo_service.dart`.
+  http: ^1.2.2
+  # User-supplied photos — camera capture + gallery pick for the
+  # "Add your photo" flow on the pin detail sheet. Permission stage on
+  # Android 13+: CAMERA (for camera path) + READ_MEDIA_IMAGES (for
+  # gallery path); image_picker handles the prompt internally.
+  image_picker: ^1.1.2
+  # Disk cache + in-flight dedupe for the online photo thumbnails. The
+  # gallery sheet pages through 20+ images per pin during picture-mode
+  # playback, so an LRU cache keyed by URL keeps the network round-trip
+  # to "one per photo ever" on stable connections.
+  cached_network_image: ^3.4.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

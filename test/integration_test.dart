@@ -64,7 +64,8 @@ Future<Database> _openMemDb() async {
       cell_id TEXT,
       wifi_ssid TEXT,
       source TEXT NOT NULL,
-      note TEXT
+      note TEXT,
+      comment TEXT
     );
   ''');
   await db.execute('CREATE INDEX idx_pings_ts_utc ON pings(ts_utc DESC);');

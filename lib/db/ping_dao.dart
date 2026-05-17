@@ -16,6 +16,31 @@ class PingDao {
     return db.insert('pings', map);
   }
 
+  /// Single-row read by primary key. Returns `null` if the row was deleted
+  /// (e.g. archived between the notification firing and the user replying).
+  Future<Ping?> byId(int id) async {
+    final rows = await db.query(
+      'pings',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return Ping.fromMap(rows.first);
+  }
+
+  /// Sets `comment` on a ping. Used by the "How is it?" reply-attach
+  /// flow (schema v2). Returns the row count actually updated (0 when
+  /// the target row was archived/deleted between fire and reply).
+  Future<int> attachComment(int pingId, String comment) async {
+    return db.update(
+      'pings',
+      {'comment': comment},
+      where: 'id = ?',
+      whereArgs: [pingId],
+    );
+  }
+
   /// Most-recent ping regardless of source. `null` on a brand-new install.
   Future<Ping?> latest() async {
     final rows = await db.query(

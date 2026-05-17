@@ -61,10 +61,29 @@ Future<Database> _openMemDb() async {
       cell_id TEXT,
       wifi_ssid TEXT,
       source TEXT NOT NULL,
-      note TEXT
+      note TEXT,
+      comment TEXT
     );
   ''');
   await db.execute('CREATE INDEX idx_pings_ts_utc ON pings(ts_utc DESC);');
+  // ping_photos (schema v2) — kept in lock-step with TrailDatabase._onCreate
+  // so the DAO tests can exercise photo CRUD without a real SQLCipher open.
+  await db.execute('''
+    CREATE TABLE ping_photos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ping_id INTEGER NOT NULL,
+      uri TEXT NOT NULL,
+      source TEXT NOT NULL,
+      attribution TEXT,
+      license TEXT,
+      thumb_uri TEXT,
+      fetched_at INTEGER NOT NULL,
+      ordinal INTEGER NOT NULL,
+      FOREIGN KEY (ping_id) REFERENCES pings(id) ON DELETE CASCADE
+    );
+  ''');
+  await db.execute(
+      'CREATE INDEX idx_ping_photos_ping_id ON ping_photos(ping_id);');
   return db;
 }
 
@@ -376,6 +395,49 @@ void main() {
 
     test('empty table deletes 0 and does not throw', () async {
       expect(await dao.deleteOlderThan(DateTime.utc(2026, 1, 1)), 0);
+    });
+  });
+
+  group('PingDao.byId + attachComment (schema v2)', () {
+    test('byId returns the row matching the primary key', () async {
+      final id = await dao.insert(_p(DateTime.utc(2026, 5, 17, 9),
+          lat: 1, lon: 2));
+      final got = await dao.byId(id);
+      expect(got, isNotNull);
+      expect(got!.id, id);
+      expect(got.lat, 1);
+      expect(got.comment, isNull);
+    });
+
+    test('byId returns null for a missing id (archived between fire+reply)',
+        () async {
+      final got = await dao.byId(99999);
+      expect(got, isNull);
+    });
+
+    test('attachComment sets the comment column and is roundtrip-readable',
+        () async {
+      final id = await dao.insert(_p(DateTime.utc(2026, 5, 17, 10),
+          lat: 1, lon: 2));
+      final updated = await dao.attachComment(id, 'rainy but pretty');
+      expect(updated, 1, reason: 'one row matched');
+      final got = await dao.byId(id);
+      expect(got!.comment, 'rainy but pretty');
+    });
+
+    test('attachComment returns 0 when the target row is gone', () async {
+      final updated = await dao.attachComment(424242, 'late reply');
+      expect(updated, 0);
+    });
+
+    test('attachComment is idempotent — same comment twice does not throw',
+        () async {
+      final id = await dao.insert(_p(DateTime.utc(2026, 5, 17, 11),
+          lat: 1, lon: 2));
+      await dao.attachComment(id, 'first');
+      await dao.attachComment(id, 'second-overwrite');
+      final got = await dao.byId(id);
+      expect(got!.comment, 'second-overwrite');
     });
   });
 }
