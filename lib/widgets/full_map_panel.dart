@@ -14,6 +14,7 @@ import '../providers/pings_provider.dart';
 import '../providers/tile_server_provider.dart';
 import '../services/mbtiles_service.dart';
 import '../services/trail_style.dart';
+import 'inline_date_filter_panel.dart';
 
 /// Reusable map panel with playback / heatmap / path / filter controls.
 ///
@@ -73,6 +74,14 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   /// rendered annotations are clamped to this window. Cleared by
   /// tapping the calendar icon → "Clear filter".
   late DateTimeRange? _dateFilter = widget.initialFilter;
+
+  /// Whether the inline date-filter panel is expanded. Tapping the
+  /// calendar icon in the control row flips this; chips inside the
+  /// panel apply a range and close it. Replaces the full-screen
+  /// `showDateRangePicker` modal as the default entry point (the
+  /// modal is still reachable via the panel's "Custom range…" chip
+  /// for granular two-ended selection).
+  bool _calendarOpen = false;
 
   /// Maps each rendered Circle annotation back to the underlying Ping
   /// row so taps can pop a detail sheet. Cleared on every
@@ -197,80 +206,32 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     _pendingRefreshScheme = null;
   }
 
-  Future<void> _openDateFilterSheet() async {
-    final allPings = ref.read(allPingsProvider).valueOrNull ?? const [];
-    final fixes = allPings
-        .where((p) => p.lat != null && p.lon != null)
-        .toList(growable: false);
-    final earliest = fixes.isEmpty
-        ? DateTime.now().toUtc().subtract(const Duration(days: 365))
-        : fixes.first.timestampUtc;
-    final latest = fixes.isEmpty
-        ? DateTime.now().toUtc()
-        : fixes.last.timestampUtc;
-    final initial = _dateFilter ??
-        DateTimeRange(
-          start: latest.subtract(const Duration(days: 7)).toLocal(),
-          end: latest.toLocal(),
-        );
-    final picked = await showDateRangePicker(
-      context: context,
-      firstDate: earliest.toLocal().subtract(const Duration(days: 1)),
-      lastDate: latest.toLocal().add(const Duration(days: 1)),
-      initialDateRange: DateTimeRange(
-        start: initial.start.isBefore(earliest.toLocal())
-            ? earliest.toLocal()
-            : initial.start,
-        end: initial.end.isAfter(latest.toLocal())
-            ? latest.toLocal()
-            : initial.end,
-      ),
-      helpText: 'Filter trail by date',
-      saveText: 'Apply',
-    );
-    if (picked == null) return;
+  /// Toggle the inline date-filter panel. Replaces the previous
+  /// `showDateRangePicker` modal as the calendar icon's tap handler.
+  /// The panel itself surfaces preset chips + a "Custom range…" expander
+  /// that opens the system picker for two-ended selection.
+  void _toggleCalendar() {
+    if (!mounted) return;
+    setState(() => _calendarOpen = !_calendarOpen);
+  }
+
+  /// Applied range — null means "no filter". Resets annotation tracking
+  /// so the new range renders cleanly (the same state-reset path the
+  /// previous modal flow used; see `_resetAnnotationTrackingOnFilterChange`
+  /// for the rationale).
+  void _applyDateFilter(DateTimeRange? range) {
     if (!mounted) return;
     _pausePlayback();
     setState(() {
-      _dateFilter = picked;
-      _sliderMax = null;
-      _initialFitDone = false; // re-fit camera to the new bbox
-      _resetAnnotationTrackingOnFilterChange();
-    });
-    // Don't call _refreshAnnotationsIfReady directly — `_styleReady` is
-    // now false. The next build's pingsAsync.when may show a loading
-    // spinner, dispose this map, mount a new one; that new map's
-    // onStyleLoadedCallback will fire _scheduleRefresh with the
-    // filtered fixes. If pingsByRangeProvider has the new key cached
-    // (no loading flicker), MapLibreMap keeps its current widget, but
-    // _styleReady stays false until onStyleLoadedCallback fires again
-    // on the (possibly-already-loaded) style — maplibre_gl re-fires
-    // onStyleLoadedCallback when its style is reset, which it is via
-    // the styleString rebuild downstream of `_styleFuture`. In the
-    // edge case where the same style + same widget survive, a
-    // post-frame nudge forces the refresh on the existing controller.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _refreshAnnotationsIfReady();
-    });
-  }
-
-  void _clearDateFilter() {
-    if (_dateFilter == null) return;
-    _pausePlayback();
-    setState(() {
-      _dateFilter = null;
+      _dateFilter = range;
       _sliderMax = null;
       _initialFitDone = false;
+      _calendarOpen = false;
       _resetAnnotationTrackingOnFilterChange();
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _refreshAnnotationsIfReady();
     });
-  }
-
-  String _formatRange(DateTimeRange r) {
-    final fmt = DateFormat.yMMMd();
-    return '${fmt.format(r.start)} – ${fmt.format(r.end)}';
   }
 
   Widget _buildBody(
@@ -296,11 +257,12 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
         // experience without needing an AppBar of its own.
         _ControlRow(
           dateFilterActive: _dateFilter != null,
+          calendarOpen: _calendarOpen,
           showHeatmap: _showHeatmap,
           showPath: _showPath,
           liveDotOn: liveDotOn,
           liveDotLoading: liveDotLoading,
-          onOpenFilter: _openDateFilterSheet,
+          onOpenFilter: _toggleCalendar,
           onToggleHeatmap: () {
             setState(() => _showHeatmap = !_showHeatmap);
             _refreshAnnotationsIfReady();
@@ -315,6 +277,20 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
           onOpenRegions: () => context.push('/regions'),
           onExpand: widget.onExpand,
         ),
+        InlineDateFilterPanel(
+          open: _calendarOpen,
+          currentRange: _dateFilter,
+          now: DateTime.now(),
+          earliestPing: chrono.isEmpty
+              ? DateTime.now().toUtc().subtract(const Duration(days: 365))
+              : chrono.first.timestampUtc,
+          latestPing:
+              chrono.isEmpty ? DateTime.now().toUtc() : chrono.last.timestampUtc,
+          onApply: _applyDateFilter,
+          onClose: () {
+            if (mounted) setState(() => _calendarOpen = false);
+          },
+        ),
         Expanded(
           child: FutureBuilder<String?>(
             future: _styleFuture,
@@ -326,12 +302,6 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
             },
           ),
         ),
-        if (_dateFilter != null)
-          _DateFilterBanner(
-            range: _dateFilter!,
-            label: _formatRange(_dateFilter!),
-            onClear: _clearDateFilter,
-          ),
         _TimeSlider(
           first: first,
           last: last,
@@ -1037,6 +1007,10 @@ DateTime stepSliderTo(List<Ping> chrono, DateTime current, int delta) {
 
 class _ControlRow extends StatelessWidget {
   final bool dateFilterActive;
+  /// True while the InlineDateFilterPanel is expanded. Flips the
+  /// calendar icon to the "close" affordance so the row's button
+  /// reads as a toggle, not a one-way modal launcher.
+  final bool calendarOpen;
   final bool showHeatmap;
   final bool showPath;
   final bool liveDotOn;
@@ -1053,6 +1027,7 @@ class _ControlRow extends StatelessWidget {
 
   const _ControlRow({
     required this.dateFilterActive,
+    required this.calendarOpen,
     required this.showHeatmap,
     required this.showPath,
     required this.liveDotOn,
@@ -1075,15 +1050,19 @@ class _ControlRow extends StatelessWidget {
         mainAxisAlignment: MainAxisAlignment.end,
         children: [
           IconButton(
-            tooltip: dateFilterActive
-                ? 'Filter active — tap to change/clear'
-                : 'Filter by date range',
+            tooltip: calendarOpen
+                ? 'Close date filter'
+                : (dateFilterActive
+                    ? 'Filter active — tap to change/clear'
+                    : 'Filter by date range'),
             visualDensity: VisualDensity.compact,
             iconSize: 20,
             icon: Icon(
-              dateFilterActive
-                  ? Icons.event_available
-                  : Icons.date_range_outlined,
+              calendarOpen
+                  ? Icons.event_busy_outlined
+                  : (dateFilterActive
+                      ? Icons.event_available
+                      : Icons.date_range_outlined),
             ),
             onPressed: onOpenFilter,
           ),
@@ -1249,54 +1228,6 @@ class _TimeSlider extends StatelessWidget {
             ],
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _DateFilterBanner extends StatelessWidget {
-  final DateTimeRange range;
-  final String label;
-  final VoidCallback onClear;
-  const _DateFilterBanner({
-    required this.range,
-    required this.label,
-    required this.onClear,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Material(
-      color: scheme.secondaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
-        child: Row(
-          children: [
-            Icon(Icons.event_available,
-                size: 18, color: scheme.onSecondaryContainer),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'Filter: $label',
-                style: TextStyle(
-                  color: scheme.onSecondaryContainer,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-            TextButton(
-              onPressed: onClear,
-              style: TextButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
-              ),
-              child: const Text('Clear'),
-            ),
-          ],
-        ),
       ),
     );
   }
