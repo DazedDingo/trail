@@ -330,6 +330,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             trailing: const Icon(Icons.chevron_right),
             onTap: () => context.push('/stats'),
           ),
+          ListTile(
+            leading: const Icon(Icons.explore_outlined),
+            title: const Text('Trips'),
+            subtitle: const Text(
+              'Timeline of auto-detected trips (≥6 h ≥10 km from home). '
+              'Tap any trip to open the map filtered to its date window.',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => context.push('/trips'),
+          ),
           const Divider(),
           const _SectionHeader('History'),
           ListTile(
