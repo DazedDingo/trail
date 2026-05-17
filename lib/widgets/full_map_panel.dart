@@ -15,6 +15,7 @@ import '../providers/tile_server_provider.dart';
 import '../services/mbtiles_service.dart';
 import '../services/trail_style.dart';
 import 'inline_date_filter_panel.dart';
+import 'ping_photos_gallery.dart';
 
 /// Reusable map panel with playback / heatmap / path / filter controls.
 ///
@@ -1334,12 +1335,12 @@ class _Dot extends StatelessWidget {
   }
 }
 
-class _PingDetailSheet extends StatelessWidget {
+class _PingDetailSheet extends ConsumerWidget {
   final Ping ping;
   const _PingDetailSheet({required this.ping});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final fmt = DateFormat('EEE MMM d, HH:mm:ss');
     final tsLocal = ping.timestampUtc.toLocal();
     final lat = ping.lat?.toStringAsFixed(5) ?? '—';
@@ -1361,6 +1362,11 @@ class _PingDetailSheet extends StatelessWidget {
                 ),
           ),
           const SizedBox(height: 12),
+          // Photos gallery — auto-fetched + user-attached. Hidden on
+          // pings with no rowid (shouldn't happen for circle taps, but
+          // defensive). Sheet stays open after add/remove so the user
+          // can attach multiple in one session.
+          if (ping.id != null) PingPhotosGallery(pingId: ping.id!),
           _row('Lat / Lon', '$lat, $lon'),
           if (ping.accuracy != null)
             _row('Accuracy', '±${ping.accuracy!.toStringAsFixed(0)} m'),
@@ -1375,6 +1381,8 @@ class _PingDetailSheet extends StatelessWidget {
           if (ping.cellId != null) _row('Cell', ping.cellId!),
           if (ping.wifiSsid != null) _row('Wi-Fi', ping.wifiSsid!),
           if (ping.note != null) _row('Note', ping.note!),
+          if (ping.comment != null && ping.comment!.isNotEmpty)
+            _row('Comment', ping.comment!),
         ],
       ),
     );

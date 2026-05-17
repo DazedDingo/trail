@@ -5,12 +5,18 @@ import 'package:workmanager/workmanager.dart';
 
 import 'package:geolocator/geolocator.dart';
 
+import 'package:sqflite_sqlcipher/sqflite.dart';
+
 import '../../db/database.dart';
 import '../../db/ping_dao.dart';
+import '../../db/ping_photo_dao.dart';
 import '../../models/ping.dart';
+import '../../models/ping_photo.dart';
+import '../auto_photo_service.dart';
 import '../how_is_it_service.dart';
 import '../location_service.dart';
 import '../notification_service.dart';
+import '../online_photo_service.dart';
 import '../panic/panic_service.dart';
 import 'scheduler_mode.dart';
 import 'scheduler_policy.dart';
@@ -240,6 +246,22 @@ Future<bool> _handleScheduled() async {
       await NotificationService.postHowIsItPrompt(stored);
     }
 
+    // Online auto-photos (#6). Default ON; user can opt out via
+    // Settings → Map → Auto-fetch photos. Privacy: leaks lat/lon to
+    // Wikimedia Commons. Best-effort — failures are swallowed because
+    // photos are decorative; the ping row is already committed.
+    if (snapshot.source != PingSource.noFix &&
+        snapshot.lat != null &&
+        snapshot.lon != null &&
+        await AutoPhotoService().isEnabled()) {
+      await _autoFetchPhotos(
+        db,
+        pingId: insertedId,
+        lat: snapshot.lat!,
+        lon: snapshot.lon!,
+      );
+    }
+
     final userCadence = await CadenceStore.get();
     await WorkmanagerScheduler.enqueuePeriodic(
       frequency: SchedulerPolicy.nextCadence(
@@ -259,6 +281,47 @@ Future<bool> _handleScheduled() async {
     return true;
   } finally {
     await db.close();
+  }
+}
+
+/// Best-effort online-photo fetch + write. Called from the background
+/// dispatcher after a successful real-fix ping. Failures swallow into
+/// no-op — photos are decorative; the ping row is already committed.
+Future<void> _autoFetchPhotos(
+  Database db, {
+  required int pingId,
+  required double lat,
+  required double lon,
+}) async {
+  try {
+    final photoDao = PingPhotoDao(db);
+    // Idempotency — if a previous dispatch already wrote photos for
+    // this ping (rare, but possible on retry chains), don't double.
+    if (await photoDao.onlineCountForPing(pingId) > 0) return;
+    final fetched = await OnlinePhotoService().fetchNearby(
+      lat: lat,
+      lon: lon,
+    );
+    if (fetched.isEmpty) return;
+    final rows = <PingPhoto>[];
+    for (var i = 0; i < fetched.length; i++) {
+      final f = fetched[i];
+      rows.add(PingPhoto(
+        pingId: pingId,
+        uri: f.uri,
+        source: PingPhotoSource.wikimedia,
+        attribution: f.attribution,
+        license: f.license,
+        thumbUri: f.thumbUri,
+        fetchedAt: DateTime.now().toUtc(),
+        ordinal: i,
+      ));
+    }
+    await photoDao.insertAll(rows);
+  } catch (_) {
+    // Swallow — auto-photos are a nice-to-have, not part of the
+    // load-bearing ping pipeline. WorkerRunLog captures the ping
+    // outcome; photo failures don't deserve a separate marker.
   }
 }
 

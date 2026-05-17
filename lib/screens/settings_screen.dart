@@ -18,6 +18,7 @@ import '../providers/home_location_provider.dart';
 import '../providers/home_map_height_provider.dart';
 import '../providers/how_is_it_provider.dart';
 import '../providers/map_settings_provider.dart';
+import '../providers/photos_provider.dart';
 import '../providers/panic_provider.dart';
 import '../providers/pings_provider.dart';
 import '../providers/scheduler_provider.dart';
@@ -306,6 +307,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           const _SectionHeader('Home'),
           const _HomeLocationTile(),
           const _HomeMapHeightTile(),
+          const _AutoPhotosTile(),
           const Divider(),
           const _SectionHeader('Offline map'),
           ListTile(
@@ -1290,6 +1292,41 @@ class _HowIsItTile extends ConsumerWidget {
           : (v) async {
               await ref.read(howIsItServiceProvider).setEnabled(v);
               ref.invalidate(howIsItEnabledProvider);
+            },
+    );
+  }
+}
+
+/// Toggle for the online auto-photo feature (#6, schema v2). Default
+/// ON, with a one-line privacy explainer in the subtitle so the
+/// default isn't a silent leak. When on, every successful scheduled
+/// ping triggers a background fetch to Wikimedia Commons GeoSearch
+/// and persists up to 5 photos in `ping_photos` for the gallery.
+class _AutoPhotosTile extends ConsumerWidget {
+  const _AutoPhotosTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(autoPhotosEnabledProvider);
+    // Default ON — `AutoPhotoService.isEnabled` returns true when the
+    // key is absent, so the loading state matches the install default.
+    final on = async.valueOrNull ?? true;
+    return SwitchListTile(
+      secondary: const Icon(Icons.image_search_outlined),
+      title: const Text('Auto-fetch photos from Wikimedia'),
+      subtitle: const Text(
+        'After each ping, fetch up to 5 nearby Wikimedia Commons photos '
+        '(CC-BY-SA). Leaks the ping\'s lat/lon to Wikimedia. Turn off if '
+        'you want zero outbound network for photos — you can still attach '
+        'your own from the pin detail sheet.',
+      ),
+      isThreeLine: true,
+      value: on,
+      onChanged: async.isLoading
+          ? null
+          : (v) async {
+              await ref.read(autoPhotoServiceProvider).setEnabled(v);
+              ref.invalidate(autoPhotosEnabledProvider);
             },
     );
   }
