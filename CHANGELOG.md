@@ -4,6 +4,49 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.13.1+85] — 2026-05-18
+
+### Added
+- **Photo backfill sheet now surfaces the cost story up front.** A small info row inside the sheet calls out that the Wikimedia API is free, but a year of 4-hour pings is roughly ~50 MB of cellular data — Wi-Fi is friendlier. The fetch itself doesn't cost money; image bytes are only pulled when you actually open the gallery or slideshow.
+
+### Changed
+- **Release notes on GitHub Releases are human-readable again.** The CI workflow already extracted release notes from CHANGELOG.md, but three recent releases (0.12.0, 0.12.1, 0.13.0) shipped without their CHANGELOG sections being filled in, so they fell through to the "see CHANGELOG.md" placeholder. Those three pages are now backfilled with plain-English bullets, and the missing CHANGELOG sections are written so the workflow keeps pulling correctly on future builds.
+
+## [0.13.0+84] — 2026-05-18
+
+### Added
+- **Slideshow mode on the big map.** A new toggle in the map's control row swaps the map body for a full-screen photo slideshow of your trail. The same play/pause + speed buttons (0.25× through 16×) and the same time slider drive both views, so you can scrub from a photo and flip back to see the matching pin on the map. Date filter applies — slideshow only steps through pings inside the selected window. When a pin has no photo, the slideshow walks back to the most recent one that does, so it never blanks mid-trail.
+- **Photo backfill for older pings.** Settings → Home → "Backfill photos for older pings" runs the Wikimedia Commons fetcher over every past pin that doesn't have photos yet. Throttled to ~1/sec to stay polite to the API; live progress bar; stop button works between pings. **Free** — no API key, no per-call cost. Heads up on cellular data: a year of 4-hour pings is roughly ~50 MB of JSON over ~40 minutes of wall time, so prefer Wi-Fi.
+- **Trips lives on Home now.** A "Trips" pill sits between the home map and Recent pings, alongside "History" — one tap straight to the timeline of auto-detected trips. The Settings → Insights → Trips entry stays too.
+
+## [0.12.1+83] — 2026-05-17
+
+### Changed
+- **"How is it?" prompts gained a cadence picker.** The Settings tile is now a dropdown instead of a switch: **Off** (the new default), **After every ping**, **Max once per hour**, **Max once every 4 hours**, or **Max once per day**. If you're on a 30-minute ping cadence and pick "daily", you get one prompt a day instead of 48. Existing installs that had the v1 toggle on read through to "After every ping" so the prompts you opted into don't silently stop.
+
+### Added
+- 37 widget tests covering the inline date filter, the trips screen, and the new Settings tiles — locks the visible-and-flows surfaces so future refactors can't silently break them.
+
+## [0.12.0+82] — 2026-05-17
+
+This release ships six product changes plus a schema migration. The DB
+migration is additive — existing pings and your trail history are
+untouched.
+
+### Added
+- **Online auto-fetch photos for every pin.** After each successful scheduled ping, Trail looks up nearby Wikimedia Commons photos by lat/lon and attaches up to 5 to the pin. Tap any pin on the map to see the gallery — photos show CC-BY-SA attribution + license. **On by default**, with a clear privacy note in Settings → Home → "Auto-fetch photos from Wikimedia" — leaks the ping's lat/lon to Wikimedia, so flip it off if you want zero outbound network for photos.
+- **Add your own photos to a pin.** From the pin detail sheet, "Add your photo" opens a camera/gallery chooser. Multiple photos per pin, mixed with the auto-fetched ones; long-press to remove. Camera + READ_MEDIA_IMAGES permissions added; the system prompts at use time, not on first launch.
+- **Trips screen at /trips.** Auto-detected trips (≥6 h, ≥10 km from home) now have their own timeline. Tap any trip to open the map filtered to that date range. Reachable from Settings → Insights → Trips; promoted to a Home pill in 0.13.0.
+- **"How is it?" post-ping prompt.** Opt-in via Settings → Scheduling. When on, every successful scheduled ping fires a quiet notification with an inline Reply box; your reply attaches as a comment on that ping and shows up in the trail history. (0.12.1 added the cadence picker — start there if your ping cadence is high.)
+- **0.25× and 0.5× playback speeds.** The speed chip now cycles 0.25 → 0.5 → 1 → 2 → 4 → 8 → 16 → wrap. Sub-1× helps you study panic-burst pings or busy moments frame by frame.
+- **Inline date-filter panel on the map.** The calendar icon now drops a small panel down with quick-pick chips (Today, Yesterday, Last 7 days, Last 30 days, All time) and a "Custom range…" entry that opens the system picker for granular two-ended selection. Replaces the previous full-screen modal. The active range shows in a header line + a red Clear chip; one tap of the calendar icon flips the panel back closed.
+
+### Fixed
+- **Calendar filter no longer leaves stale dots on the map.** Applying a date range used to leave circles from the previous filter rendered on top of the new range's dots — caused by the map widget being torn down and rebuilt across the filter change while the renderer's tracking state survived. Annotation tracking now resets atomically with the filter change, and a new render-strategy helper guarantees a from-scratch rebuild whenever the filter, mode, or path toggle changes.
+
+### Notes
+- DB schema v1 → v2 (additive). New `pings.comment` column (target for "How is it?" replies; defaults to NULL on every existing row). New `ping_photos` table (FK to pings; many photos per pin; tracks source = wikimedia / user_camera / user_gallery, attribution, license). Migration runs in a single transaction inside the existing DB open path — no separate prompt or upgrade step for the user.
+
 ## [0.11.3+81] — 2026-05-01
 
 ### Fixed

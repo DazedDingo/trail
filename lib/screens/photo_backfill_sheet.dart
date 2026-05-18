@@ -90,6 +90,37 @@ class _PhotoBackfillSheetState extends State<PhotoBackfillSheet> {
                   color: scheme.onSurfaceVariant,
                 ),
           ),
+          const SizedBox(height: 10),
+          // Cost callout — the Wikimedia API is free + keyless, so
+          // there's no money spent. But a year of 4-hour pings is tens
+          // of MB of JSON over the throttle window, which matters on
+          // cellular. Image bytes are deferred — only fetched when the
+          // gallery / slideshow renders them, not here.
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.wifi_outlined,
+                    size: 18, color: scheme.onSurfaceVariant),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    "Free to run — Wikimedia's API has no per-call "
+                    'cost. A year of 4-hour pings is roughly ~50 MB '
+                    'of cellular data over ~40 minutes, so Wi-Fi is '
+                    'kinder if you can.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                  ),
+                ),
+              ],
+            ),
+          ),
           const SizedBox(height: 16),
           if (p == null)
             FilledButton.icon(
