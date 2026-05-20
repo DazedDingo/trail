@@ -8,6 +8,7 @@ import '../db/ping_photo_dao.dart';
 import '../models/ping_photo.dart';
 import '../providers/photos_provider.dart';
 import '../services/failed_photo_uris.dart';
+import '../services/online_photo_service.dart';
 
 /// Horizontal photo carousel for a single ping (schema v2). Renders:
 ///   - online auto-fetched photos (CC-BY-SA Wikimedia) with attribution
@@ -196,7 +197,11 @@ class _PhotoTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final isUser = photo.source.isUserSupplied;
-    final imageUri = photo.thumbUri ?? photo.uri;
+    // Shrink legacy 512 px thumbs to 320 px on the fly — see
+    // `shrinkWikimediaThumbUrl`. Gallery tiles are 132 logical px so
+    // 320 still oversamples and renders crisply at 3× DPR.
+    final imageUri =
+        shrinkWikimediaThumbUrl(photo.thumbUri ?? photo.uri, targetWidth: 320);
     return Padding(
       padding: const EdgeInsets.only(right: 8),
       child: GestureDetector(
@@ -274,6 +279,7 @@ class _PhotoTile extends StatelessWidget {
       return CachedNetworkImage(
         imageUrl: uri,
         fit: BoxFit.cover,
+        memCacheWidth: 320,
         placeholder: (_, __) => Container(color: scheme.surface),
         errorWidget: (_, __, ___) {
           WidgetsBinding.instance.addPostFrameCallback((_) async {

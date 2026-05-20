@@ -8,6 +8,21 @@ import '../db/ping_photo_dao.dart';
 import '../models/ping.dart';
 import '../models/ping_photo.dart';
 import '../services/failed_photo_uris.dart';
+import '../services/online_photo_service.dart';
+
+/// Tighter than the Wikimedia thumb-URL default (320 today, 512 for
+/// pre-0.13.4 cached rows) means every frame stays under ~80 KB and
+/// decodes in single-digit ms even on a Pixel 5.
+const int _kSlideshowThumbWidth = 320;
+
+/// Number of upcoming frames to push into the image cache eagerly.
+/// 20 is the sweet spot for 16× playback on a 4 h cadence: at the
+/// fastest speed the slider advances ~one frame per 22 ms, so we need
+/// a healthy buffer of decoded bytes to stay ahead of paint. Bigger
+/// values would warm the cache further but Wikimedia's CDN serializes
+/// HTTP/2 streams to the same host, so beyond ~20 in-flight there's
+/// no further gain.
+const int _kPrefetchLookahead = 20;
 
 /// Picture-mode playback. Slaved to the same `_sliderMax` cursor + the
 /// same play/pause + speed-cycle controls the map view uses — toggling
@@ -43,6 +58,10 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
   /// scrubs into a window; we keep the full list (not just first) so
   /// `pickPhotoForPing` can skip photos that have failed to load.
   final Map<int, List<PingPhoto>> _photoCache = {};
+
+  /// True once `_prefetchVisibleWindow` has finished its single DB
+  /// read. Used to disambiguate "still loading" from "no photos here".
+  bool _cacheLoaded = false;
   bool _loadingAll = false;
 
   /// Pings + photo URLs we've already pushed into `precacheImage`. Used
@@ -61,6 +80,7 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
     if (old.visibleFixes != widget.visibleFixes) {
       _photoCache.clear();
       _precached.clear();
+      _cacheLoaded = false;
       _prefetchVisibleWindow();
     }
   }
@@ -73,7 +93,10 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
           .map((p) => p.id)
           .whereType<int>()
           .toList(growable: false);
-      if (ids.isEmpty) return;
+      if (ids.isEmpty) {
+        if (mounted) setState(() => _cacheLoaded = true);
+        return;
+      }
       final db = await TrailDatabase.shared();
       final byPing = await PingPhotoDao(db).byPingIds(ids);
       if (!mounted) return;
@@ -81,9 +104,24 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
         for (final id in ids) {
           _photoCache[id] = byPing[id] ?? const <PingPhoto>[];
         }
+        _cacheLoaded = true;
       });
+      // Eagerly warm the first chunk so the very first slideshow frame
+      // doesn't pay the network round-trip — that's the slowest
+      // perceived frame for the user (everything else benefits from
+      // the rolling lookahead).
+      _warmFirstFrames();
     } finally {
       _loadingAll = false;
+    }
+  }
+
+  void _warmFirstFrames() {
+    final cap = widget.visibleFixes.length < _kPrefetchLookahead
+        ? widget.visibleFixes.length
+        : _kPrefetchLookahead;
+    for (var i = 0; i < cap; i++) {
+      _precacheForPing(widget.visibleFixes[i]);
     }
   }
 
@@ -95,26 +133,29 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
   void _scheduleLookahead(Ping from) {
     final idx = widget.visibleFixes.indexOf(from);
     if (idx < 0) return;
-    const lookahead = 5;
-    final end = (idx + 1 + lookahead).clamp(0, widget.visibleFixes.length);
+    final end = (idx + 1 + _kPrefetchLookahead)
+        .clamp(0, widget.visibleFixes.length);
     for (var i = idx + 1; i < end; i++) {
-      final p = widget.visibleFixes[i];
-      final photo = pickPhotoForPing(p, widget.visibleFixes, _photoCache);
-      if (photo == null) continue;
-      final url = photo.thumbUri ?? photo.uri;
-      if (!url.startsWith('http')) continue;
-      if (_precached.contains(url)) continue;
-      _precached.add(url);
-      // Fire-and-forget — failures here will surface naturally when the
-      // user reaches the frame; they're handled by `_onImageError`.
-      precacheImage(
-        CachedNetworkImageProvider(url),
-        context,
-        onError: (_, __) {
-          FailedPhotoUris.register(url);
-        },
-      );
+      _precacheForPing(widget.visibleFixes[i]);
     }
+  }
+
+  void _precacheForPing(Ping p) {
+    final photo = pickPhotoForPing(p, widget.visibleFixes, _photoCache);
+    if (photo == null) return;
+    final url = renderableUriFor(photo);
+    if (!url.startsWith('http')) return;
+    if (_precached.contains(url)) return;
+    _precached.add(url);
+    // Fire-and-forget — failures surface naturally when the cursor
+    // reaches the frame and `_onImageError` registers the URL.
+    precacheImage(
+      CachedNetworkImageProvider(url),
+      context,
+      onError: (_, __) {
+        FailedPhotoUris.register(url);
+      },
+    );
   }
 
   void _onImageError(String url) {
@@ -130,6 +171,12 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
         text: 'No pings to show in slideshow mode.',
       );
     }
+    if (!_cacheLoaded) {
+      return const _CenteredMessage(
+        icon: Icons.hourglass_top_outlined,
+        text: 'Loading photos…',
+      );
+    }
     final ping = pickSlideshowPing(widget.visibleFixes, widget.sliderMax);
     if (ping == null) {
       return const _CenteredMessage(
@@ -139,11 +186,7 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
     }
     final photo = pickPhotoForPing(ping, widget.visibleFixes, _photoCache);
     if (photo == null) {
-      return _CenteredMessage(
-        icon: Icons.image_search_outlined,
-        text: 'No photos for ${_fmtTime(ping.timestampUtc.toLocal())} — '
-            'turn on auto-fetch or run the backfill from Settings.',
-      );
+      return _emptyState(ping);
     }
     // Prefetch a sliding window of upcoming frames. Scheduled in a
     // post-frame callback so the precacheImage calls don't fight the
@@ -156,6 +199,28 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
       ping: ping,
       onImageError: _onImageError,
     );
+  }
+
+  Widget _emptyState(Ping ping) {
+    // Disambiguate the "no usable photo" branches so the message tells
+    // the truth: a "run the backfill" hint after backfill has already
+    // run is misleading.
+    final ts = _fmtTime(ping.timestampUtc.toLocal());
+    final reason = classifyEmptyState(widget.visibleFixes, _photoCache);
+    switch (reason) {
+      case EmptySlideshowReason.allFailed:
+        return _CenteredMessage(
+          icon: Icons.broken_image_outlined,
+          text: 'Photos for $ts exist but failed to load.\n'
+              'Settings → Retry broken photos to re-attempt them.',
+        );
+      case EmptySlideshowReason.noPhotosFetched:
+        return _CenteredMessage(
+          icon: Icons.image_search_outlined,
+          text: 'No photos for $ts — turn on auto-fetch or run the '
+              'backfill from Settings.',
+        );
+    }
   }
 
   static String _fmtTime(DateTime t) => DateFormat('MMM d, HH:mm').format(t);
@@ -175,7 +240,7 @@ class _SlidePage extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final fmt = DateFormat('MMM d, yyyy · HH:mm');
-    final uri = photo.thumbUri ?? photo.uri;
+    final uri = renderableUriFor(photo);
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -245,9 +310,6 @@ class _SlidePage extends StatelessWidget {
         uri.replaceFirst('file://', ''),
         fit: BoxFit.cover,
         errorBuilder: (_, __, ___) {
-          // Local file failed (rare, but image_picker temp paths can
-          // disappear if the OS cleans the temp dir). Register + show
-          // an empty surface — the next slider tick will skip it.
           WidgetsBinding.instance.addPostFrameCallback(
               (_) => onImageError(uri));
           return _placeholder(scheme);
@@ -258,6 +320,10 @@ class _SlidePage extends StatelessWidget {
       return CachedNetworkImage(
         imageUrl: uri,
         fit: BoxFit.cover,
+        // memCacheWidth resizes during decode so a 320 px image isn't
+        // held in RAM at its full size. Reduces image cache pressure
+        // when the slideshow scrubs through dozens of frames quickly.
+        memCacheWidth: _kSlideshowThumbWidth,
         // No spinner: at 0.25× a half-second of CircularProgressIndicator
         // on every frame is more visually jarring than a brief surface
         // flash while the next frame's prefetched bytes paint.
@@ -330,11 +396,6 @@ Ping? pickSlideshowPing(List<Ping> visibleFixes, DateTime sliderMax) {
 ///   1. The current ping's own photo list, in `ordinal` order.
 ///   2. Earlier pings in [visibleFixes], walked backward — the first
 ///      one that has a renderable photo wins.
-///
-/// This is why we store the full per-ping photo list in `_photoCache`
-/// (vs the first-only approach in 0.13.3): when ping P has 5 photos
-/// and photos[0]'s URL has failed, we want to fall back to photos[1]
-/// before walking to an earlier ping.
 PingPhoto? pickPhotoForPing(
   Ping current,
   List<Ping> visibleFixes,
@@ -364,4 +425,41 @@ PingPhoto? pickPhotoForPing(
     if (hit != null) return hit;
   }
   return null;
+}
+
+/// Returns the URL the slideshow should hand to its image widget for
+/// [photo]. Prefers the thumbnail; rewrites pre-0.13.4 wider thumbs
+/// down to the slideshow's target width via [shrinkWikimediaThumbUrl]
+/// so existing cached rows don't keep paying for 512 px bytes.
+String renderableUriFor(PingPhoto photo) {
+  final base = photo.thumbUri ?? photo.uri;
+  return shrinkWikimediaThumbUrl(base, targetWidth: _kSlideshowThumbWidth);
+}
+
+/// Why the slideshow has nothing to show. Distinguishes "we tried, the
+/// URLs all 404'd" from "there's nothing to show because the user
+/// hasn't run the backfill or auto-fetch was off" — those are very
+/// different actions and the message used to lump them together as a
+/// misleading "run the backfill" prompt.
+enum EmptySlideshowReason {
+  /// At least one ping in the window has photo rows but every one of
+  /// them lives in the failed-URL denylist. Solution: clear the
+  /// denylist from Settings.
+  allFailed,
+
+  /// No ping in the window has any photo rows at all. Solution: run
+  /// the backfill or turn on auto-fetch.
+  noPhotosFetched,
+}
+
+EmptySlideshowReason classifyEmptyState(
+  List<Ping> visibleFixes,
+  Map<int, List<PingPhoto>> photosByPing,
+) {
+  for (final p in visibleFixes) {
+    if (p.id == null) continue;
+    final list = photosByPing[p.id!] ?? const <PingPhoto>[];
+    if (list.isNotEmpty) return EmptySlideshowReason.allFailed;
+  }
+  return EmptySlideshowReason.noPhotosFetched;
 }

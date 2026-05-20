@@ -243,6 +243,60 @@ void main() {
     });
   });
 
+  group('shrinkWikimediaThumbUrl (0.13.5)', () {
+    test('shrinks a 512px thumb down to 320px', () {
+      const url =
+          'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/Foo.jpg/512px-Foo.jpg';
+      expect(
+        shrinkWikimediaThumbUrl(url),
+        'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/Foo.jpg/320px-Foo.jpg',
+      );
+    });
+
+    test('respects explicit targetWidth', () {
+      const url =
+          'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/Foo.jpg/800px-Foo.jpg';
+      expect(
+        shrinkWikimediaThumbUrl(url, targetWidth: 128),
+        'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/Foo.jpg/128px-Foo.jpg',
+      );
+    });
+
+    test('returns input unchanged when already smaller than target', () {
+      const url =
+          'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/Foo.jpg/200px-Foo.jpg';
+      expect(shrinkWikimediaThumbUrl(url, targetWidth: 320), url);
+    });
+
+    test('passes non-Wikimedia URLs through unchanged', () {
+      expect(
+        shrinkWikimediaThumbUrl('https://cdn.example/photo.jpg'),
+        'https://cdn.example/photo.jpg',
+      );
+    });
+
+    test('passes Wikimedia full-image URLs (no /thumb/) unchanged', () {
+      const url =
+          'https://upload.wikimedia.org/wikipedia/commons/0/0a/Foo.jpg';
+      expect(shrinkWikimediaThumbUrl(url), url);
+    });
+
+    test('handles filenames with unicode + percent-escapes', () {
+      const url =
+          'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/%C3%89mile.jpg/512px-%C3%89mile.jpg';
+      expect(
+        shrinkWikimediaThumbUrl(url),
+        'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/%C3%89mile.jpg/320px-%C3%89mile.jpg',
+      );
+    });
+
+    test('no-op on a malformed thumb URL without the px- token', () {
+      const url =
+          'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/Foo.jpg/Foo.jpg';
+      expect(shrinkWikimediaThumbUrl(url), url);
+    });
+  });
+
   group('AutoPhotoService default-on behaviour', () {
     // Cross-checked here (and not in a separate file) so the default-on
     // contract is tested next to the service that consumes the toggle.

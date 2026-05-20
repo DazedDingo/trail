@@ -4,7 +4,23 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
-## [0.13.4+88] — 2026-05-20
+## [0.13.5+89] — 2026-05-20
+
+### Changed
+- **Slideshow plays smoothly at higher speeds now.** Three speedups, layered:
+  1. New Wikimedia fetches request **320 px** thumbnails (down from 512 px) — fewer bytes over the wire, faster decode.
+  2. Pre-0.13.4 cached 512 px URLs are rewritten to 320 px on the fly when they're rendered, so you don't need to re-backfill to get the speedup. Same trick for the pin-detail gallery.
+  3. The slideshow prefetch window is now **20 frames ahead** (up from 5) and also eagerly warms the first 20 frames the moment the slideshow opens — so the very first frame no longer pays a cold network round-trip.
+
+  Combined effect: 1× and 2× playback now feel responsive even on cellular; 4× still gets some catch-up flickers on slow links but no longer stalls.
+
+### Fixed
+- **"Run the backfill" prompt no longer lies after backfill has run.** When the slideshow can't show a photo, it now figures out the actual reason and says so:
+  - **"Loading photos…"** while the per-window photo cache is still being read on entry (used to silently show the misleading backfill prompt during this window).
+  - **"Photos for X exist but failed to load. Settings → Retry broken photos."** when the ping has photos that all hit the failed-URL denylist (the case you were seeing — backfill *did* run, the URLs just don't load).
+  - The original "turn on auto-fetch or run the backfill" message stays for the genuine case where nothing has ever been fetched for that window.
+
+
 
 ### Fixed
 - **Broken-image placeholders now self-heal.** 0.13.2 stopped non-image Wikimedia media (audio, PDFs, video) from getting attached to pins, but some real `.jpg` URLs still fail at render time — Wikimedia 404s, hotlink protection, or a corrupt file. When an image fails to load, its URL is now remembered persistently; the gallery hides those tiles and the slideshow skips to the next available photo (either a sibling on the same ping or the previous ping's photo). Persists across app restarts so you don't see the gray broken-icon flash on repeat visits.

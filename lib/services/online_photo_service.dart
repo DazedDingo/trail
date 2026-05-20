@@ -97,7 +97,14 @@ class OnlinePhotoService {
       'action': 'query',
       'prop': 'imageinfo',
       'iiprop': 'url|extmetadata',
-      'iiurlwidth': '512',
+      // 320px ≈ 30-80 KB per photo on average — small enough to land
+      // fast on cellular but still detailed enough that slideshow
+      // frames look good at typical phone widths. 512 was a holdover
+      // from "full-screen detail" thinking; slideshow + gallery only
+      // ever show these in card-sized tiles, so the bigger thumb just
+      // burned bandwidth + decode time. See `shrinkWikimediaThumbUrl`
+      // for the equivalent live-shrink for existing 512 URLs.
+      'iiurlwidth': '320',
       'titles': titles,
       'format': 'json',
       'origin': '*',
@@ -146,6 +153,33 @@ class GeoSearchHit {
 /// originals if `thumburl` were ever absent, and the simpler "match
 /// the URL's extension" rule is honest about what we can render.
 const _kImageSuffixes = {'.jpg', '.jpeg', '.png', '.gif', '.webp'};
+
+/// Wikimedia thumbnail URL pattern: `…/Foo.jpg/<N>px-Foo.jpg`. When
+/// the URL matches that shape we can swap the `<N>px-` token for a
+/// smaller width and Wikimedia generates that thumbnail on demand —
+/// no re-fetch of the imageinfo API needed. This is the trick that
+/// lets us bring 0.13.0–0.13.3's already-cached 512px URLs down to
+/// 320px without a DB migration: the slideshow / gallery rewrite at
+/// render time.
+///
+/// Returns [url] unchanged when the pattern doesn't match (full-image
+/// URLs without the thumb suffix, file:// paths, third-party hosts).
+String shrinkWikimediaThumbUrl(String url, {int targetWidth = 320}) {
+  // Only Wikimedia's `upload.wikimedia.org/.../thumb/...` URLs follow
+  // this pattern. Skip everything else — guessing at non-Wikimedia
+  // CDNs would just produce broken URLs.
+  if (!url.contains('upload.wikimedia.org/') || !url.contains('/thumb/')) {
+    return url;
+  }
+  // Match `/<digits>px-` immediately before the final filename. We
+  // don't anchor on the filename itself because it can contain any
+  // unicode + percent-escapes; just look for the px- token.
+  final match = RegExp(r'/(\d+)px-').firstMatch(url);
+  if (match == null) return url;
+  final current = int.tryParse(match.group(1) ?? '');
+  if (current == null || current <= targetWidth) return url;
+  return url.replaceFirst('/${current}px-', '/${targetWidth}px-');
+}
 
 /// True when [uriOrTitle]'s lowercase trailing dot-suffix matches one
 /// of [_kImageSuffixes]. Tolerant: empty strings, missing dots, and

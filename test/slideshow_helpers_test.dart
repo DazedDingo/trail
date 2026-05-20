@@ -109,6 +109,72 @@ void main() {
     });
   });
 
+  group('classifyEmptyState (0.13.5 — disambiguates "no photo" message)', () {
+    test('returns allFailed when at least one ping has photo rows', () {
+      final fixes = [_p(1, 9), _p(2, 11)];
+      final cache = {
+        1: <PingPhoto>[],
+        2: [_photo(2)], // exists but assumed denylisted upstream
+      };
+      expect(
+        classifyEmptyState(fixes, cache),
+        EmptySlideshowReason.allFailed,
+      );
+    });
+
+    test('returns noPhotosFetched when every ping has zero photo rows', () {
+      final fixes = [_p(1, 9), _p(2, 11)];
+      final cache = {1: <PingPhoto>[], 2: <PingPhoto>[]};
+      expect(
+        classifyEmptyState(fixes, cache),
+        EmptySlideshowReason.noPhotosFetched,
+      );
+    });
+
+    test('returns noPhotosFetched on empty fixes', () {
+      expect(
+        classifyEmptyState(const [], const {}),
+        EmptySlideshowReason.noPhotosFetched,
+      );
+    });
+
+    test('ignores pings with null id (defensive)', () {
+      final orphan = Ping(
+        timestampUtc: DateTime.utc(2026, 5, 17),
+        lat: 1,
+        lon: 2,
+        source: PingSource.scheduled,
+      );
+      expect(
+        classifyEmptyState([orphan], const {}),
+        EmptySlideshowReason.noPhotosFetched,
+      );
+    });
+  });
+
+  group('renderableUriFor (0.13.5)', () {
+    test('shrinks 512 px Wikimedia thumb to slideshow width', () {
+      final p = _photo(1,
+          thumb:
+              'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/X.jpg/512px-X.jpg');
+      expect(
+        renderableUriFor(p),
+        'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/X.jpg/320px-X.jpg',
+      );
+    });
+
+    test('falls back to full uri when thumb is null', () {
+      final p = PingPhoto(
+        pingId: 1,
+        uri: 'https://cdn.example/photo.jpg',
+        source: PingPhotoSource.wikimedia,
+        fetchedAt: DateTime.utc(2026),
+        ordinal: 0,
+      );
+      expect(renderableUriFor(p), 'https://cdn.example/photo.jpg');
+    });
+  });
+
   group('pickPhotoForPing — failed-URL denylist (0.13.4)', () {
     test('skips a failed thumb to a sibling photo on the same ping',
         () async {
