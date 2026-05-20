@@ -4,7 +4,15 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
-## [0.13.5+89] — 2026-05-20
+## [0.13.6+90] — 2026-05-20
+
+### Changed
+- **1× slideshow playback is responsive now.** The prefetch in 0.13.5 was downloading the bytes but decoding at the wrong size — every frame re-decoded from disk because the precache key didn't match the slideshow's `memCacheWidth: 320` render key. Wrapping precache in `ResizeImage(width: 320)` aligns the keys, so by the time the cursor lands on a frame the 320-wide bitmap is already in the image cache and paint is zero-work. The previous 0.13.5 prefetch effectively only saved the network round-trip; it didn't save the decode pass.
+
+### Fixed
+- **No more big "box with mountains" placeholder during playback.** Every transient load failure used to flash a large `Icons.image_outlined` icon for one frame before the failed-URL denylist skipped the photo on the next slider tick. At 1× the flash dominated; at 4× the slideshow looked like a slideshow of broken icons. Replaced with a clean surface flash — invisible at 1× and above, and the denylist still skips to a usable photo on the next frame so nothing else changes.
+
+
 
 ### Changed
 - **Slideshow plays smoothly at higher speeds now.** Three speedups, layered:

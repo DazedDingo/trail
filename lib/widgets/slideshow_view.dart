@@ -147,13 +147,28 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
     if (!url.startsWith('http')) return;
     if (_precached.contains(url)) return;
     _precached.add(url);
-    // Fire-and-forget — failures surface naturally when the cursor
-    // reaches the frame and `_onImageError` registers the URL.
-    precacheImage(
+    // **Pre-decode at the render target width.** The slideshow renders
+    // via `CachedNetworkImage(memCacheWidth: 320)`, which internally
+    // resizes during decode and stores in the image cache under a
+    // `(url, 320)` key. If we precache a *plain* `CachedNetworkImageProvider`,
+    // the bytes land on disk but the cache entry is keyed on the full-
+    // size decode — so the actual slideshow render gets a cache miss
+    // on the 320-wide key and re-decodes from disk on every frame. At
+    // 1× playback that re-decode hit is what makes the frame stutter.
+    //
+    // Wrapping in `ResizeImage` here matches the render's decode key,
+    // so the precache fills the same bucket the render reads from —
+    // a true zero-work paint when the cursor reaches that frame.
+    final provider = ResizeImage(
       CachedNetworkImageProvider(url),
+      width: _kSlideshowThumbWidth,
+    );
+    precacheImage(
+      provider,
       context,
       onError: (_, __) {
         FailedPhotoUris.register(url);
+        if (mounted) setState(() {});
       },
     );
   }
@@ -338,12 +353,15 @@ class _SlidePage extends StatelessWidget {
     return _placeholder(scheme);
   }
 
-  Widget _placeholder(ColorScheme scheme) => Container(
-        color: scheme.surfaceContainerHighest,
-        alignment: Alignment.center,
-        child: Icon(Icons.image_outlined,
-            size: 56, color: scheme.onSurfaceVariant),
-      );
+  /// Surface-only placeholder for the one-frame moment between an
+  /// image failing to load and the next slider tick swapping to a
+  /// different photo. The user used to see a big "box with mountains"
+  /// icon here for every transient failure; that flashing icon
+  /// dominated the slideshow at faster playback speeds even though
+  /// the picker is already skipping the failed URL on the very next
+  /// frame. Clean surface flash is invisible at 1× and above.
+  Widget _placeholder(ColorScheme scheme) =>
+      Container(color: scheme.surface);
 }
 
 class _CenteredMessage extends StatelessWidget {

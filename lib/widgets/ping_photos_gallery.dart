@@ -293,11 +293,13 @@ class _PhotoTile extends StatelessWidget {
     return _placeholder(scheme);
   }
 
-  Widget _placeholder(ColorScheme scheme) => Container(
-        color: scheme.surfaceContainerHighest,
-        alignment: Alignment.center,
-        child: Icon(Icons.image_outlined, color: scheme.onSurfaceVariant),
-      );
+  /// Surface-only placeholder. Mirrors the slideshow's "no big
+  /// broken-image icon for a one-frame error" decision — a failed
+  /// tile briefly flashes a clean surface, the gallery rebuilds with
+  /// the failed URL filtered out, and the tile disappears without
+  /// the user noticing a mountain icon at all.
+  Widget _placeholder(ColorScheme scheme) =>
+      Container(color: scheme.surface);
 }
 
 class _AddPhotoTile extends StatelessWidget {
