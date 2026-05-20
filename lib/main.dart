@@ -25,6 +25,19 @@ void main() async {
   // the slideshow + gallery can skip known-broken URLs synchronously
   // on first render instead of flashing the placeholder for a frame.
   await FailedPhotoUris.preload();
+  // **Bigger image cache for slideshow scrubbing.** Flutter's defaults
+  // are 1 000 entries / 100 MB, sized for a UI that loads handfuls of
+  // images on screen at a time. Trail's slideshow can scrub through
+  // hundreds of pings in a single session; with the default cache,
+  // older frames get evicted during normal use and the user sees gray
+  // re-loads when scrubbing backward. 250 MB / 5 000 entries fits an
+  // entire month of 4h-cadence pings (~180 thumbnails at 320 px ≈
+  // 30 MB) with headroom for re-visits. Low-RAM devices can still
+  // hit OOM but this is a slideshow app, not a 50-image-deep nav stack
+  // — the worst case is image cache spillover, not crash.
+  PaintingBinding.instance.imageCache
+    ..maximumSize = 5000
+    ..maximumSizeBytes = 250 * 1024 * 1024;
   final onboarded = await OnboardingGate.isComplete();
   // Detect the post-restore case: auto-backup has put the encrypted DB +
   // salt back in place, but the Keystore-bound secure storage is empty

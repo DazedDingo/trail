@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -15,14 +17,27 @@ import '../services/online_photo_service.dart';
 /// decodes in single-digit ms even on a Pixel 5.
 const int _kSlideshowThumbWidth = 320;
 
-/// Number of upcoming frames to push into the image cache eagerly.
-/// 20 is the sweet spot for 16× playback on a 4 h cadence: at the
-/// fastest speed the slider advances ~one frame per 22 ms, so we need
-/// a healthy buffer of decoded bytes to stay ahead of paint. Bigger
-/// values would warm the cache further but Wikimedia's CDN serializes
-/// HTTP/2 streams to the same host, so beyond ~20 in-flight there's
-/// no further gain.
+/// Number of upcoming frames to push into the image cache eagerly
+/// **during playback** (rolling lookahead). Wikimedia's CDN
+/// serializes HTTP/2 streams to the same host so beyond ~20 in-flight
+/// adds latency without saving wall time.
 const int _kPrefetchLookahead = 20;
+
+/// Number of frames to warm **upfront** when the slideshow opens.
+/// Bigger than the rolling lookahead because (a) the user has likely
+/// idled on the map for a few seconds before tapping into slideshow
+/// mode, so the network can quietly fetch a deep buffer while they
+/// orient, and (b) the worst gray-screen moment is the *first* tap
+/// of play — anything not in the cache by then shows a placeholder.
+/// 100 frames covers a week of 4 h-cadence pings (~42) plus a healthy
+/// retry margin for the inevitable broken-URL re-tries.
+const int _kEagerWarmFrames = 100;
+
+/// How long the placeholder shows pure surface color before a small
+/// loading indicator fades in. Brief network blips (sub-400 ms) stay
+/// invisible; longer waits get a "we're working on it" signal so the
+/// user doesn't read the gray as broken.
+const Duration _kLoadingHintDelay = Duration(milliseconds: 400);
 
 /// Picture-mode playback. Slaved to the same `_sliderMax` cursor + the
 /// same play/pause + speed-cycle controls the map view uses — toggling
@@ -117,9 +132,9 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
   }
 
   void _warmFirstFrames() {
-    final cap = widget.visibleFixes.length < _kPrefetchLookahead
+    final cap = widget.visibleFixes.length < _kEagerWarmFrames
         ? widget.visibleFixes.length
-        : _kPrefetchLookahead;
+        : _kEagerWarmFrames;
     for (var i = 0; i < cap; i++) {
       _precacheForPing(widget.visibleFixes[i]);
     }
@@ -335,14 +350,14 @@ class _SlidePage extends StatelessWidget {
       return CachedNetworkImage(
         imageUrl: uri,
         fit: BoxFit.cover,
-        // memCacheWidth resizes during decode so a 320 px image isn't
-        // held in RAM at its full size. Reduces image cache pressure
-        // when the slideshow scrubs through dozens of frames quickly.
         memCacheWidth: _kSlideshowThumbWidth,
-        // No spinner: at 0.25× a half-second of CircularProgressIndicator
-        // on every frame is more visually jarring than a brief surface
-        // flash while the next frame's prefetched bytes paint.
-        placeholder: (_, __) => Container(color: scheme.surface),
+        // Surface color initially; after `_kLoadingHintDelay` a small
+        // semi-transparent spinner fades in so a longer network wait
+        // doesn't read as "broken slideshow". Quick frames (most of
+        // them, once prefetch is warm) never show the spinner because
+        // the placeholder is replaced by paint before the delay
+        // elapses.
+        placeholder: (_, __) => _DelayedLoadingHint(scheme: scheme),
         errorWidget: (_, __, ___) {
           WidgetsBinding.instance.addPostFrameCallback(
               (_) => onImageError(uri));
@@ -387,6 +402,59 @@ class _CenteredMessage extends StatelessWidget {
                     color: scheme.onSurfaceVariant,
                   )),
         ],
+      ),
+    );
+  }
+}
+
+/// Placeholder that stays as surface color for [_kLoadingHintDelay] and
+/// then fades in a small spinner. Sized + colored to be subtle —
+/// during a typical 1× playback a brief gray flash is invisible, and
+/// only longer waits (≥ 400 ms, indicating real network load) show
+/// the spinner. Disposed cleanly so the timer doesn't leak when the
+/// network responds in time.
+class _DelayedLoadingHint extends StatefulWidget {
+  final ColorScheme scheme;
+  const _DelayedLoadingHint({required this.scheme});
+
+  @override
+  State<_DelayedLoadingHint> createState() => _DelayedLoadingHintState();
+}
+
+class _DelayedLoadingHintState extends State<_DelayedLoadingHint> {
+  Timer? _timer;
+  bool _showSpinner = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer(_kLoadingHintDelay, () {
+      if (mounted) setState(() => _showSpinner = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: widget.scheme.surface,
+      alignment: Alignment.center,
+      child: AnimatedOpacity(
+        opacity: _showSpinner ? 1.0 : 0.0,
+        duration: const Duration(milliseconds: 200),
+        child: SizedBox(
+          width: 28,
+          height: 28,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            color: widget.scheme.onSurfaceVariant.withValues(alpha: 0.5),
+          ),
+        ),
       ),
     );
   }

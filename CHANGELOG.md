@@ -4,7 +4,15 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
-## [0.13.9+93] — 2026-05-20
+## [0.13.10+94] — 2026-05-20
+
+### Changed
+- **Fewer gray screens during slideshow playback.** Three layered improvements:
+  1. **Eager warm bumped from 20 → 100 frames** when the slideshow opens. The 20-frame rolling lookahead during playback is unchanged (Wikimedia's CDN serializes connections to the same host so more in-flight requests don't help), but pre-loading the next 100 frames the moment the slideshow opens means the first 20 minutes of playback at 4-hour cadence runs straight from cache.
+  2. **Image cache bumped from 100 MB → 250 MB / 1 000 → 5 000 entries.** Flutter's default was sized for a UI that shows a handful of images at once; the slideshow churns through hundreds. Older frames were getting evicted during normal scrubbing and re-fetching on revisit. 250 MB fits an entire month of 4-hour-cadence thumbnails with headroom.
+  3. **Subtle delayed loading hint** — after 400 ms of placeholder, a faded spinner fades in. Brief network blips stay invisible (most frames at 1× are well under 400 ms once prefetch is warm), but a longer wait now gets a "we're working on it" signal instead of pure gray.
+
+
 
 ### Fixed
 - **Pins are tappable now.** The map's pin circles had a 3 px radius, which is essentially zero tap target on a phone — you had to land your fingertip on a 6 px dot to register. Bumped to 7 px for trail dots and 9 px for the "you are here" head. A typical 4-hour-cadence trail still reads as a string of dots; individual pins are now reliably reachable.
