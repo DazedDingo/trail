@@ -175,6 +175,73 @@ void main() {
     });
   });
 
+  group('renderableUriFor + denylist (0.13.8 — permanent gray screen)', () {
+    test('returns shrunk thumb when not denylisted', () {
+      final p = _photo(1,
+          thumb:
+              'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/X.jpg/512px-X.jpg');
+      expect(
+        renderableUriFor(p),
+        'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/X.jpg/320px-X.jpg',
+      );
+    });
+
+    test('falls back to full URI when shrunk thumb is denylisted',
+        () async {
+      await FailedPhotoUris.preload();
+      final p = _photo(1,
+          uri: 'https://upload.wikimedia.org/wikipedia/commons/0/0a/X.jpg',
+          thumb:
+              'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/X.jpg/512px-X.jpg');
+      await FailedPhotoUris.register(
+        'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/X.jpg/320px-X.jpg',
+      );
+      expect(
+        renderableUriFor(p),
+        'https://upload.wikimedia.org/wikipedia/commons/0/0a/X.jpg',
+      );
+    });
+
+    test(
+        'pickPhotoForPing skips photos whose 320 px form is denylisted '
+        '(was loop-forever on 0.13.7)', () async {
+      // Repro: a photo whose 512 px thumb URL is in the DB but whose
+      // *shrunk* 320 px URL has already been registered as failed.
+      // Pre-0.13.8 the picker checked `isFailed(p.thumbUri)` (the 512
+      // form) which never matched the registered 320 form, so the
+      // picker kept clearing the photo, the renderer kept shrinking
+      // to the same broken 320 URL, the user saw a permanent gray
+      // surface. Now the picker uses `renderableUriFor` which falls
+      // back to the full URI when the shrunk thumb is denylisted —
+      // and the full URI here is *also* denylisted, so the photo
+      // should be skipped entirely.
+      await FailedPhotoUris.preload();
+      final p1 = _photo(1,
+          uri: 'https://upload.wikimedia.org/wikipedia/commons/0/0a/A.jpg',
+          thumb:
+              'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/A.jpg/512px-A.jpg');
+      final p2 = _photo(1,
+          ord: 1,
+          uri: 'https://upload.wikimedia.org/wikipedia/commons/0/0b/B.jpg',
+          thumb:
+              'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0b/B.jpg/512px-B.jpg');
+      // p1 fully dead, p2 still alive — picker should pick p2.
+      await FailedPhotoUris.register(
+        'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/A.jpg/320px-A.jpg',
+      );
+      await FailedPhotoUris.register(
+        'https://upload.wikimedia.org/wikipedia/commons/0/0a/A.jpg',
+      );
+      final fixes = [_p(1, 9)];
+      final cache = {
+        1: [p1, p2],
+      };
+      final out = pickPhotoForPing(fixes[0], fixes, cache);
+      expect(out, isNotNull);
+      expect(out!.ordinal, 1, reason: 'falls through to the second photo');
+    });
+  });
+
   group('pickPhotoForPing — failed-URL denylist (0.13.4)', () {
     test('skips a failed thumb to a sibling photo on the same ping',
         () async {

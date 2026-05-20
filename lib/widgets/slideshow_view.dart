@@ -414,6 +414,17 @@ Ping? pickSlideshowPing(List<Ping> visibleFixes, DateTime sliderMax) {
 ///   1. The current ping's own photo list, in `ordinal` order.
 ///   2. Earlier pings in [visibleFixes], walked backward — the first
 ///      one that has a renderable photo wins.
+///
+/// **Renderable-URL parity (0.13.8 fix):** the denylist key must match
+/// the URL we actually hand to `CachedNetworkImage`. The renderer
+/// uses `renderableUriFor` which applies `shrinkWikimediaThumbUrl`,
+/// so a failed 512 px row gets registered under its 320 px form.
+/// Pre-0.13.8 this method checked `isFailed(photo.thumbUri)` (the
+/// unshrunk DB value) which never matched the registered 320 form —
+/// the picker would clear the photo forever, the renderer would
+/// re-shrink to the same broken URL, and the user saw a permanent
+/// gray surface. Now we ask the renderer for its URL and check
+/// failure on that exact key.
 PingPhoto? pickPhotoForPing(
   Ping current,
   List<Ping> visibleFixes,
@@ -421,11 +432,15 @@ PingPhoto? pickPhotoForPing(
 ) {
   PingPhoto? firstGood(List<PingPhoto> list) {
     for (final p in list) {
-      final uri = p.thumbUri ?? p.uri;
-      if (!FailedPhotoUris.isFailed(uri) &&
-          !FailedPhotoUris.isFailed(p.uri)) {
-        return p;
-      }
+      // `renderableUriFor` smart-falls-back to the full URI when the
+      // shrunk thumbnail is denylisted, so a single isFailed check on
+      // the actually-rendered URL is enough — covers all of:
+      //   (thumb good)              → check thumb         → keep
+      //   (thumb failed, full good) → check full          → keep
+      //   (thumb failed, full bad)  → check full (denied) → skip
+      //   (thumb null,  full bad)   → check full (denied) → skip
+      final renderUri = renderableUriFor(p);
+      if (!FailedPhotoUris.isFailed(renderUri)) return p;
     }
     return null;
   }
@@ -446,12 +461,25 @@ PingPhoto? pickPhotoForPing(
 }
 
 /// Returns the URL the slideshow should hand to its image widget for
-/// [photo]. Prefers the thumbnail; rewrites pre-0.13.4 wider thumbs
-/// down to the slideshow's target width via [shrinkWikimediaThumbUrl]
-/// so existing cached rows don't keep paying for 512 px bytes.
+/// [photo]. Prefers the thumbnail (shrunk to the slideshow target
+/// width via [shrinkWikimediaThumbUrl] so pre-0.13.4 cached 512 px
+/// rows still benefit from the bandwidth saving) — but **falls back
+/// to the full URL when the thumbnail is in the failed-URL
+/// denylist**.
+///
+/// Without that fallback, the picker would clear a photo whose thumb
+/// URL failed yesterday and the renderer would re-render that same
+/// dead thumb URL forever (the 0.13.8 "permanent gray screen" bug).
+/// With the fallback, a failed thumb naturally promotes to its full
+/// URL retry; only when *both* fail does the photo get hidden.
 String renderableUriFor(PingPhoto photo) {
-  final base = photo.thumbUri ?? photo.uri;
-  return shrinkWikimediaThumbUrl(base, targetWidth: _kSlideshowThumbWidth);
+  final thumb = photo.thumbUri;
+  if (thumb != null) {
+    final shrunk =
+        shrinkWikimediaThumbUrl(thumb, targetWidth: _kSlideshowThumbWidth);
+    if (!FailedPhotoUris.isFailed(shrunk)) return shrunk;
+  }
+  return photo.uri;
 }
 
 /// Why the slideshow has nothing to show. Distinguishes "we tried, the

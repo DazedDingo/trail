@@ -4,7 +4,12 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
-## [0.13.7+91] — 2026-05-20
+## [0.13.8+92] — 2026-05-20
+
+### Fixed
+- **"Gray screen, no picture" survivors.** A failed thumbnail was getting registered as broken under its 320 px (post-shrink) URL but the slideshow's picker was checking the original 512 px (pre-shrink) URL — so the picker kept clearing the same broken photo, the renderer kept shrinking it to the same dead 320 URL, and the user saw a permanent gray surface. Unified both widgets on a single `renderableUriFor` / `renderableGalleryUriFor` helper that picks the exact URL the renderer will paint AND smart-falls-back to the full image URL when the shrunk thumb is in the denylist. Net effect: a broken thumb retries once at full-resolution, then if that also fails the photo gets cleanly skipped — no more loops.
+
+
 
 ### Changed
 - **Speed picker is now a direct dropdown.** The chip that previously cycled through speeds on every tap (0.25× → 0.5× → 1× → … → 16× → 0.25×) is now a popup: tap it once, see every available speed in a menu with a checkmark on the current one, tap the target. No more six taps to go from 0.25× down to 16×.

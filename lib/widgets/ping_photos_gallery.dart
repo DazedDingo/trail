@@ -114,17 +114,15 @@ class _PingPhotosGalleryState extends ConsumerState<PingPhotosGallery> {
   Widget build(BuildContext context) {
     final async = ref.watch(pingPhotosProvider(widget.pingId));
     final raw = async.valueOrNull ?? const <PingPhoto>[];
-    // Hide URLs that have already been recorded as broken — render the
-    // tile only when at least one of the candidate URIs (thumb or full)
-    // hasn't failed yet. Without this the gallery would re-show the
-    // gray broken-image icon for every visit to a pin with a dead
-    // Wikimedia row.
+    // Hide tiles whose every candidate URL is denylisted. Uses the
+    // same render-aware URL the tile actually paints, so the failure
+    // key the error callback registered matches the key we check
+    // here. The shared `renderableGalleryUriFor` smart-falls-back
+    // from a failed thumb to the full URL — only when both are
+    // denylisted does the tile drop.
     final photos = raw.where((p) {
-      final thumb = p.thumbUri;
-      final thumbFailed =
-          thumb == null ? true : FailedPhotoUris.isFailed(thumb);
-      final fullFailed = FailedPhotoUris.isFailed(p.uri);
-      return !(thumbFailed && fullFailed);
+      final renderUri = renderableGalleryUriFor(p);
+      return !FailedPhotoUris.isFailed(renderUri);
     }).toList(growable: false);
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
@@ -197,11 +195,11 @@ class _PhotoTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final isUser = photo.source.isUserSupplied;
-    // Shrink legacy 512 px thumbs to 320 px on the fly — see
-    // `shrinkWikimediaThumbUrl`. Gallery tiles are 132 logical px so
-    // 320 still oversamples and renders crisply at 3× DPR.
-    final imageUri =
-        shrinkWikimediaThumbUrl(photo.thumbUri ?? photo.uri, targetWidth: 320);
+    // Shared render-URL helper: shrinks legacy 512 px thumbs to 320 px
+    // *and* falls back to the full URL when the thumb is denylisted.
+    // Without the fallback, a failed thumb would re-render the same
+    // dead URL forever (cf. the 0.13.8 "permanent gray tile" bug).
+    final imageUri = renderableGalleryUriFor(photo);
     return Padding(
       padding: const EdgeInsets.only(right: 8),
       child: GestureDetector(
@@ -348,4 +346,23 @@ class _AddPhotoTile extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Render-aware URL for a gallery tile. Prefers a 320 px shrunk
+/// thumbnail (gallery tiles are 132 logical px, so 320 oversamples
+/// crisply at 3× DPR), but falls back to the full URL when the thumb
+/// is in the failed-URL denylist.
+///
+/// Pure helper, exported so the gallery's filter (decide-which-tiles-
+/// to-render) and the tile builder (decide-which-URL-to-paint) agree
+/// on a single key — the 0.13.8 "permanent gray tile" bug came from
+/// the filter checking one URL and the renderer painting a different
+/// one.
+String renderableGalleryUriFor(PingPhoto photo) {
+  final thumb = photo.thumbUri;
+  if (thumb != null) {
+    final shrunk = shrinkWikimediaThumbUrl(thumb, targetWidth: 320);
+    if (!FailedPhotoUris.isFailed(shrunk)) return shrunk;
+  }
+  return photo.uri;
 }
