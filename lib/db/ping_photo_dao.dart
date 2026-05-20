@@ -1,6 +1,7 @@
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
 import '../models/ping_photo.dart';
+import '../services/online_photo_service.dart' show isLikelyImage;
 
 /// CRUD for the `ping_photos` table (schema v2).
 class PingPhotoDao {
@@ -10,6 +11,13 @@ class PingPhotoDao {
   /// Returns every photo for a single ping, in display order. Empty
   /// list for pings with no photos yet (auto-fetch pending, or user
   /// declined to attach anything).
+  ///
+  /// Read-time tombstone filter (added 0.13.2): rows whose URI isn't a
+  /// decodable image type are skipped. 0.13.0 + earlier inserted a lot
+  /// of non-image File: namespace entries (OGG / PDF / MP4) that
+  /// rendered as broken-image placeholders in the gallery and
+  /// slideshow. The parser-side fix prevents new bad rows; this filter
+  /// hides existing ones until a future migration deletes them.
   Future<List<PingPhoto>> byPingId(int pingId) async {
     final rows = await db.query(
       'ping_photos',
@@ -17,13 +25,14 @@ class PingPhotoDao {
       whereArgs: [pingId],
       orderBy: 'ordinal ASC, id ASC',
     );
-    return rows.map(PingPhoto.fromMap).toList();
+    return rows.map(PingPhoto.fromMap).where(_renderable).toList();
   }
 
   /// Batch-load all photos for a set of pings. Returned as
   /// `Map<pingId, List<PingPhoto>>` so the picture-mode playback can
   /// hydrate the whole trail in a single SQLite query instead of N+1.
-  /// Empty/missing keys mean the ping has no photos.
+  /// Empty/missing keys mean the ping has no photos. Same read-time
+  /// tombstone filter as [byPingId].
   Future<Map<int, List<PingPhoto>>> byPingIds(Iterable<int> pingIds) async {
     final ids = pingIds.toList();
     if (ids.isEmpty) return const {};
@@ -37,9 +46,20 @@ class PingPhotoDao {
     final out = <int, List<PingPhoto>>{};
     for (final r in rows) {
       final p = PingPhoto.fromMap(r);
+      if (!_renderable(p)) continue;
       (out[p.pingId] ??= <PingPhoto>[]).add(p);
     }
     return out;
+  }
+
+  /// True when the photo's primary URI looks like an image Flutter can
+  /// decode. User-supplied rows always pass (the camera/gallery picker
+  /// only returns image files), so the filter only screens the online
+  /// `wikimedia` path that GeoSearch over-returns for non-image media.
+  static bool _renderable(PingPhoto p) {
+    if (p.source != PingPhotoSource.wikimedia) return true;
+    return isLikelyImage(p.uri) ||
+        (p.thumbUri != null && isLikelyImage(p.thumbUri!));
   }
 
   /// Insert a photo. Returns the new row id. The caller is responsible

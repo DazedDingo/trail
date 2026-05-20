@@ -5,6 +5,44 @@ import 'package:http/testing.dart';
 import 'package:trail/services/online_photo_service.dart';
 
 void main() {
+  group('isLikelyImage', () {
+    test('accepts whitelisted image suffixes (case-insensitive)', () {
+      for (final s in [
+        'File:Foo.jpg', 'File:Foo.JPG', 'File:Foo.jpeg',
+        'File:Foo.png', 'File:Foo.gif', 'File:Foo.webp',
+        'https://upload.wikimedia.org/.../512px-Foo.png',
+      ]) {
+        expect(isLikelyImage(s), isTrue, reason: s);
+      }
+    });
+
+    test('rejects non-image File: media that GeoSearch over-returns', () {
+      for (final s in [
+        'File:Audio.ogg',
+        'File:Voice.oga',
+        'File:Doc.pdf',
+        'File:Clip.mp4',
+        'File:Vector.svg', // Flutter can't decode raw SVG
+        'File:Scan.tiff',
+        'File:Other.webm',
+        'File:NoExt',
+      ]) {
+        expect(isLikelyImage(s), isFalse, reason: s);
+      }
+    });
+
+    test('strips query strings + fragments before matching', () {
+      expect(isLikelyImage('https://w.org/x.jpg?cache=1'), isTrue);
+      expect(isLikelyImage('https://w.org/x.jpg#full'), isTrue);
+      expect(isLikelyImage('https://w.org/x.pdf?force=true'), isFalse);
+    });
+
+    test('empty + dotless input returns false', () {
+      expect(isLikelyImage(''), isFalse);
+      expect(isLikelyImage('plainstring'), isFalse);
+    });
+  });
+
   group('parseGeoSearch', () {
     test('returns File-namespace titles with distance', () {
       const body = '''
@@ -21,6 +59,20 @@ void main() {
       expect(hits.first.title, 'File:Foo.jpg');
       expect(hits.first.distanceMeters, 42.5);
       expect(hits.last.distanceMeters, 100);
+    });
+
+    test('drops non-image File: media (OGG / PDF / MP4) — the 0.13.2 fix',
+        () {
+      const body = '''
+{"query": {"geosearch": [
+  {"title": "File:GoodPhoto.jpg", "dist": 10},
+  {"title": "File:Audio.ogg", "dist": 20},
+  {"title": "File:Doc.pdf", "dist": 30},
+  {"title": "File:Clip.mp4", "dist": 40},
+  {"title": "File:AnotherPhoto.PNG", "dist": 50}
+]}}''';
+      final hits = parseGeoSearch(body).map((h) => h.title).toList();
+      expect(hits, ['File:GoodPhoto.jpg', 'File:AnotherPhoto.PNG']);
     });
 
     test('skips non-File titles silently', () {
@@ -85,7 +137,7 @@ void main() {
     test('decodes HTML entities in attribution', () {
       const body = '''
 {"query":{"pages":{"1":{"title":"File:X.jpg","imageinfo":[{
-  "url":"http://x/y",
+  "url":"http://x/y.jpg",
   "extmetadata":{"Artist":{"value":"Rock &amp; Roll &quot;hero&quot;"}}
 }]}}}}''';
       final out = parseImageInfoByTitle(body);
@@ -101,7 +153,7 @@ void main() {
     test('empty extmetadata yields empty strings, not throws', () {
       const body = '''
 {"query":{"pages":{"1":{"title":"File:X.jpg","imageinfo":[{
-  "url":"http://x/y"
+  "url":"http://x/y.jpg"
 }]}}}}''';
       final entry = parseImageInfoByTitle(body)['File:X.jpg']!;
       expect(entry.attribution, '');
@@ -131,8 +183,8 @@ void main() {
         // imageinfo hop
         return http.Response(
           '{"query":{"pages":{'
-          '"1":{"title":"File:A.jpg","imageinfo":[{"url":"http://a","extmetadata":{"Artist":{"value":"Alice"},"LicenseShortName":{"value":"CC0"}}}]},'
-          '"2":{"title":"File:B.jpg","imageinfo":[{"url":"http://b","extmetadata":{"Artist":{"value":"Bob"},"LicenseShortName":{"value":"CC BY"}}}]}'
+          '"1":{"title":"File:A.jpg","imageinfo":[{"url":"http://a.jpg","extmetadata":{"Artist":{"value":"Alice"},"LicenseShortName":{"value":"CC0"}}}]},'
+          '"2":{"title":"File:B.jpg","imageinfo":[{"url":"http://b.jpg","extmetadata":{"Artist":{"value":"Bob"},"LicenseShortName":{"value":"CC BY"}}}]}'
           '}}}',
           200,
         );
@@ -141,11 +193,11 @@ void main() {
       final got = await svc.fetchNearby(lat: 51.5, lon: -0.1);
       expect(calls, 2);
       expect(got.length, 2);
-      expect(got.first.uri, 'http://a');
+      expect(got.first.uri, 'http://a.jpg');
       expect(got.first.attribution, 'Alice');
       expect(got.first.license, 'CC0');
       expect(got.first.distanceMeters, 15);
-      expect(got.last.uri, 'http://b');
+      expect(got.last.uri, 'http://b.jpg');
     });
 
     test('zero geosearch hits short-circuits the second call', () async {

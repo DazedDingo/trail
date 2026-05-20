@@ -133,8 +133,35 @@ class GeoSearchHit {
   const GeoSearchHit({required this.title, required this.distanceMeters});
 }
 
-/// Parses the GeoSearch JSON envelope. Tolerant — missing fields and
-/// non-File: titles drop out silently.
+/// Image file extensions Flutter's `Image.network` can decode out of
+/// the box. Whitelist applied at parse time so non-image File:
+/// entries — OGG audio, PDFs, MP4 video, TIFF, SVG (which Flutter
+/// can't render natively) — never reach the DB. The 0.13.0 release
+/// was missing this guard; lots of pins ended up with broken-image
+/// placeholders because GeoSearch returns every File: namespace
+/// entry within radius, not just photos.
+///
+/// SVG is excluded deliberately even though Wikimedia generates raster
+/// thumbnails for SVG sources — we'd need `flutter_svg` to render the
+/// originals if `thumburl` were ever absent, and the simpler "match
+/// the URL's extension" rule is honest about what we can render.
+const _kImageSuffixes = {'.jpg', '.jpeg', '.png', '.gif', '.webp'};
+
+/// True when [uriOrTitle]'s lowercase trailing dot-suffix matches one
+/// of [_kImageSuffixes]. Tolerant: empty strings, missing dots, and
+/// query-string trailers all return false. Exported for the DAO's
+/// read-time tombstone filter (see `PingPhotoDao.byPingId`).
+bool isLikelyImage(String uriOrTitle) {
+  final cleaned = uriOrTitle.split('?').first.split('#').first.toLowerCase();
+  final dot = cleaned.lastIndexOf('.');
+  if (dot < 0) return false;
+  final suffix = cleaned.substring(dot);
+  return _kImageSuffixes.contains(suffix);
+}
+
+/// Parses the GeoSearch JSON envelope. Tolerant — missing fields,
+/// non-File: titles, and non-image media (audio/video/PDF/SVG) drop
+/// out silently.
 List<GeoSearchHit> parseGeoSearch(String body) {
   final Object? json;
   try {
@@ -152,6 +179,7 @@ List<GeoSearchHit> parseGeoSearch(String body) {
     if (row is! Map) continue;
     final title = row['title'];
     if (title is! String || !title.startsWith('File:')) continue;
+    if (!isLikelyImage(title)) continue; // drop OGG/PDF/MP4/etc.
     final dist = (row['dist'] is num)
         ? (row['dist'] as num).toDouble()
         : 0.0;
@@ -200,7 +228,17 @@ Map<String, ImageInfoEntry> parseImageInfoByTitle(String body) {
     if (info is! Map) continue;
     final url = info['url'];
     if (url is! String || url.isEmpty) continue;
+    // Defense-in-depth — `parseGeoSearch` already dropped non-image
+    // titles, but a future caller that wires `prop=imageinfo` against
+    // a different title source (search, transclusions, etc.) would
+    // bypass that. Re-check on the URL itself; if the thumbnail is a
+    // raster we accept the row even if the source extension isn't on
+    // the whitelist (Wikimedia rasters SVGs into PNG thumbs).
     final thumbUrl = info['thumburl'];
+    final thumbIsImage = thumbUrl is String &&
+        thumbUrl.isNotEmpty &&
+        isLikelyImage(thumbUrl);
+    if (!isLikelyImage(url) && !thumbIsImage) continue;
     final ext = info['extmetadata'];
     String attribution = '';
     String license = '';

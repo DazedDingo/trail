@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.13.2+86] — 2026-05-20
+
+### Fixed
+- **Lots of "broken image" placeholders in the gallery + slideshow.** Wikimedia's GeoSearch returns every File: namespace entry within radius — not just photos. So OGG audio clips, PDFs, MP4 video, SVGs and TIFFs were getting attached to pins and showed up as the gray "broken image" icon when Flutter couldn't decode them. Two fixes layered together: (a) the parser now drops non-image media at fetch time, so new pings never get a bad row; (b) a read-time tombstone filter in the photo DAO hides existing bad rows from the gallery + slideshow without needing a DB migration. User-supplied photos (camera / gallery picker) are never affected by either filter.
+
 ## [0.13.1+85] — 2026-05-18
 
 ### Added
