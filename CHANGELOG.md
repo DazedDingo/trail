@@ -4,7 +4,15 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
-## [0.13.8+92] — 2026-05-20
+## [0.13.9+93] — 2026-05-20
+
+### Fixed
+- **Pins are tappable now.** The map's pin circles had a 3 px radius, which is essentially zero tap target on a phone — you had to land your fingertip on a 6 px dot to register. Bumped to 7 px for trail dots and 9 px for the "you are here" head. A typical 4-hour-cadence trail still reads as a string of dots; individual pins are now reliably reachable.
+
+### Changed
+- **Tapping any pin jumps the slider to that pin's time** before opening the detail sheet. Pre-0.13.9 the slider stayed where it was, so you could only meaningfully interact with the pin already at the cursor; tapping an earlier pin showed its details but the slideshow / trail prefix / visible-fixes count stayed anchored at the wrong time. Now tap = jump + sheet. Playback pauses on tap so an auto-advance doesn't fight the manual selection.
+
+
 
 ### Fixed
 - **"Gray screen, no picture" survivors.** A failed thumbnail was getting registered as broken under its 320 px (post-shrink) URL but the slideshow's picker was checking the original 512 px (pre-shrink) URL — so the picker kept clearing the same broken photo, the renderer kept shrinking it to the same dead 320 URL, and the user saw a permanent gray surface. Unified both widgets on a single `renderableUriFor` / `renderableGalleryUriFor` helper that picks the exact URL the renderer will paint AND smart-falls-back to the full image URL when the shrunk thumb is in the denylist. Net effect: a broken thumb retries once at full-resolution, then if that also fails the photo gets cleanly skipped — no more loops.

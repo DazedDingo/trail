@@ -691,9 +691,18 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     return _smallOptions(points[i], scheme);
   }
 
+  // Radius bumped from 3 → 7 in 0.13.9 because the 3 px hit target was
+  // basically untappable on a phone — the user reported "you need to be
+  // on the specific time to select a single pin" (i.e. you could only
+  // ever tap the head, which is the largest visual focus). 7 px is
+  // small enough that a typical 4 h-cadence trail still reads as a
+  // string of dots, large enough that a fingertip lands one reliably.
+  static const _kCircleRadius = 7.0;
+  static const _kHeadRadius = 9.0; // head stays slightly larger for "you are here" emphasis
+
   CircleOptions _smallOptions(LatLng p, ColorScheme scheme) => CircleOptions(
         geometry: p,
-        circleRadius: 3,
+        circleRadius: _kCircleRadius,
         circleColor: scheme.primary.toHexStringRGB(),
         circleStrokeWidth: 0.5,
         circleStrokeColor: '#FFFFFF',
@@ -702,7 +711,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
 
   CircleOptions _prevOptions(LatLng p, ColorScheme scheme) => CircleOptions(
         geometry: p,
-        circleRadius: 3,
+        circleRadius: _kCircleRadius,
         circleColor: '#FFB300',
         circleStrokeWidth: 1,
         circleStrokeColor: '#FFFFFF',
@@ -715,7 +724,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
 
   CircleOptions _headOptions(LatLng p, ColorScheme scheme) => CircleOptions(
         geometry: p,
-        circleRadius: 3,
+        circleRadius: _kHeadRadius,
         circleColor: _headFill,
         circleStrokeWidth: 1,
         circleStrokeColor: '#FFFFFF',
@@ -815,6 +824,23 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   void _handleCircleTap(Circle circle) {
     final ping = _circleToPing[circle.id];
     if (ping == null) return;
+    // **Tap = jump to that pin's time, then show details.** Pre-0.13.9
+    // the tap only opened the sheet; the slider stayed wherever the
+    // user had left it, so re-tapping a different pin gave you the
+    // details of a different pin but the trail / heatmap below was
+    // still anchored at the previous time. Now tap also moves the
+    // cursor, which means:
+    //   - Slideshow mode jumps to that pin's photo.
+    //   - "Visible fixes" prefix re-clamps to <= this ping.
+    //   - The detail sheet at the bottom is for the same pin the user
+    //     just tapped — no implicit time mismatch.
+    // Playback is paused on tap so a manual selection doesn't fight
+    // the auto-advance timer.
+    if (!_arePingTimesEqual(_sliderMax, ping.timestampUtc)) {
+      _pausePlayback();
+      setState(() => _sliderMax = ping.timestampUtc);
+      _refreshAnnotationsIfReady();
+    }
     showModalBottomSheet(
       context: context,
       showDragHandle: true,
@@ -823,6 +849,11 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
       ),
     );
   }
+
+  /// Defensive equality — both DateTimes are UTC by construction, but
+  /// `==` on `DateTime` is reference-and-ms-equality, which is what we
+  /// want here. Wrapped so tests can mock the comparison if needed.
+  bool _arePingTimesEqual(DateTime? a, DateTime b) => a != null && a == b;
 
   Future<void> _fitToFixes(List<Ping> visibleFixes) async {
     final c = _controller;
