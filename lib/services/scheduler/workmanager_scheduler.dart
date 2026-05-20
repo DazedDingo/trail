@@ -7,17 +7,21 @@ import 'package:geolocator/geolocator.dart';
 
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
+import '../../db/area_photo_dao.dart';
 import '../../db/database.dart';
 import '../../db/ping_dao.dart';
 import '../../db/ping_photo_dao.dart';
+import '../../models/area_photo.dart';
 import '../../models/ping.dart';
 import '../../models/ping_photo.dart';
 import '../auto_photo_service.dart';
+import '../cell_photo_picker.dart';
 import '../how_is_it_service.dart';
 import '../location_service.dart';
 import '../notification_service.dart';
 import '../online_photo_service.dart';
 import '../panic/panic_service.dart';
+import '../photo_shuffle_prefs.dart';
 import 'scheduler_mode.dart';
 import 'scheduler_policy.dart';
 import 'worker_run_log.dart';
@@ -295,9 +299,29 @@ Future<bool> _handleScheduled() async {
   }
 }
 
+/// Photos persisted per-ping. Five photos surfaces a slideshow without
+/// dominating the gallery sheet. The cell pool is intentionally wider
+/// so repeat visits get variety.
+const int kPhotosPerPing = 5;
+
+/// Wider pool fetched once per cell. ~20 hits is the sweet spot:
+/// generous enough that a daily commuter sees fresh photos for weeks
+/// before the rotation repeats, narrow enough that GeoSearch + the
+/// imageinfo hop stay inside one HTTP round-trip and a few hundred ms.
+const int kCellPoolSize = 20;
+
 /// Best-effort online-photo fetch + write. Called from the background
 /// dispatcher after a successful real-fix ping. Failures swallow into
 /// no-op — photos are decorative; the ping row is already committed.
+///
+/// Cell-cache flow (0.13.3):
+///   1. Quantize lat/lon to a ~110 m cell.
+///   2. If the cell has a cached photo pool, pick a rotated slice
+///      keyed on (pingId + shuffle salt) and write that slice as the
+///      ping's photos. NO Wikimedia hit.
+///   3. Otherwise, fetch a wider pool from Wikimedia, persist it in
+///      `area_photos` for future pings in this cell, then pick the
+///      same kind of rotated slice for the current ping.
 Future<void> _autoFetchPhotos(
   Database db, {
   required int pingId,
@@ -309,22 +333,61 @@ Future<void> _autoFetchPhotos(
     // Idempotency — if a previous dispatch already wrote photos for
     // this ping (rare, but possible on retry chains), don't double.
     if (await photoDao.onlineCountForPing(pingId) > 0) return;
-    final fetched = await OnlinePhotoService().fetchNearby(
-      lat: lat,
-      lon: lon,
+
+    final cellLat = quantizeCellLat(lat);
+    final cellLon = quantizeCellLon(lon);
+    final areaDao = AreaPhotoDao(db);
+    final salt = await PhotoShufflePrefs.getSalt();
+
+    var pool = await areaDao.byCell(cellLat, cellLon);
+    if (pool.isEmpty) {
+      final fetched = await OnlinePhotoService().fetchNearby(
+        lat: lat,
+        lon: lon,
+        limit: kCellPoolSize,
+      );
+      if (fetched.isEmpty) return;
+      final discoveredAt = DateTime.now().toUtc();
+      final toCache = <AreaPhoto>[];
+      for (final f in fetched) {
+        toCache.add(AreaPhoto(
+          cellLat: cellLat,
+          cellLon: cellLon,
+          uri: f.uri,
+          thumbUri: f.thumbUri,
+          attribution: f.attribution,
+          license: f.license,
+          discoveredAt: discoveredAt,
+        ));
+      }
+      await areaDao.insertForCell(
+        cellLat: cellLat,
+        cellLon: cellLon,
+        photos: toCache,
+      );
+      pool = await areaDao.byCell(cellLat, cellLon);
+      if (pool.isEmpty) return; // a peer writer wiped + raced — bail
+    }
+
+    final picks = pickRotatedPhotos(
+      allCellPhotos: pool,
+      pingId: pingId,
+      k: kPhotosPerPing,
+      salt: salt,
     );
-    if (fetched.isEmpty) return;
+    if (picks.isEmpty) return;
+    final now = DateTime.now().toUtc();
     final rows = <PingPhoto>[];
-    for (var i = 0; i < fetched.length; i++) {
-      final f = fetched[i];
+    for (var i = 0; i < picks.length; i++) {
+      final p = picks[i];
       rows.add(PingPhoto(
         pingId: pingId,
-        uri: f.uri,
+        uri: p.uri,
         source: PingPhotoSource.wikimedia,
-        attribution: f.attribution,
-        license: f.license,
-        thumbUri: f.thumbUri,
-        fetchedAt: DateTime.now().toUtc(),
+        attribution: p.attribution,
+        license: p.license,
+        thumbUri: p.thumbUri,
+        fetchedAt: now,
         ordinal: i,
       ));
     }

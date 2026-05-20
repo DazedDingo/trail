@@ -135,4 +135,23 @@ class PingDao {
       whereArgs: [cutoffUtc.millisecondsSinceEpoch],
     );
   }
+
+  /// Deletes a single ping by id, atomically with its `ping_photos`
+  /// dependents. SQLCipher ships with foreign-key enforcement OFF by
+  /// default, so we delete photos explicitly first inside the same
+  /// transaction — a half-finished delete would leave orphaned photo
+  /// rows referencing a nonexistent ping_id. Returns true when the
+  /// ping row was actually removed (false on missing id).
+  Future<bool> deleteById(int id) async {
+    var removed = 0;
+    await db.transaction((txn) async {
+      await txn.delete(
+        'ping_photos', where: 'ping_id = ?', whereArgs: [id],
+      );
+      removed = await txn.delete(
+        'pings', where: 'id = ?', whereArgs: [id],
+      );
+    });
+    return removed > 0;
+  }
 }

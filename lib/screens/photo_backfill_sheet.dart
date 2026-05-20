@@ -41,9 +41,13 @@ class _PhotoBackfillSheetState extends State<PhotoBackfillSheet> {
       _cancel != null &&
       !_cancel!.isCompleted;
 
-  void _start() {
-    _cancel = Completer<void>();
-    final stream = PhotoBackfillService().run(cancel: _cancel);
+  void _start() => _consume(PhotoBackfillService().run(cancel: _cancel = Completer<void>()));
+
+  void _reshuffle() => _consume(
+        PhotoBackfillService().reshuffle(cancel: _cancel = Completer<void>()),
+      );
+
+  void _consume(Stream<PhotoBackfillProgress> stream) {
     setState(() => _progress = const PhotoBackfillProgress(
           processed: 0,
           total: 0,
@@ -122,13 +126,29 @@ class _PhotoBackfillSheetState extends State<PhotoBackfillSheet> {
             ),
           ),
           const SizedBox(height: 16),
-          if (p == null)
+          if (p == null) ...[
             FilledButton.icon(
               icon: const Icon(Icons.cloud_download_outlined),
               label: const Text('Start backfill'),
               onPressed: _start,
-            )
-          else ...[
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.shuffle),
+              label: const Text('Re-shuffle (different photos)'),
+              onPressed: _reshuffle,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Re-shuffle drops every cached Wikimedia attachment and '
+              'reassigns from the per-location cache with a new shuffle '
+              'seed — fast (no new HTTP) and fully reversible by '
+              're-shuffling again. Your own photos are untouched.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+            ),
+          ] else ...[
             _ProgressBlock(progress: p),
             const SizedBox(height: 12),
             Row(
@@ -166,6 +186,9 @@ class _ProgressBlock extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final p = progress;
     final pct = (p.fraction * 100).toStringAsFixed(0);
+    final cacheNote = p.cellCacheHits > 0
+        ? ' · ${p.cellCacheHits} from cache'
+        : '';
     final statusLine = p.error != null
         ? 'Stopped: ${p.error}'
         : p.finished
@@ -173,9 +196,10 @@ class _ProgressBlock extends StatelessWidget {
                 ? 'All pings already have photos.'
                 : 'Done — added ${p.photosAdded} photo'
                     '${p.photosAdded == 1 ? '' : 's'} across '
-                    '${p.processed} ping${p.processed == 1 ? '' : 's'}.'
+                    '${p.processed} ping${p.processed == 1 ? '' : 's'}'
+                    '$cacheNote.'
             : 'Processing ${p.processed} of ${p.total} pings · '
-                'added ${p.photosAdded} so far';
+                'added ${p.photosAdded} so far$cacheNote';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [

@@ -84,6 +84,22 @@ Future<Database> _openMemDb() async {
   ''');
   await db.execute(
       'CREATE INDEX idx_ping_photos_ping_id ON ping_photos(ping_id);');
+  // area_photos (schema v3) — cell-keyed photo cache. Mirror of
+  // TrailDatabase._areaPhotosCreateSql.
+  await db.execute('''
+    CREATE TABLE area_photos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cell_lat REAL NOT NULL,
+      cell_lon REAL NOT NULL,
+      uri TEXT NOT NULL,
+      thumb_uri TEXT,
+      attribution TEXT,
+      license TEXT,
+      discovered_at INTEGER NOT NULL
+    );
+  ''');
+  await db.execute(
+      'CREATE INDEX idx_area_photos_cell ON area_photos(cell_lat, cell_lon);');
   return db;
 }
 
@@ -438,6 +454,81 @@ void main() {
       await dao.attachComment(id, 'second-overwrite');
       final got = await dao.byId(id);
       expect(got!.comment, 'second-overwrite');
+    });
+  });
+
+  group('PingDao.deleteById (schema v2 cascade)', () {
+    test('returns true and removes the row', () async {
+      final id = await dao.insert(_p(DateTime.utc(2026, 5, 20, 9),
+          lat: 1, lon: 2));
+      expect(await dao.deleteById(id), isTrue);
+      expect(await dao.byId(id), isNull);
+    });
+
+    test('returns false when the row was already gone', () async {
+      expect(await dao.deleteById(424242), isFalse);
+    });
+
+    test('cascades to ping_photos rows for the same ping (FK off — '
+        'we delete photos explicitly in the same txn)', () async {
+      final id = await dao.insert(_p(DateTime.utc(2026, 5, 20, 10),
+          lat: 1, lon: 2));
+      // Seed a couple of photo rows on this ping.
+      await db.insert('ping_photos', {
+        'ping_id': id,
+        'uri': 'file:///a.jpg',
+        'source': 'user_camera',
+        'attribution': '',
+        'license': '',
+        'fetched_at': DateTime.utc(2026, 5, 20).millisecondsSinceEpoch,
+        'ordinal': 0,
+      });
+      await db.insert('ping_photos', {
+        'ping_id': id,
+        'uri': 'https://w.org/b.jpg',
+        'source': 'wikimedia',
+        'attribution': 'X',
+        'license': 'CC BY-SA 4.0',
+        'fetched_at': DateTime.utc(2026, 5, 20).millisecondsSinceEpoch,
+        'ordinal': 1,
+      });
+
+      final beforeRows = await db.query('ping_photos',
+          where: 'ping_id = ?', whereArgs: [id]);
+      expect(beforeRows, hasLength(2));
+
+      expect(await dao.deleteById(id), isTrue);
+
+      final afterRows = await db.query('ping_photos',
+          where: 'ping_id = ?', whereArgs: [id]);
+      expect(afterRows, isEmpty,
+          reason: 'ping_photos rows must be removed in the same '
+              'transaction — otherwise orphans accumulate');
+    });
+
+    test('does not touch other pings\' photos', () async {
+      final keep = await dao.insert(_p(DateTime.utc(2026, 5, 20, 9),
+          lat: 1, lon: 2));
+      final doomed = await dao.insert(_p(DateTime.utc(2026, 5, 20, 10),
+          lat: 3, lon: 4));
+      await db.insert('ping_photos', {
+        'ping_id': keep,
+        'uri': 'file:///keep.jpg',
+        'source': 'user_camera',
+        'fetched_at': 0,
+        'ordinal': 0,
+      });
+      await db.insert('ping_photos', {
+        'ping_id': doomed,
+        'uri': 'file:///doomed.jpg',
+        'source': 'user_camera',
+        'fetched_at': 0,
+        'ordinal': 0,
+      });
+      await dao.deleteById(doomed);
+      final keepRows = await db.query('ping_photos',
+          where: 'ping_id = ?', whereArgs: [keep]);
+      expect(keepRows, hasLength(1));
     });
   });
 }

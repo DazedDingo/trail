@@ -34,7 +34,11 @@ class TrailDatabase {
   // flow) and a new `ping_photos` table (for online auto-fetched + user-
   // supplied photos, many-per-ping). Migration is additive; the existing
   // pings table is untouched, the new column defaults to NULL.
-  static const _schemaVersion = 2;
+  // v3 (0.13.3): adds `area_photos` — a per-cell cache of online photo
+  // lookups so repeat visits to the same place don't re-hit Wikimedia.
+  // Cell key is the quantized lat/lon (3 decimals ≈ ~110 m at the
+  // equator). Also additive — existing data untouched.
+  static const _schemaVersion = 3;
 
   /// Cached handle for the UI isolate. Kept as a `Future` (not a resolved
   /// `Database`) so parallel first-callers all await the same open — avoids
@@ -224,6 +228,8 @@ class TrailDatabase {
     ''');
     await db.execute(_pingPhotosCreateSql);
     await db.execute(_pingPhotosIndexSql);
+    await db.execute(_areaPhotosCreateSql);
+    await db.execute(_areaPhotosIndexSql);
   }
 
   static Future<void> _onUpgrade(
@@ -240,6 +246,16 @@ class TrailDatabase {
         await txn.execute('ALTER TABLE pings ADD COLUMN comment TEXT;');
         await txn.execute(_pingPhotosCreateSql);
         await txn.execute(_pingPhotosIndexSql);
+      });
+    }
+    if (oldVersion < 3) {
+      // v2 → v3: add the area_photos cell-cache. Backfills + per-ping
+      // auto-fetch now check the cache first; only fresh cells round-
+      // trip to Wikimedia. Additive — existing ping_photos rows are
+      // untouched. Migration in its own transaction.
+      await db.transaction((txn) async {
+        await txn.execute(_areaPhotosCreateSql);
+        await txn.execute(_areaPhotosIndexSql);
       });
     }
   }
@@ -275,4 +291,34 @@ class TrailDatabase {
 
   static const _pingPhotosIndexSql =
       'CREATE INDEX idx_ping_photos_ping_id ON ping_photos(ping_id);';
+
+  // ─── area_photos schema (v3) ─────────────────────────────────────────
+  //
+  // Per-cell cache of Wikimedia Commons photo lookups. A cell is the
+  // (lat, lon) pair rounded to 3 decimals (~110 m at the equator). The
+  // cache lets repeat visits to the same place reuse the photo set
+  // without re-hitting Wikimedia, and each ping inside a cell gets a
+  // rotated slice of the cached photos so picture-mode playback shows
+  // variety across visits to the same spot.
+  //
+  // `(cell_lat, cell_lon)` is not declared UNIQUE — concurrent first-
+  // visits could insert duplicates, but the lookup query stays correct
+  // either way. The dispatcher writes inside a transaction that re-
+  // checks for an existing entry first, so duplicates are rare in
+  // practice. A future cleanup migration can dedupe if needed.
+  static const _areaPhotosCreateSql = '''
+    CREATE TABLE area_photos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cell_lat REAL NOT NULL,
+      cell_lon REAL NOT NULL,
+      uri TEXT NOT NULL,
+      thumb_uri TEXT,
+      attribution TEXT,
+      license TEXT,
+      discovered_at INTEGER NOT NULL
+    );
+  ''';
+
+  static const _areaPhotosIndexSql =
+      'CREATE INDEX idx_area_photos_cell ON area_photos(cell_lat, cell_lon);';
 }

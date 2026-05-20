@@ -7,6 +7,8 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 
+import '../db/database.dart';
+import '../db/ping_dao.dart';
 import '../models/ping.dart';
 import '../providers/map_settings_provider.dart';
 import '../providers/mbtiles_provider.dart';
@@ -1416,6 +1418,10 @@ class _PingDetailSheet extends ConsumerWidget {
           if (ping.note != null) _row('Note', ping.note!),
           if (ping.comment != null && ping.comment!.isNotEmpty)
             _row('Comment', ping.comment!),
+          if (ping.id != null) ...[
+            const SizedBox(height: 12),
+            _DeletePingButton(ping: ping),
+          ],
         ],
       ),
     );
@@ -1436,6 +1442,106 @@ class _PingDetailSheet extends ConsumerWidget {
           ),
           Expanded(child: SelectableText(value)),
         ],
+      ),
+    );
+  }
+}
+
+/// Destructive "Delete this pin" affordance pinned to the bottom of the
+/// pin-detail sheet. Confirms first — pin deletion is unrecoverable
+/// because the only redo path is "wait for the next scheduled fix",
+/// which lands at a different timestamp and almost certainly different
+/// coords. Cascades to `ping_photos` rows in the same DB transaction
+/// (SQLCipher's FK enforcement is off; see `PingDao.deleteById`).
+class _DeletePingButton extends ConsumerStatefulWidget {
+  final Ping ping;
+  const _DeletePingButton({required this.ping});
+
+  @override
+  ConsumerState<_DeletePingButton> createState() => _DeletePingButtonState();
+}
+
+class _DeletePingButtonState extends ConsumerState<_DeletePingButton> {
+  bool _deleting = false;
+
+  Future<void> _confirmAndDelete() async {
+    final ping = widget.ping;
+    final fmt = DateFormat('EEE MMM d, HH:mm:ss');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete this pin?'),
+        content: Text(
+          'Removes the ${fmt.format(ping.timestampUtc.toLocal())} ping + '
+          'any attached photos. Cannot be undone — the only way to '
+          '"redo" is to wait for the next scheduled fix.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+              foregroundColor: Theme.of(ctx).colorScheme.onError,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _deleting = true);
+    final id = ping.id;
+    if (id == null) {
+      // Defensive — the sheet only renders the button when ping.id is
+      // non-null, but a race against the parent setState shouldn't crash.
+      return;
+    }
+    try {
+      final db = await TrailDatabase.shared();
+      await PingDao(db).deleteById(id);
+      // Invalidate every provider that hangs off the pings table so the
+      // map, history, and trip-detection all pick up the gap immediately.
+      ref.invalidate(allPingsProvider);
+      ref.invalidate(recentPingsProvider);
+      ref.invalidate(pingsByRangeProvider);
+      if (mounted) Navigator.of(context).pop(); // close the detail sheet
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _deleting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not delete pin: $e')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: OutlinedButton.icon(
+        onPressed: _deleting ? null : _confirmAndDelete,
+        icon: _deleting
+            ? SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation(scheme.error),
+                ),
+              )
+            : Icon(Icons.delete_outline, size: 18, color: scheme.error),
+        label: Text(
+          _deleting ? 'Deleting…' : 'Delete this pin',
+          style: TextStyle(color: scheme.error),
+        ),
+        style: OutlinedButton.styleFrom(
+          side: BorderSide(color: scheme.error.withValues(alpha: 0.5)),
+        ),
       ),
     );
   }

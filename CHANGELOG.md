@@ -4,7 +4,18 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
-## [0.13.2+86] — 2026-05-20
+## [0.13.3+87] — 2026-04-28
+
+### Added
+- **Re-shuffle photos (different pictures for repeat visits).** The photo backfill sheet has a new "Re-shuffle (different photos)" button alongside the regular Start backfill. Re-shuffle drops every cached Wikimedia attachment and reassigns from a per-location photo pool with a new shuffle seed, so the gallery + slideshow refresh with different pictures from the same nearby pool — no new Wikimedia hit, fully reversible by re-shuffling again. Your own user photos are untouched.
+- **Per-location photo cache (cell-keyed).** A new on-device cache stores the wider photo pool fetched from Wikimedia for each ~110 m cell you've ever visited. Subsequent visits to the same place reuse that cached pool instead of re-hitting the API. First-time visitors to a brand-new place still pay one HTTP round-trip; everyone who's been there before is free.
+- **Delete pin.** The pin detail sheet has a new "Delete this pin" button at the bottom (with a confirm dialog). Removes the ping and any attached photos in one transaction, then refreshes Recent + the map + the date-filtered view.
+
+### Changed
+- **Backfill is much faster for travelled histories.** Because most pins in a normal year of usage are repeat visits to the same dozen-or-so cells (home, work, gym, coffee shop), the per-location cache means a re-backfill of an already-walked history finishes in seconds rather than minutes. The progress sheet now surfaces "X from cache" so you can see the saving live.
+- **Repeat visits get visual variety.** Each ping inside the same cell now gets a deterministic-but-rotated slice of the cell's photo pool, so the third time you walk past the coffee shop you don't see the same five photos as the first two times.
+
+
 
 ### Fixed
 - **Lots of "broken image" placeholders in the gallery + slideshow.** Wikimedia's GeoSearch returns every File: namespace entry within radius — not just photos. So OGG audio clips, PDFs, MP4 video, SVGs and TIFFs were getting attached to pins and showed up as the gray "broken image" icon when Flutter couldn't decode them. Two fixes layered together: (a) the parser now drops non-image media at fetch time, so new pings never get a bad row; (b) a read-time tombstone filter in the photo DAO hides existing bad rows from the gallery + slideshow without needing a DB migration. User-supplied photos (camera / gallery picker) are never affected by either filter.
