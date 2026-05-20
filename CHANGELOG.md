@@ -4,6 +4,16 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.13.4+88] — 2026-05-20
+
+### Fixed
+- **Broken-image placeholders now self-heal.** 0.13.2 stopped non-image Wikimedia media (audio, PDFs, video) from getting attached to pins, but some real `.jpg` URLs still fail at render time — Wikimedia 404s, hotlink protection, or a corrupt file. When an image fails to load, its URL is now remembered persistently; the gallery hides those tiles and the slideshow skips to the next available photo (either a sibling on the same ping or the previous ping's photo). Persists across app restarts so you don't see the gray broken-icon flash on repeat visits.
+- **Slideshow renders fast even at 0.25× speed.** The slideshow now prefetches the next ~5 frames into the image cache in the background, so by the time the slider reaches them the bytes are already decoded. Previously every frame was a cold network round-trip to Wikimedia; on cellular that could blow past a 4-second frame budget at 0.25× speed and stutter.
+- The brief spinner that flashed between slideshow frames is gone — replaced with a clean surface flash, which feels much smoother at high playback speeds when prefetch is keeping up.
+
+### Added
+- **Settings → Home → "Retry broken photos"**: clears the failed-image denylist so the next render re-attempts every URL. Useful after switching from a flaky cellular link back to Wi-Fi (where lots of "failures" turn out to be transient). Shows the live count of remembered failures.
+
 ## [0.13.3+87] — 2026-04-28
 
 ### Added

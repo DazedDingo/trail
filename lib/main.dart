@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'app.dart';
 import 'providers/backup_provider.dart';
 import 'providers/onboarding_provider.dart';
+import 'services/failed_photo_uris.dart';
 import 'services/notification_service.dart';
 import 'services/scheduler/workmanager_scheduler.dart';
 
@@ -20,6 +21,10 @@ void main() async {
   // Eagerly create the panic notification channel so the first panic
   // triggers a notification with no first-use latency.
   await NotificationService.initialize();
+  // Load the persisted "this image already failed to load" denylist so
+  // the slideshow + gallery can skip known-broken URLs synchronously
+  // on first render instead of flashing the placeholder for a frame.
+  await FailedPhotoUris.preload();
   final onboarded = await OnboardingGate.isComplete();
   // Detect the post-restore case: auto-backup has put the encrypted DB +
   // salt back in place, but the Keystore-bound secure storage is empty

@@ -7,6 +7,7 @@ import '../db/database.dart';
 import '../db/ping_photo_dao.dart';
 import '../models/ping_photo.dart';
 import '../providers/photos_provider.dart';
+import '../services/failed_photo_uris.dart';
 
 /// Horizontal photo carousel for a single ping (schema v2). Renders:
 ///   - online auto-fetched photos (CC-BY-SA Wikimedia) with attribution
@@ -111,7 +112,19 @@ class _PingPhotosGalleryState extends ConsumerState<PingPhotosGallery> {
   @override
   Widget build(BuildContext context) {
     final async = ref.watch(pingPhotosProvider(widget.pingId));
-    final photos = async.valueOrNull ?? const <PingPhoto>[];
+    final raw = async.valueOrNull ?? const <PingPhoto>[];
+    // Hide URLs that have already been recorded as broken — render the
+    // tile only when at least one of the candidate URIs (thumb or full)
+    // hasn't failed yet. Without this the gallery would re-show the
+    // gray broken-image icon for every visit to a pin with a dead
+    // Wikimedia row.
+    final photos = raw.where((p) {
+      final thumb = p.thumbUri;
+      final thumbFailed =
+          thumb == null ? true : FailedPhotoUris.isFailed(thumb);
+      final fullFailed = FailedPhotoUris.isFailed(p.uri);
+      return !(thumbFailed && fullFailed);
+    }).toList(growable: false);
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: SizedBox(
@@ -123,6 +136,9 @@ class _PingPhotosGalleryState extends ConsumerState<PingPhotosGallery> {
               _PhotoTile(
                 photo: photo,
                 onLongPress: () => _confirmRemove(context, photo),
+                onError: () {
+                  if (mounted) setState(() {});
+                },
               ),
             _AddPhotoTile(
               onTap: _adding ? null : _showSourceSheet,
@@ -169,7 +185,12 @@ class _PingPhotosGalleryState extends ConsumerState<PingPhotosGallery> {
 class _PhotoTile extends StatelessWidget {
   final PingPhoto photo;
   final VoidCallback onLongPress;
-  const _PhotoTile({required this.photo, required this.onLongPress});
+  final VoidCallback onError;
+  const _PhotoTile({
+    required this.photo,
+    required this.onLongPress,
+    required this.onError,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -242,6 +263,10 @@ class _PhotoTile extends StatelessWidget {
       final path = uri.replaceFirst('file://', '');
       return Image.asset(path,
           fit: BoxFit.cover, errorBuilder: (_, __, ___) {
+        WidgetsBinding.instance.addPostFrameCallback((_) async {
+          await FailedPhotoUris.register(uri);
+          onError();
+        });
         return _placeholder(scheme);
       });
     }
@@ -249,8 +274,14 @@ class _PhotoTile extends StatelessWidget {
       return CachedNetworkImage(
         imageUrl: uri,
         fit: BoxFit.cover,
-        placeholder: (_, __) => _placeholder(scheme),
-        errorWidget: (_, __, ___) => _placeholder(scheme),
+        placeholder: (_, __) => Container(color: scheme.surface),
+        errorWidget: (_, __, ___) {
+          WidgetsBinding.instance.addPostFrameCallback((_) async {
+            await FailedPhotoUris.register(uri);
+            onError();
+          });
+          return _placeholder(scheme);
+        },
       );
     }
     return _placeholder(scheme);

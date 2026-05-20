@@ -7,6 +7,7 @@ import '../db/database.dart';
 import '../db/ping_photo_dao.dart';
 import '../models/ping.dart';
 import '../models/ping_photo.dart';
+import '../services/failed_photo_uris.dart';
 
 /// Picture-mode playback. Slaved to the same `_sliderMax` cursor + the
 /// same play/pause + speed-cycle controls the map view uses — toggling
@@ -21,6 +22,7 @@ import '../models/ping_photo.dart';
 class SlideshowView extends ConsumerStatefulWidget {
   final List<Ping> visibleFixes;
   final DateTime sliderMax;
+
   /// Mirrors the map view's "no fixes" state so we never render
   /// "loading photos" on an empty trail.
   final bool hasAnyFixes;
@@ -37,11 +39,15 @@ class SlideshowView extends ConsumerStatefulWidget {
 }
 
 class _SlideshowViewState extends ConsumerState<SlideshowView> {
-  /// `ping.id → first photo` cache. Built lazily as the slideshow
-  /// scrubs into new pings — we don't pre-fetch every photo on entry
-  /// because the trail might span months.
-  final Map<int, PingPhoto?> _photoCache = {};
+  /// `ping.id → full list of photos`. Lazily built when the slideshow
+  /// scrubs into a window; we keep the full list (not just first) so
+  /// `pickPhotoForPing` can skip photos that have failed to load.
+  final Map<int, List<PingPhoto>> _photoCache = {};
   bool _loadingAll = false;
+
+  /// Pings + photo URLs we've already pushed into `precacheImage`. Used
+  /// to avoid re-precaching the same URL on every slider tick.
+  final Set<String> _precached = {};
 
   @override
   void initState() {
@@ -52,9 +58,9 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
   @override
   void didUpdateWidget(SlideshowView old) {
     super.didUpdateWidget(old);
-    // visibleFixes changes on filter / data refresh; refresh the cache
-    // so we don't render a stale "photo for an archived ping" frame.
     if (old.visibleFixes != widget.visibleFixes) {
+      _photoCache.clear();
+      _precached.clear();
       _prefetchVisibleWindow();
     }
   }
@@ -73,13 +79,47 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
       if (!mounted) return;
       setState(() {
         for (final id in ids) {
-          final list = byPing[id];
-          _photoCache[id] = (list == null || list.isEmpty) ? null : list.first;
+          _photoCache[id] = byPing[id] ?? const <PingPhoto>[];
         }
       });
     } finally {
       _loadingAll = false;
     }
+  }
+
+  /// Walks the next [count] fixes after [from] and pushes their
+  /// thumbnail URLs into Flutter's image cache so the slide renders
+  /// instantly when the cursor reaches them. Cheap dedupe via
+  /// `_precached`; only HTTP URLs get precached (file:// loads from
+  /// disk fast enough that the warmup isn't worth the I/O).
+  void _scheduleLookahead(Ping from) {
+    final idx = widget.visibleFixes.indexOf(from);
+    if (idx < 0) return;
+    const lookahead = 5;
+    final end = (idx + 1 + lookahead).clamp(0, widget.visibleFixes.length);
+    for (var i = idx + 1; i < end; i++) {
+      final p = widget.visibleFixes[i];
+      final photo = pickPhotoForPing(p, widget.visibleFixes, _photoCache);
+      if (photo == null) continue;
+      final url = photo.thumbUri ?? photo.uri;
+      if (!url.startsWith('http')) continue;
+      if (_precached.contains(url)) continue;
+      _precached.add(url);
+      // Fire-and-forget — failures here will surface naturally when the
+      // user reaches the frame; they're handled by `_onImageError`.
+      precacheImage(
+        CachedNetworkImageProvider(url),
+        context,
+        onError: (_, __) {
+          FailedPhotoUris.register(url);
+        },
+      );
+    }
+  }
+
+  void _onImageError(String url) {
+    FailedPhotoUris.register(url);
+    if (mounted) setState(() {});
   }
 
   @override
@@ -105,17 +145,31 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
             'turn on auto-fetch or run the backfill from Settings.',
       );
     }
-    return _SlidePage(photo: photo, ping: ping);
+    // Prefetch a sliding window of upcoming frames. Scheduled in a
+    // post-frame callback so the precacheImage calls don't fight the
+    // current frame's layout work.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _scheduleLookahead(ping);
+    });
+    return _SlidePage(
+      photo: photo,
+      ping: ping,
+      onImageError: _onImageError,
+    );
   }
 
-  static String _fmtTime(DateTime t) =>
-      DateFormat('MMM d, HH:mm').format(t);
+  static String _fmtTime(DateTime t) => DateFormat('MMM d, HH:mm').format(t);
 }
 
 class _SlidePage extends StatelessWidget {
   final PingPhoto photo;
   final Ping ping;
-  const _SlidePage({required this.photo, required this.ping});
+  final ValueChanged<String> onImageError;
+  const _SlidePage({
+    required this.photo,
+    required this.ping,
+    required this.onImageError,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -190,16 +244,29 @@ class _SlidePage extends StatelessWidget {
       return Image.asset(
         uri.replaceFirst('file://', ''),
         fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => _placeholder(scheme),
+        errorBuilder: (_, __, ___) {
+          // Local file failed (rare, but image_picker temp paths can
+          // disappear if the OS cleans the temp dir). Register + show
+          // an empty surface — the next slider tick will skip it.
+          WidgetsBinding.instance.addPostFrameCallback(
+              (_) => onImageError(uri));
+          return _placeholder(scheme);
+        },
       );
     }
     if (uri.startsWith('http')) {
       return CachedNetworkImage(
         imageUrl: uri,
         fit: BoxFit.cover,
-        placeholder: (_, __) =>
-            const Center(child: CircularProgressIndicator()),
-        errorWidget: (_, __, ___) => _placeholder(scheme),
+        // No spinner: at 0.25× a half-second of CircularProgressIndicator
+        // on every frame is more visually jarring than a brief surface
+        // flash while the next frame's prefetched bytes paint.
+        placeholder: (_, __) => Container(color: scheme.surface),
+        errorWidget: (_, __, ___) {
+          WidgetsBinding.instance.addPostFrameCallback(
+              (_) => onImageError(uri));
+          return _placeholder(scheme);
+        },
       );
     }
     return _placeholder(scheme);
@@ -208,7 +275,7 @@ class _SlidePage extends StatelessWidget {
   Widget _placeholder(ColorScheme scheme) => Container(
         color: scheme.surfaceContainerHighest,
         alignment: Alignment.center,
-        child: Icon(Icons.broken_image_outlined,
+        child: Icon(Icons.image_outlined,
             size: 56, color: scheme.onSurfaceVariant),
       );
 }
@@ -258,27 +325,43 @@ Ping? pickSlideshowPing(List<Ping> visibleFixes, DateTime sliderMax) {
 }
 
 /// Resolves the photo to render for the current slideshow page.
-/// Prefers the picked ping's own photo; if it has none, walks back
-/// through earlier visible pings looking for one — so the slideshow
-/// never blanks out mid-trail just because one fix had no photo.
+///
+/// Search order, all filtering out URIs in [FailedPhotoUris]:
+///   1. The current ping's own photo list, in `ordinal` order.
+///   2. Earlier pings in [visibleFixes], walked backward — the first
+///      one that has a renderable photo wins.
+///
+/// This is why we store the full per-ping photo list in `_photoCache`
+/// (vs the first-only approach in 0.13.3): when ping P has 5 photos
+/// and photos[0]'s URL has failed, we want to fall back to photos[1]
+/// before walking to an earlier ping.
 PingPhoto? pickPhotoForPing(
   Ping current,
   List<Ping> visibleFixes,
-  Map<int, PingPhoto?> photoCache,
+  Map<int, List<PingPhoto>> photosByPing,
 ) {
-  // Walk from current backwards through visibleFixes; return the first
-  // ping we hit that has a cached photo.
+  PingPhoto? firstGood(List<PingPhoto> list) {
+    for (final p in list) {
+      final uri = p.thumbUri ?? p.uri;
+      if (!FailedPhotoUris.isFailed(uri) &&
+          !FailedPhotoUris.isFailed(p.uri)) {
+        return p;
+      }
+    }
+    return null;
+  }
+
   final idx = visibleFixes.indexOf(current);
   if (idx < 0) {
-    final own = current.id == null ? null : photoCache[current.id!];
-    return own;
+    if (current.id == null) return null;
+    return firstGood(photosByPing[current.id!] ?? const <PingPhoto>[]);
   }
   for (var i = idx; i >= 0; i--) {
     final p = visibleFixes[i];
     final id = p.id;
     if (id == null) continue;
-    final photo = photoCache[id];
-    if (photo != null) return photo;
+    final hit = firstGood(photosByPing[id] ?? const <PingPhoto>[]);
+    if (hit != null) return hit;
   }
   return null;
 }

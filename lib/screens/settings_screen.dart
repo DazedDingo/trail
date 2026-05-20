@@ -22,6 +22,7 @@ import '../providers/photos_provider.dart';
 import '../providers/panic_provider.dart';
 import '../providers/pings_provider.dart';
 import '../providers/scheduler_provider.dart';
+import '../services/failed_photo_uris.dart';
 import '../services/how_is_it_service.dart';
 import '../services/panic/panic_service.dart';
 import 'photo_backfill_sheet.dart';
@@ -311,6 +312,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           const _HomeMapHeightTile(),
           const _AutoPhotosTile(),
           const _PhotoBackfillTile(),
+          const _RetryFailedPhotosTile(),
           const Divider(),
           const _SectionHeader('Offline map'),
           ListTile(
@@ -1363,6 +1365,49 @@ class _PhotoBackfillTile extends StatelessWidget {
       ),
       trailing: const Icon(Icons.chevron_right),
       onTap: () => PhotoBackfillSheet.show(context),
+    );
+  }
+}
+
+/// Clears the "this image failed to load" denylist so the gallery +
+/// slideshow re-attempt every Wikimedia URL on next render. Useful
+/// after fixing a flaky connection where lots of images registered
+/// as failed.
+class _RetryFailedPhotosTile extends StatefulWidget {
+  const _RetryFailedPhotosTile();
+
+  @override
+  State<_RetryFailedPhotosTile> createState() =>
+      _RetryFailedPhotosTileState();
+}
+
+class _RetryFailedPhotosTileState extends State<_RetryFailedPhotosTile> {
+  @override
+  Widget build(BuildContext context) {
+    final count = FailedPhotoUris.count;
+    return ListTile(
+      leading: const Icon(Icons.refresh_outlined),
+      title: const Text('Retry broken photos'),
+      subtitle: Text(count == 0
+          ? 'No images have failed to load yet.'
+          : '$count image${count == 1 ? '' : 's'} marked as broken — '
+              'tap to clear and re-attempt them.'),
+      enabled: count > 0,
+      trailing: const Icon(Icons.chevron_right),
+      onTap: count == 0
+          ? null
+          : () async {
+              await FailedPhotoUris.clearAll();
+              if (mounted) setState(() {});
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Cleared broken-photo cache — '
+                        'next render will re-try all URLs.'),
+                  ),
+                );
+              }
+            },
     );
   }
 }

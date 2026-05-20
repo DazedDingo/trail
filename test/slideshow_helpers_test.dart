@@ -1,7 +1,9 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:trail/models/ping.dart';
 import 'package:trail/models/ping_photo.dart';
+import 'package:trail/services/failed_photo_uris.dart';
 import 'package:trail/widgets/slideshow_view.dart';
 
 Ping _p(int id, int hour) => Ping(
@@ -12,15 +14,22 @@ Ping _p(int id, int hour) => Ping(
       source: PingSource.scheduled,
     );
 
-PingPhoto _photo(int pingId) => PingPhoto(
+PingPhoto _photo(int pingId, {int ord = 0, String? uri, String? thumb}) =>
+    PingPhoto(
       pingId: pingId,
-      uri: 'https://example/p$pingId',
+      uri: uri ?? 'https://example/p$pingId-$ord.jpg',
+      thumbUri: thumb ?? 'https://example/p$pingId-$ord-thumb.jpg',
       source: PingPhotoSource.wikimedia,
       fetchedAt: DateTime.utc(2026, 5, 17),
-      ordinal: 0,
+      ordinal: ord,
     );
 
 void main() {
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    await FailedPhotoUris.clearAll();
+  });
+
   group('pickSlideshowPing', () {
     final fixes = [_p(1, 9), _p(2, 11), _p(3, 14)];
 
@@ -51,23 +60,30 @@ void main() {
   });
 
   group('pickPhotoForPing — backfills from earlier fixes', () {
-    test('returns the current ping\'s own photo when present', () {
+    test("returns the current ping's first photo when present", () {
       final fixes = [_p(1, 9), _p(2, 11)];
-      final cache = {1: _photo(1), 2: _photo(2)};
+      final cache = {
+        1: [_photo(1)],
+        2: [_photo(2)],
+      };
       final out = pickPhotoForPing(fixes[1], fixes, cache);
       expect(out!.pingId, 2);
     });
 
     test('walks back to an earlier ping when the current has none', () {
       final fixes = [_p(1, 9), _p(2, 11), _p(3, 14)];
-      final cache = {1: _photo(1), 2: null, 3: null};
+      final cache = {
+        1: [_photo(1)],
+        2: <PingPhoto>[],
+        3: <PingPhoto>[],
+      };
       final out = pickPhotoForPing(fixes[2], fixes, cache);
       expect(out!.pingId, 1, reason: 'walks back from 3 → 2 → 1');
     });
 
     test('returns null when no earlier ping has a photo either', () {
       final fixes = [_p(1, 9), _p(2, 11)];
-      final cache = {1: null, 2: null};
+      final cache = {1: <PingPhoto>[], 2: <PingPhoto>[]};
       final out = pickPhotoForPing(fixes[1], fixes, cache);
       expect(out, isNull);
     });
@@ -75,7 +91,9 @@ void main() {
     test('ping not in visibleFixes still falls back to its own cache entry',
         () {
       final orphan = _p(99, 12);
-      final out = pickPhotoForPing(orphan, const [], {99: _photo(99)});
+      final out = pickPhotoForPing(orphan, const [], {
+        99: [_photo(99)],
+      });
       expect(out!.pingId, 99);
     });
 
@@ -87,6 +105,52 @@ void main() {
         source: PingSource.scheduled,
       );
       final out = pickPhotoForPing(p, const [], const {});
+      expect(out, isNull);
+    });
+  });
+
+  group('pickPhotoForPing — failed-URL denylist (0.13.4)', () {
+    test('skips a failed thumb to a sibling photo on the same ping',
+        () async {
+      await FailedPhotoUris.preload();
+      final fixes = [_p(1, 9)];
+      final cache = {
+        1: [
+          _photo(1, ord: 0), // will be denylisted
+          _photo(1, ord: 1),
+        ],
+      };
+      await FailedPhotoUris.register(
+          'https://example/p1-0-thumb.jpg');
+      // Also blacklist the full URI so the fallback check catches it too.
+      await FailedPhotoUris.register('https://example/p1-0.jpg');
+      final out = pickPhotoForPing(fixes[0], fixes, cache);
+      expect(out!.ordinal, 1);
+    });
+
+    test('skips a fully-failed ping and walks back to a working earlier one',
+        () async {
+      await FailedPhotoUris.preload();
+      final fixes = [_p(1, 9), _p(2, 11)];
+      final cache = {
+        1: [_photo(1)],
+        2: [_photo(2)],
+      };
+      await FailedPhotoUris.register('https://example/p2-0-thumb.jpg');
+      await FailedPhotoUris.register('https://example/p2-0.jpg');
+      final out = pickPhotoForPing(fixes[1], fixes, cache);
+      expect(out!.pingId, 1);
+    });
+
+    test('returns null when every candidate is denylisted', () async {
+      await FailedPhotoUris.preload();
+      final fixes = [_p(1, 9)];
+      final cache = {
+        1: [_photo(1)],
+      };
+      await FailedPhotoUris.register('https://example/p1-0-thumb.jpg');
+      await FailedPhotoUris.register('https://example/p1-0.jpg');
+      final out = pickPhotoForPing(fixes[0], fixes, cache);
       expect(out, isNull);
     });
   });
