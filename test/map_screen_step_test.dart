@@ -77,5 +77,42 @@ void main() {
       final t = DateTime.utc(2026, 4, 18, 8);
       expect(stepSliderTo(const [], t, 1), t);
     });
+
+    group('±5 jump (0.13.7 — fast-forward/rewind buttons)', () {
+      test('forward jump skips 5 pings', () {
+        final chrono = [for (var i = 0; i < 10; i++) _p(i)];
+        // Standing on ping[2] (hour 2), jump +5 should land on ping[7].
+        expect(
+          stepSliderTo(chrono, chrono[2].timestampUtc, 5),
+          chrono[7].timestampUtc,
+        );
+      });
+
+      test('backward jump skips 5 pings', () {
+        final chrono = [for (var i = 0; i < 10; i++) _p(i)];
+        expect(
+          stepSliderTo(chrono, chrono[8].timestampUtc, -5),
+          chrono[3].timestampUtc,
+        );
+      });
+
+      test('forward jump near the end clamps at the last fix', () {
+        final chrono = [for (var i = 0; i < 10; i++) _p(i)];
+        // Standing on ping[7], jump +5 would overshoot to index 12 →
+        // clamped to last (index 9).
+        expect(
+          stepSliderTo(chrono, chrono[7].timestampUtc, 5),
+          chrono[9].timestampUtc,
+        );
+      });
+
+      test('backward jump near the start clamps at the first fix', () {
+        final chrono = [for (var i = 0; i < 10; i++) _p(i)];
+        expect(
+          stepSliderTo(chrono, chrono[2].timestampUtc, -5),
+          chrono[0].timestampUtc,
+        );
+      });
+    });
   });
 }

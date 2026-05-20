@@ -255,7 +255,13 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     final chrono = fixes;
     final first = chrono.first.timestampUtc;
     final last = chrono.last.timestampUtc;
-    final sliderMax = _sliderMax ?? last;
+    // **Default cursor is the earliest fix in the filter, not the
+    // latest.** Playback meaningfully starts from the beginning of
+    // the visible window; staying at the end meant the user had to
+    // tap "Jump to first" before every play. The "Latest" reset
+    // button still gets the user back to "show everything" with one
+    // tap.
+    final sliderMax = _sliderMax ?? first;
     final visible = chrono
         .where((p) => !p.timestampUtc.isAfter(sliderMax))
         .toList(growable: false);
@@ -355,8 +361,18 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
             setState(() => _sliderMax = _stepTo(chrono, sliderMax, 1));
             _refreshAnnotationsIfReady();
           },
+          onRwd5: () {
+            _pausePlayback();
+            setState(() => _sliderMax = _stepTo(chrono, sliderMax, -5));
+            _refreshAnnotationsIfReady();
+          },
+          onFwd5: () {
+            _pausePlayback();
+            setState(() => _sliderMax = _stepTo(chrono, sliderMax, 5));
+            _refreshAnnotationsIfReady();
+          },
           onTogglePlay: () => _togglePlayback(chrono),
-          onCycleSpeed: _cycleSpeed,
+          onPickSpeed: _pickSpeed,
         ),
       ],
     );
@@ -853,8 +869,14 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
       return;
     }
     if (chrono.length < 2) return;
-    if (_sliderMax != null &&
-        !_sliderMax!.isBefore(chrono.last.timestampUtc)) {
+    // Pressing play after playback ended (cursor at the last fix) or
+    // from a fresh-open state with no explicit cursor rewinds to the
+    // very first fix in the filter. Default cursor is also first now
+    // (see `_buildBody`), so this is the only place that needs the
+    // edge-case rewind when the user replayed once already.
+    final atEnd = _sliderMax != null &&
+        !_sliderMax!.isBefore(chrono.last.timestampUtc);
+    if (atEnd) {
       setState(() => _sliderMax = chrono.first.timestampUtc);
     }
     _startPlaybackTimer(chrono);
@@ -866,7 +888,12 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     final interval = playbackInterval(_basePlaybackStep, _playbackSpeed);
     _playbackTimer = Timer.periodic(interval, (_) {
       if (!mounted) return;
-      final current = _sliderMax ?? chrono.last.timestampUtc;
+      // Fallback to the EARLIEST fix when the slider has never been
+      // touched. The previous fallback was `chrono.last`, which made
+      // the first tick of a fresh play immediately bail out via the
+      // `!next.isAfter(current)` guard — exactly the "playback won't
+      // start" bug that motivated the "start at earliest" UX change.
+      final current = _sliderMax ?? chrono.first.timestampUtc;
       final next = _stepTo(chrono, current, 1);
       if (!next.isAfter(current)) {
         _pausePlayback();
@@ -884,8 +911,8 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     if (_playing) setState(() => _playing = false);
   }
 
-  void _cycleSpeed() {
-    final next = nextPlaybackSpeed(_playbackSpeed);
+  void _pickSpeed(double next) {
+    if (next == _playbackSpeed) return;
     setState(() => _playbackSpeed = next);
     if (_playing) {
       final pings =
@@ -1163,8 +1190,10 @@ class _TimeSlider extends StatelessWidget {
   final VoidCallback onJumpToStart;
   final VoidCallback onStepPrev;
   final VoidCallback onStepNext;
+  final VoidCallback onRwd5;
+  final VoidCallback onFwd5;
   final VoidCallback onTogglePlay;
-  final VoidCallback onCycleSpeed;
+  final ValueChanged<double> onPickSpeed;
 
   const _TimeSlider({
     required this.first,
@@ -1179,8 +1208,10 @@ class _TimeSlider extends StatelessWidget {
     required this.onJumpToStart,
     required this.onStepPrev,
     required this.onStepNext,
+    required this.onRwd5,
+    required this.onFwd5,
     required this.onTogglePlay,
-    required this.onCycleSpeed,
+    required this.onPickSpeed,
   });
 
   @override
@@ -1191,7 +1222,6 @@ class _TimeSlider extends StatelessWidget {
     final disabled = totalMs <= 0;
     final scheme = Theme.of(context).colorScheme;
     final fmt = DateFormat('MMM d, HH:mm');
-    final speedLabel = formatPlaybackSpeedLabel(playbackSpeed);
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
       color: scheme.surfaceContainerHighest.withValues(alpha: 0.4),
@@ -1235,6 +1265,11 @@ class _TimeSlider extends StatelessWidget {
                 onPressed: disabled ? null : onJumpToStart,
                 icon: const Icon(Icons.skip_previous),
               ),
+              _Jump5Button(
+                tooltip: 'Rewind 5 fixes',
+                icon: Icons.fast_rewind,
+                onPressed: disabled ? null : onRwd5,
+              ),
               IconButton(
                 tooltip: 'Previous fix',
                 visualDensity: VisualDensity.compact,
@@ -1252,18 +1287,148 @@ class _TimeSlider extends StatelessWidget {
                 onPressed: disabled ? null : onStepNext,
                 icon: const Icon(Icons.chevron_right),
               ),
+              _Jump5Button(
+                tooltip: 'Fast-forward 5 fixes',
+                icon: Icons.fast_forward,
+                onPressed: disabled ? null : onFwd5,
+              ),
               const SizedBox(width: 4),
-              TextButton(
-                onPressed: disabled ? null : onCycleSpeed,
-                style: TextButton.styleFrom(
-                  minimumSize: const Size(48, 32),
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                ),
-                child: Text(speedLabel),
+              _SpeedPickerButton(
+                current: playbackSpeed,
+                onPick: onPickSpeed,
+                disabled: disabled,
               ),
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// "Skip N pings" button with a small `5` badge stacked over the icon
+/// so the user can read at a glance how much each tap moves the
+/// cursor. We deliberately don't expose N as a setting yet — five is
+/// the right step for the typical 4-hour cadence (a full day's worth
+/// of context) but could be revisited if someone runs the 30 min
+/// cadence and the jump feels too short.
+class _Jump5Button extends StatelessWidget {
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback? onPressed;
+
+  const _Jump5Button({
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return IconButton(
+      tooltip: tooltip,
+      visualDensity: VisualDensity.compact,
+      onPressed: onPressed,
+      icon: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Icon(icon),
+          Positioned(
+            right: -6,
+            bottom: -4,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+              decoration: BoxDecoration(
+                color: scheme.primary,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                '5',
+                style: TextStyle(
+                  color: scheme.onPrimary,
+                  fontSize: 9,
+                  fontWeight: FontWeight.w700,
+                  height: 1,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Speed picker — replaces the prior "tap-to-cycle" chip with a direct
+/// `PopupMenuButton<double>` of every entry in [kPlaybackSpeeds]. One
+/// tap opens the menu; a second tap picks the target speed. The chip
+/// itself still shows the current speed (`2×`, `0.25×`, …) so the
+/// HUD reads the same as before when the menu is closed.
+class _SpeedPickerButton extends StatelessWidget {
+  final double current;
+  final ValueChanged<double> onPick;
+  final bool disabled;
+
+  const _SpeedPickerButton({
+    required this.current,
+    required this.onPick,
+    required this.disabled,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return PopupMenuButton<double>(
+      enabled: !disabled,
+      tooltip: 'Playback speed',
+      initialValue: current,
+      onSelected: onPick,
+      position: PopupMenuPosition.over,
+      itemBuilder: (ctx) => [
+        for (final s in kPlaybackSpeeds)
+          PopupMenuItem<double>(
+            value: s,
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 18,
+                  child: s == current
+                      ? Icon(Icons.check, size: 16, color: scheme.primary)
+                      : const SizedBox.shrink(),
+                ),
+                const SizedBox(width: 4),
+                Text(formatPlaybackSpeedLabel(s)),
+              ],
+            ),
+          ),
+      ],
+      child: Container(
+        constraints: const BoxConstraints(minWidth: 56, minHeight: 32),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: scheme.secondaryContainer,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        alignment: Alignment.center,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              formatPlaybackSpeedLabel(current),
+              style: TextStyle(
+                color: scheme.onSecondaryContainer,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 2),
+            Icon(
+              Icons.arrow_drop_down,
+              size: 18,
+              color: scheme.onSecondaryContainer,
+            ),
+          ],
+        ),
       ),
     );
   }

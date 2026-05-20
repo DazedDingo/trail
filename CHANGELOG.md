@@ -4,7 +4,16 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
-## [0.13.6+90] — 2026-05-20
+## [0.13.7+91] — 2026-05-20
+
+### Changed
+- **Speed picker is now a direct dropdown.** The chip that previously cycled through speeds on every tap (0.25× → 0.5× → 1× → … → 16× → 0.25×) is now a popup: tap it once, see every available speed in a menu with a checkmark on the current one, tap the target. No more six taps to go from 0.25× down to 16×.
+- **Playback now starts at the earliest fix in the filter.** Default cursor position when you open the map / slideshow is the first ping in the visible window — pressing play actually plays through the trail. Previously the default was the latest fix, so play had to first hit "Jump to start" which was easy to miss. The "Latest" reset button still gets the slider back to "show everything" with one tap.
+
+### Added
+- **Fast-forward + rewind ×5 buttons** flank the existing ±1 chevrons in the playback row. Each jump skips 5 pings at a time — on the default 4-hour cadence that's roughly a day of context per tap. Useful for scrubbing through a long trail without the slider's pixel-level precision or the ±1 step's tedium. Buttons clamp at the trail's start / end.
+
+
 
 ### Changed
 - **1× slideshow playback is responsive now.** The prefetch in 0.13.5 was downloading the bytes but decoding at the wrong size — every frame re-decoded from disk because the precache key didn't match the slideshow's `memCacheWidth: 320` render key. Wrapping precache in `ResizeImage(width: 320)` aligns the keys, so by the time the cursor lands on a frame the 320-wide bitmap is already in the image cache and paint is zero-work. The previous 0.13.5 prefetch effectively only saved the network round-trip; it didn't save the decode pass.
