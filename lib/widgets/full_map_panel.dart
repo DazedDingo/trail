@@ -107,6 +107,11 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   DateTime? _sliderMax;
   bool _initialFitDone = false;
 
+  /// Set the first time the body (with its MapLibreMap) is built. From
+  /// then on data-state changes never replace the map subtree — see the
+  /// comment in [build].
+  bool _mapShown = false;
+
   /// Optional explicit start/end filter; both null means "show every
   /// ping ever logged". When set, the time slider's range and the
   /// rendered layers are clamped to this window. Cleared by tapping
@@ -206,29 +211,61 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
       });
     }
 
-    return SizedBox(
-      height: widget.height,
-      child: pingsAsync.when(
+    // **The map is never swapped out for a spinner once it has been
+    // shown.** Pre-0.14 every cold date range flipped `pingsAsync.when`
+    // through `loading`, which disposed the MapLibreMap: 0.5–2 s of
+    // blank map, style re-parse, tile refetch and a camera fly before a
+    // single pin could draw — and the remount was what the old
+    // annotation bookkeeping leaned on, so a CACHED range (no remount)
+    // never rendered at all. Now the platform view, style, sources and
+    // layers all survive a range change; loading is a thin progress bar
+    // over the live map and an empty result is a chip, not a teardown.
+    final Widget child;
+    if (activeRegion == null) {
+      child = pingsAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(child: Text('Error: $e')),
-        data: (_) {
-          if (_snap.isEmpty) {
-            return const _EmptyState(
-              message: 'No fixes yet — trail will appear after a few pings.',
-            );
-          }
-          if (activeRegion == null) {
-            return const _EmptyState(
-              message:
-                  'Install an offline map region to see your trail. '
+        data: (_) => _EmptyState(
+          message: _snap.isEmpty
+              ? 'No fixes yet — trail will appear after a few pings.'
+              : 'Install an offline map region to see your trail. '
                   'Tap the layers icon → Install.',
-            );
-          }
-          return _buildBody(context, activeRegion, liveDotOn,
-              liveDotState.isLoading);
-        },
-      ),
-    );
+        ),
+      );
+    } else if (!_mapShown) {
+      // Very first load: nothing on screen worth preserving yet, so the
+      // classic spinner / empty-state placeholders still apply.
+      if (pingsAsync.hasError) {
+        child = Center(child: Text('Error: ${pingsAsync.error}'));
+      } else if (pings == null) {
+        child = const Center(child: CircularProgressIndicator());
+      } else if (_snap.isEmpty) {
+        child = const _EmptyState(
+          message: 'No fixes yet — trail will appear after a few pings.',
+        );
+      } else {
+        _mapShown = true;
+        child = _buildBody(
+          context,
+          activeRegion,
+          liveDotOn,
+          liveDotState.isLoading,
+          loading: pingsAsync.isLoading,
+          error: pingsAsync.error,
+        );
+      }
+    } else {
+      child = _buildBody(
+        context,
+        activeRegion,
+        liveDotOn,
+        liveDotState.isLoading,
+        loading: pingsAsync.isLoading,
+        error: pingsAsync.error,
+      );
+    }
+
+    return SizedBox(height: widget.height, child: child);
   }
 
   /// The controller we hold is dead or about to be. Never call this for
@@ -263,7 +300,9 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   /// Applied range — null means "no filter". The provider family key
   /// changes, the new list arrives (from cache or SQL), `build` notices
   /// the new identity and schedules an upload through the live
-  /// controller. Nothing about the map itself is reset here.
+  /// controller. Nothing about the map itself is reset here — the
+  /// previous range's pins are cleared from the live sources so they
+  /// can't sit there looking current while the new ones load.
   void _applyDateFilter(DateTimeRange? range) {
     if (!mounted) return;
     _pausePlayback();
@@ -272,22 +311,49 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
       _sliderMax = null;
       _initialFitDone = false;
       _calendarOpen = false;
+      // Drop the old snapshot so the slider / HUD don't describe the
+      // previous range while the new one is in flight.
+      _lastPings = null;
+      _snap = PinSnapshot.empty;
     });
     _invalidateUpload();
+    final c = _controller;
+    if (c != null && _styleReady) unawaited(_clearSources(c));
+  }
+
+  /// Empty both sources in place (two ~40-byte calls). Ordered on the
+  /// platform channel ahead of whatever the next upload sends.
+  Future<void> _clearSources(MapLibreMapController c) async {
+    try {
+      await c.editGeoJsonSource(_pinsSrc, emptyFeatureCollection);
+      await c.editGeoJsonSource(_segsSrc, emptyFeatureCollection);
+    } catch (e, st) {
+      developer.log('Clearing pin sources failed: $e',
+          name: 'trail-map', stackTrace: st);
+    }
   }
 
   Widget _buildBody(
     BuildContext context,
     TilesRegion region,
     bool liveDotOn,
-    bool liveDotLoading,
-  ) {
+    bool liveDotLoading, {
+    required bool loading,
+    required Object? error,
+  }) {
     final snap = _snap;
     final chrono = snap.chrono;
-    final first = chrono.first.timestampUtc;
-    final last = chrono.last.timestampUtc;
-    final sliderMax = effectiveSliderMax(_sliderMax, chrono);
-    final shown = visibleCount(snap.cols.tsMs, sliderMax.millisecondsSinceEpoch);
+    // An empty snapshot is a legitimate steady state now (range with no
+    // fixes, or a cold range still loading): the slider collapses to a
+    // disabled zero-width track and the map stays up.
+    final hasFixes = chrono.isNotEmpty;
+    final now = DateTime.now().toUtc();
+    final first = hasFixes ? chrono.first.timestampUtc : now;
+    final last = hasFixes ? chrono.last.timestampUtc : now;
+    final sliderMax = hasFixes ? effectiveSliderMax(_sliderMax, chrono) : now;
+    final shown = hasFixes
+        ? visibleCount(snap.cols.tsMs, sliderMax.millisecondsSinceEpoch)
+        : 0;
 
     return Column(
       children: [
@@ -317,7 +383,8 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
           open: _calendarOpen,
           currentRange: _dateFilter,
           now: DateTime.now(),
-          earliestPing: first,
+          earliestPing:
+              hasFixes ? first : now.subtract(const Duration(days: 365)),
           latestPing: last,
           onApply: _applyDateFilter,
           onClose: () {
@@ -327,9 +394,10 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
         Expanded(
           child: _slideshowMode
               ? SlideshowView(
-                  visibleFixes: chrono.sublist(0, shown),
+                  visibleFixes:
+                      hasFixes ? chrono.sublist(0, shown) : const <Ping>[],
                   sliderMax: sliderMax,
-                  hasAnyFixes: chrono.isNotEmpty,
+                  hasAnyFixes: hasFixes,
                 )
               : FutureBuilder<String?>(
                   future: _styleFuture,
@@ -337,7 +405,14 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
                     if (!style.hasData) {
                       return const Center(child: CircularProgressIndicator());
                     }
-                    return _buildMap(context, shown, style.data!, region);
+                    return _buildMap(
+                      context,
+                      shown,
+                      style.data!,
+                      region,
+                      loading: loading,
+                      error: error,
+                    );
                   },
                 ),
         ),
@@ -376,8 +451,10 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     BuildContext context,
     int shown,
     String styleJson,
-    TilesRegion region,
-  ) {
+    TilesRegion region, {
+    required bool loading,
+    required Object? error,
+  }) {
     final snap = _snap;
     final initial = shown > 0
         ? LatLng(snap.cols.lats[shown - 1], snap.cols.lons[shown - 1])
@@ -388,6 +465,10 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     return Stack(
       children: [
         _MapHost(
+          // Identity is the style's inputs and nothing else: a region or
+          // tile-server-port change legitimately needs a fresh map, a
+          // date-range / data change must not.
+          key: ValueKey('${region.path}|$_tileServerPort'),
           onMount: () => ++_mapEpoch,
           onUnmount: _onMapUnmounted,
           child: MapLibreMap(
@@ -437,6 +518,31 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
             child: _PlaybackHud(
               current: snap.chrono[shown - 1],
               previous: shown >= 2 ? snap.chrono[shown - 2] : null,
+            ),
+          ),
+        // Loading / empty / error states live ON the map now, never in
+        // place of it.
+        if (loading)
+          const Positioned(
+            left: 0,
+            right: 0,
+            top: 0,
+            child: LinearProgressIndicator(minHeight: 2),
+          ),
+        if (!loading && snap.isEmpty)
+          Positioned(
+            left: 48,
+            right: 48,
+            top: 12,
+            child: Center(
+              child: _MapChip(
+                icon: error != null
+                    ? Icons.error_outline
+                    : Icons.location_off_outlined,
+                text: error != null
+                    ? 'Couldn\'t load fixes: $error'
+                    : 'No fixes in this range',
+              ),
             ),
           ),
       ],
@@ -1014,6 +1120,7 @@ class _MapHost extends StatefulWidget {
   final Widget child;
 
   const _MapHost({
+    super.key,
     required this.onMount,
     required this.onUnmount,
     required this.child,
@@ -1494,6 +1601,41 @@ class _SpeedPickerButton extends StatelessWidget {
               Icons.arrow_drop_down,
               size: 18,
               color: scheme.onSecondaryContainer,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Small translucent status chip floated over the live map ("No fixes
+/// in this range", load errors). Replaces the pre-0.14 habit of
+/// swapping the whole map out for an `_EmptyState`.
+class _MapChip extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  const _MapChip({required this.icon, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.black.withValues(alpha: 0.6),
+      borderRadius: BorderRadius.circular(16),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14, color: Colors.white),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                text,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white, fontSize: 11),
+              ),
             ),
           ],
         ),
