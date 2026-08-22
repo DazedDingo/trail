@@ -336,7 +336,11 @@ class PmtilesArchive extends TileArchive {
         pmt.TileType.jpeg => 'jpg',
         pmt.TileType.webp => 'webp',
         pmt.TileType.avif => 'avif',
-        pmt.TileType.unknown => null,
+        // Wildcard on purpose: pubspec.lock is gitignored, so CI resolves
+        // whatever `pmtiles` 2.x is newest (2.2.0 added `mlt`), and an
+        // exhaustive switch broke the 0.15.0+97 build. Anything we don't
+        // name is "unknown" for display; it changes nothing about serving.
+        _ => null,
       };
 }
 
