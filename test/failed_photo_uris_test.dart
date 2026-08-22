@@ -115,4 +115,50 @@ void main() {
       expect(FailedPhotoUris.isFailed('https://persisted/old.jpg'), isFalse);
     });
   });
+
+  group('file:// URIs — user photos are session-only (0.14.1)', () {
+    const fileUri = 'file:///data/user/0/dev.trail/cache/a.jpg';
+
+    test('register(file://) is remembered in memory but never persisted',
+        () async {
+      await FailedPhotoUris.register(fileUri);
+      expect(FailedPhotoUris.isFailed(fileUri), isTrue);
+      expect(FailedPhotoUris.count, 1);
+      final p = await SharedPreferences.getInstance();
+      expect(
+        p.getStringList(_key) ?? const <String>[],
+        isNot(contains(fileUri)),
+      );
+    });
+
+    test('a mixed batch persists only the non-file entries', () async {
+      await FailedPhotoUris.register(fileUri);
+      await FailedPhotoUris.register('https://x/dead.jpg');
+      final p = await SharedPreferences.getInstance();
+      expect(p.getStringList(_key), ['https://x/dead.jpg']);
+      expect(FailedPhotoUris.count, 2);
+    });
+
+    test('persisted file:// entries (pre-0.14.1 Image.asset bug) are purged '
+        'on preload and the list rewritten once', () async {
+      FailedPhotoUris.resetForTest();
+      SharedPreferences.setMockInitialValues({
+        _key: <String>[fileUri, 'https://x/dead.jpg', 'file:///b.jpg'],
+      });
+      await FailedPhotoUris.preload();
+      expect(FailedPhotoUris.isFailed(fileUri), isFalse);
+      expect(FailedPhotoUris.isFailed('file:///b.jpg'), isFalse);
+      expect(FailedPhotoUris.isFailed('https://x/dead.jpg'), isTrue);
+      expect(FailedPhotoUris.count, 1);
+      final p = await SharedPreferences.getInstance();
+      expect(p.getStringList(_key), ['https://x/dead.jpg']);
+    });
+
+    test('clearAll forgets session-only file:// entries too', () async {
+      await FailedPhotoUris.register(fileUri);
+      await FailedPhotoUris.clearAll();
+      expect(FailedPhotoUris.isFailed(fileUri), isFalse);
+      expect(FailedPhotoUris.count, 0);
+    });
+  });
 }

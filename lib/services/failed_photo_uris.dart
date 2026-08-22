@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'photo_uri.dart';
+
 /// Cross-render denylist of photo URLs that `cached_network_image` has
 /// reported as failed to load. Persisted via SharedPreferences so the
 /// failure survives an app restart — without that, a broken Wikimedia
@@ -12,6 +14,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// (hotlink protection, 404, corrupt file) is persistent, so retrying
 /// just costs bandwidth + re-shows the broken icon for one frame
 /// before failing again.
+///
+/// **`file://` URIs (the user's own photos) are session-only.** They
+/// are remembered in memory so a missing file doesn't re-fail on every
+/// rebuild, but never persisted: a picker-cache purge is the only real
+/// failure mode and the file may well be back (or the user re-attaches
+/// it) by the next launch. Any `file://` entry found in prefs is a
+/// leftover of the pre-0.14.1 bug where `Image.asset` failed *every*
+/// user photo into this list — [preload] purges them once so those
+/// photos render again without the user touching "Retry broken photos".
 ///
 /// The set is loaded by [preload] — kicked off by `main()` right after
 /// the first frame since 0.14.1, no longer on the startup critical path
@@ -45,9 +56,19 @@ class FailedPhotoUris {
   static Future<void> _load() async {
     try {
       final p = await SharedPreferences.getInstance();
+      final persisted = p.getStringList(_key) ?? const <String>[];
+      final kept = persisted
+          .where((u) => !isLocalFileUri(u))
+          .toList(growable: false);
       // Merge rather than assign: anything registered while this read
       // was in flight must survive it.
-      _cache.addAll(p.getStringList(_key) ?? const <String>[]);
+      _cache.addAll(kept);
+      if (kept.length != persisted.length) {
+        // One-time purge of `file://` entries written by the 0.14.0
+        // `Image.asset` bug (see the class doc). Rewritten so it doesn't
+        // repeat on every launch.
+        await p.setStringList(_key, kept);
+      }
     } catch (_) {
       _preloading = null;
       rethrow;
@@ -63,12 +84,15 @@ class FailedPhotoUris {
   }
 
   /// Record [uri] as failed. Persists on the same call so the failure
-  /// survives a restart. Idempotent; duplicate registers are cheap
-  /// (no prefs write).
+  /// survives a restart — except `file://` URIs, which are kept in
+  /// memory only. Idempotent; duplicate registers are cheap (no prefs
+  /// write).
   static Future<void> register(String uri) async {
     if (uri.isEmpty) return;
     await preload();
     if (!_cache.add(uri)) return;
+    // Session-only for the user's own photos — see the class doc.
+    if (isLocalFileUri(uri)) return;
     // Cap by dropping the oldest. Insertion order in a LinkedHashSet
     // gives us the right semantics for free.
     if (_cache.length > _capacity) {
@@ -85,7 +109,10 @@ class FailedPhotoUris {
 
   static Future<void> _persist() async {
     final p = await SharedPreferences.getInstance();
-    await p.setStringList(_key, _cache.toList(growable: false));
+    await p.setStringList(
+      _key,
+      _cache.where((u) => !isLocalFileUri(u)).toList(growable: false),
+    );
   }
 
   /// Used by Settings "Retry broken photos" — clears the denylist so
