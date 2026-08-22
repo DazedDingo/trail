@@ -1,6 +1,6 @@
 # Google Maps Timeline import — feasibility + plan
 
-**Date:** 2026-08-22 · **Status:** plan only (researched, not built). Sources were checked on that date; Google publishes no schema, so re-verify the format before implementing.
+**Date:** 2026-08-22 · **Status:** plan only (researched, not built). Sources were checked on that date; Google publishes no schema, so re-verify the format before implementing. Map-coverage design (§ Commander's considerations 3) completed with measured sizing the same day.
 
 ## Verdict
 
@@ -87,16 +87,47 @@ Today only Great Britain region builds exist, so anything outside the active reg
 ### 3. Map coverage: detailed where you've been, coarse everywhere else
 Goal: the app owns its coverage decisions from the ping history — a world-level overview so every pin has context, plus high-zoom detail only around places actually visited, fetched efficiently (small, resumable, explicit/opt-in network use — the product is offline-only by default).
 
-Candidate architectures under evaluation (research in flight; this section is filled in once the numbers are in):
-1. **MapLibre offline regions** from a remote HTTP tile source — use the engine's own offline manager to pull a bbox × zoom range per visited cluster; simplest code, but ties the style to a remote source and the loopback PMTiles server is bypassed.
-2. **App-side PMTiles range fetcher** — read a remote PMTiles planet/regional archive with HTTP Range requests, write the fetched tiles into a personal "coverage" archive on device, and have the existing `LocalTileServer` serve from it with fallback to the active region and to a world-overview (z0–6/7) archive. Keeps the offline-first design and the existing renderer; more code.
-3. **Dev-box / VPS job** — a script reads the ping history (or the Timeline export), runs `pmtiles extract --bbox … --maxzoom 14` per visited cluster plus a world `--maxzoom 7` overview against a planet archive, and ships the result as region files Trail already knows how to install. Zero new app code beyond multi-region serving; manual/cron step off-device.
+**Research completed 2026-08-22:** empirical sizing (`pmtiles extract --dry-run` against the 2026-08-22 Protomaps daily planet build — 137.5 GB, z0–15, gzip MVT; dry-run sizes verified byte-exact against a real extract), a maplibre_gl 0.26.0/0.27.0 offline-API audit, and a PMTiles v3 spec review.
 
-Sizing intuition to be confirmed: a 10 × 10 km town at z12–14 is a few MB of vector tiles; a world overview at z0–6 is tens of MB; so "everywhere I've been in detail + the world coarse" is plausibly a few hundred MB total, far below the 1.5 GB UK z14 build.
+#### Measured sizes
+
+| Extract | Tiles | Size |
+|---|---|---|
+| World overview, z0–6 | 3 400 | **45 MB** |
+| World overview, z0–7 | 10 667 | 187 MB (z7 alone ≈ 142 MB — not worth it) |
+| Bath, ~10 × 10 km town, z10–14 | 75 | **1.7 MB** (verified real download) |
+| London, ~40 × 40 km metro, z10–14 | 727 | 33 MB |
+| Lisbon, holiday-city bbox, z10–14 | 154 | 6.5 MB |
+| Bath z15 top-up | 182 | +1.6 MB (+64 %) — each zoom roughly doubles a file |
+
+"World coarse + every visited cluster detailed" ≈ 45 MB + ~2 MB per town + ~35 MB per major metro — realistically **50–150 MB total**, ~30× below the 1.5 GB GB z14 build and far under the old "few hundred MB" guess. A town extract completes in ~6 s over 20–40 HTTP range requests, and dry-run sizing is exact, so any UI/script can preview true numbers before downloading. Clusters extract at `--minzoom 10` (the overview owns z0–6; z7–9 gap tiles overzoom from z6, which is how rendering already works — the style's source maxzoom is 13).
+
+#### Architecture verdicts
+
+1. **MapLibre offline-region manager — rejected.** `downloadOfflineRegion` is style-*URL*-driven (Trail passes inline `styleString`; there is no URL) and its cache is keyed by exact resource URL — `pmtiles://` sources fail natively, and the loopback binds a random port per launch so every cached key dies on restart. Using it means standing up a remote style + tile host (recurring metered cost) and abandoning sideloaded archives, the loopback, and the offline-only stance; plus one opaque `mbgl-offline.db`, a default 6 000-tile limit that *deletes a region mid-download*, and no cross-restart resume. 0.27.0 adds export/merge conveniences but changes none of this. Wholesale replacement, not composition.
+2. **App-side PMTiles range fetcher — viable, deferred to Phase C.** `package:pmtiles` 2.2.0 (pure Dart, spec v3.6, verified publisher) does remote Range reads + batched tile fetch; per-tile cost amortises well (header+root dir = one 16 KB read per archive; Hilbert-ordered ids mean a bbox touches a handful of leaf dirs). But it re-implements on the phone what `pmtiles extract` already does on the VPS (~4–6 days of Dart incl. an HTTP retry/resume subsystem in an offline-first app), and Protomaps **forbids hotlinking daily builds as a live origin** (dated URLs 404 within a week), so it also needs a self-hosted planet: ~120 GB ≈ $2–3/mo on R2/Oracle Object Storage. Cost flag: the only option with a recurring bill.
+3. **VPS extract job — chosen (Phase B).** ~100-line script, $0/mo, always-fresh daily OSM, zero new app-side fetch code (whole-archive `TileDownloader` + regions install already exist).
+
+**Repo fact that shapes everything:** the only *working* local render path today is `.mbtiles` over the loopback server — `.pmtiles` regions fall through to `pmtiles://file://…`, which MapLibre Native 13.0.x silently fails on (`tile_server_provider.dart:8-16`, `trail_style.dart:62-63`). `pmtiles extract` emits `.pmtiles` and go-pmtiles converts only MBTiles→PMTiles, not back. Rather than converting on the VPS, teach the loopback to read `.pmtiles` via `package:pmtiles` (~1 day): it un-breaks local pmtiles regions generally, makes extract output directly installable, and is the exact dependency + tile-id plumbing Phase C would reuse. On-device the coverage store stays **MBTiles-schema SQLite** if Phase C ever writes one — PMTiles is append-hostile (fixed header, whole-directory re-encode, sections move on growth), while `(z,x,y)`-keyed SQLite gives dedupe and resume for free via `INSERT OR IGNORE`; the server already passes the gzip'd MVT blobs through verbatim.
+
+#### Plan
+
+- **Phase A — app: multi-archive loopback (~2 days, Dart-only).** `LocalTileServer` opens an ordered archive list and `_serveTile` falls through on miss: coverage extracts → active region → world overview. Style JSON untouched (still one source URL). Add the `.pmtiles` read path via `package:pmtiles`; `TilesService` grows role tags (overview / coverage / region) next to the active key; regions screen assigns roles. Unit-testable throughout (ffi pattern, CLAUDE.md gotcha 8); needs one on-device soak — loopback/MapLibre issues have historically only surfaced on device.
+- **Phase B — VPS: coverage extract job (~1 day).** Script: cluster ping history (from a Trail export, or later the Timeline import file) into visit bboxes — `StatsService.detectTrips` logic + padding + overlap-merge — then per cluster `pmtiles extract --bbox … --minzoom 10 --maxzoom 14`, plus one world `--maxzoom 6` overview, against that day's Protomaps build; publish where `TileDownloader`/sideload can reach. Rerun on demand after trips or imports.
+- **Phase C — optional, later: in-app fetcher.** Only if hand-feeding files grates. Reuses Phase A's server/store and the tile-id math; new work is the fetch loop (explicit opt-in, wifi-gated — the product stays offline-by-default) plus the self-hosted planet.
+
+Ordering: Phases A + B ship **before or with the 0.16.0 Timeline import** so imported non-UK points land on real tiles, per the blocker in § 2 above.
 
 ## Decisions for the commander
 
+Import:
 - Default thinning preset (recommend Normal: 15 min / 250 m).
 - Whether imported rows count in the stats heatmap at all, or only on the map.
 - Whether to bother with the legacy Takeout formats (only useful if an old zip exists).
 - Release slot: after 0.14.x perf work → 0.16.0.
+
+Map coverage (§ 3 above):
+- World overview zoom: **z0–6 / 45 MB (recommended)** vs z0–7 / 187 MB.
+- Cluster detail maxzoom: **14 (recommended)** vs 15 (+~64 % per cluster).
+- Phase A slot: fold into **0.15.0** alongside the maplibre_gl 0.27.0 upgrade (both touch the map stack — one soak covers both) vs its own release.
+- Where the VPS job publishes coverage files: private GitHub release asset vs Oracle object storage vs plain scp-sideload.
