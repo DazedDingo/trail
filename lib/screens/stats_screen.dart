@@ -377,7 +377,7 @@ class _TripCard extends ConsumerWidget {
     final theme = Theme.of(context);
     final fmt = DateFormat.yMMMd();
     final geoAsync = ref.watch(approxLocationProvider(
-      (lat: trip.centroidLat, lon: trip.centroidLon),
+      geocodeKey(trip.centroidLat, trip.centroidLon),
     ));
     final start = trip.startUtc.toLocal();
     final end = trip.endUtc.toLocal();

@@ -323,7 +323,7 @@ class _LastPingDetailLine extends ConsumerWidget {
       );
     }
     final approx = ref
-        .watch(approxLocationProvider((lat: lat, lon: lon)))
+        .watch(approxLocationProvider(geocodeKey(lat, lon)))
         .asData
         ?.value;
     final home = ref.watch(homeLocationProvider).asData?.value;
@@ -716,7 +716,7 @@ class _PingTile extends ConsumerWidget {
     final hasFix = ping.lat != null && ping.lon != null;
     final approx = hasFix
         ? ref
-            .watch(approxLocationProvider((lat: ping.lat!, lon: ping.lon!)))
+            .watch(approxLocationProvider(geocodeKey(ping.lat!, ping.lon!)))
             .asData
             ?.value
         : null;

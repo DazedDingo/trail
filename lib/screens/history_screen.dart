@@ -72,11 +72,12 @@ class _HistoryTile extends ConsumerWidget {
         ? '${ping.lat!.toStringAsFixed(5)}, ${ping.lon!.toStringAsFixed(5)}'
         : (ping.note ?? ping.source.dbValue);
 
-    // Only geocode rows that carry a real fix. The FutureProvider.family is
-    // keyed on (lat, lon) so repeated pings at the same spot — the common
-    // case at 4h cadence — are cache hits and never re-request.
+    // Only geocode rows that carry a real fix. The provider family is
+    // keyed on the 4-dp-rounded cell (`geocodeKey`, ~11 m) so repeated
+    // pings at the same spot — the common case at 4h cadence, GPS jitter
+    // included — share one member and never re-request.
     final approx = hasFix
-        ? ref.watch(approxLocationProvider((lat: ping.lat!, lon: ping.lon!)))
+        ? ref.watch(approxLocationProvider(geocodeKey(ping.lat!, ping.lon!)))
         : const AsyncValue<String?>.data(null);
 
     return ListTile(

@@ -6,6 +6,8 @@ import '../db/ping_dao.dart';
 import '../models/ping.dart';
 import '../services/geocoding_service.dart';
 
+export '../services/geocoding_service.dart' show GeocodeKey, geocodeKey;
+
 /// All four providers share one `Database` handle (see [TrailDatabase.shared]).
 /// Opening four SQLCipher connections in parallel on the home-screen build
 /// raced Keystore key derivation + schema create on first install, which
@@ -112,14 +114,28 @@ final geocodingServiceProvider = Provider<GeocodingService>(
   (ref) => GeocodingService(),
 );
 
-/// Reverse-geocoded label for ([lat], [lon]) — "Cambridge, MA" or similar.
+/// Reverse-geocoded label for a coordinate — "Cambridge, MA" or similar.
 /// Returns `null` when the system geocoder has nothing (no cache, no net).
-/// Keyed by a rounded string so small GPS jitter doesn't blow out the cache
-/// on every re-fetch.
+///
+/// Keyed on [GeocodeKey] — lat/lon rounded to 4 dp (~11 m) as an exact
+/// int pair, built with `geocodeKey(lat, lon)` — so the GPS jitter between
+/// consecutive pings at the same spot maps to ONE member, not one per
+/// ping. (Pre-0.14.1 the key was the raw double pair despite this comment
+/// claiming rounding: a 200-row list was up to 200 platform calls on
+/// every mount.)
+///
+/// `autoDispose` with `keepAlive()` on success only: a resolved label is
+/// kept for the session (place names don't change), a `null` is released
+/// once unwatched so the next mount retries — "no label" is usually
+/// "offline right now". Underneath, `GeocodingService` holds a 512-entry
+/// LRU on the same key, so even a released member re-mounting is a memory
+/// hit rather than a geocoder round-trip.
 final approxLocationProvider =
-    FutureProvider.family<String?, ({double lat, double lon})>(
-  (ref, coords) async {
+    FutureProvider.autoDispose.family<String?, GeocodeKey>(
+  (ref, key) async {
     final svc = ref.watch(geocodingServiceProvider);
-    return svc.reverseLookup(coords.lat, coords.lon);
+    final label = await svc.reverseLookup(key.lat, key.lon);
+    if (label != null) ref.keepAlive();
+    return label;
   },
 );

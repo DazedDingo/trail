@@ -30,7 +30,7 @@ class RankedPlace {
 ///
 ///   1. Over-fetches 30 raw buckets (so the post-dedupe list still
 ///      has enough rows to fill 10 leaderboard slots).
-///   2. Reverse-geocodes each in parallel.
+///   2. Reverse-geocodes them with at most 4 platform calls in flight.
 ///   3. Merges buckets sharing a label — sums counts, keeps the
 ///      centroid of the largest contributing bucket so the "open
 ///      this place on the map" affordance still lands somewhere
@@ -40,9 +40,10 @@ class RankedPlace {
 ///      duplicated to the user.
 ///
 /// Re-evaluated whenever [allPingsProvider] invalidates, which is
-/// rare (only on manual ping-now / archive). The geocoder calls are
-/// the slow step; with 30 buckets they typically resolve in a few
-/// hundred ms total since most are already cached locally.
+/// rare (manual ping-now / panic / archive / pin delete). The geocoder
+/// calls are the slow step; with 30 buckets they typically resolve in a
+/// few hundred ms total, and a re-evaluation is almost entirely hits on
+/// `GeocodingService`'s LRU.
 final topPlacesProvider = FutureProvider<List<RankedPlace>>((ref) async {
   const fetchSize = 30;
   const displaySize = 10;
@@ -53,11 +54,13 @@ final topPlacesProvider = FutureProvider<List<RankedPlace>>((ref) async {
 
   final geo = ref.watch(geocodingServiceProvider);
 
-  // Geocode in parallel — the system geocoder is per-call latency
-  // bound, so resolving 30 sequentially would noticeably stall the
-  // stats screen on the first paint.
-  final labels = await Future.wait(
-    raw.map((b) => geo.reverseLookup(b.lat, b.lon)),
+  // Geocode in parallel but BOUNDED — the system geocoder is per-call
+  // latency bound, so resolving 30 sequentially would stall the stats
+  // screen on first paint, yet firing all 30 at once produced "Service
+  // not Available" bursts on some OEM geocoders (PERF_PLAN §3 #2). Four
+  // in flight hides the latency without tripping them.
+  final labels = await geo.reverseLookupAll(
+    [for (final b in raw) (lat: b.lat, lon: b.lon)],
   );
 
   final byLabel = <String, RankedPlace>{};

@@ -4,12 +4,14 @@ import 'dart:io';
 import 'package:flutter/material.dart' show DateTimeRange;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:geocoding/geocoding.dart' show Placemark;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:sqlite3/open.dart';
 import 'package:trail/db/database.dart';
 import 'package:trail/db/ping_dao.dart';
 import 'package:trail/models/ping.dart';
 import 'package:trail/providers/pings_provider.dart';
+import 'package:trail/services/geocoding_service.dart';
 
 /// Provider-level wiring for the pings reads. Runs against an in-memory
 /// `sqflite_common_ffi` DB injected through `TrailDatabase.useSharedForTest`
@@ -172,6 +174,75 @@ void main() {
         [51.1, 51.2, 51.3, 51.4],
       );
       sub.close();
+    });
+  });
+
+  group('approxLocationProvider', () {
+    ProviderContainer withLookup(
+      Future<List<Placemark>> Function(double, double) lookup,
+    ) {
+      final c = ProviderContainer(overrides: [
+        geocodingServiceProvider
+            .overrideWithValue(GeocodingService(lookup: lookup)),
+      ]);
+      addTearDown(c.dispose);
+      return c;
+    }
+
+    Iterable<ProviderBase<Object?>> alive(ProviderContainer c) =>
+        c.getAllProviderElements().map((e) => e.origin);
+
+    test('jittered coordinates in one cell are ONE member and one lookup',
+        () async {
+      var calls = 0;
+      final c = withLookup((_, __) async {
+        calls++;
+        return [Placemark(locality: 'Bristol', country: 'England')];
+      });
+      final a = approxLocationProvider(geocodeKey(51.45450, -2.58790));
+      final b = approxLocationProvider(geocodeKey(51.45452, -2.58793));
+      expect(a, equals(b));
+      expect(await c.read(a.future), 'Bristol, England');
+      expect(await c.read(b.future), 'Bristol, England');
+      expect(calls, 1);
+      expect(alive(c).where((p) => p.from == approxLocationProvider), hasLength(1));
+    });
+
+    test('a resolved label is kept alive after its last listener leaves',
+        () async {
+      var calls = 0;
+      final c = withLookup((_, __) async {
+        calls++;
+        return [Placemark(locality: 'Bristol', country: 'England')];
+      });
+      final member = approxLocationProvider(geocodeKey(51.4545, -2.5879));
+      final sub = c.listen(member, (_, __) {});
+      expect(await c.read(member.future), 'Bristol, England');
+      sub.close();
+      await c.pump();
+      expect(alive(c), contains(member));
+      expect(await c.read(member.future), 'Bristol, England');
+      expect(calls, 1);
+    });
+
+    test('a null result is released once unwatched and retried on the '
+        'next watch', () async {
+      var calls = 0;
+      final c = withLookup((_, __) async {
+        calls++;
+        return const [];
+      });
+      final member = approxLocationProvider(geocodeKey(0, 0));
+      final sub = c.listen(member, (_, __) {});
+      expect(await c.read(member.future), isNull);
+      sub.close();
+      await c.pump();
+      expect(alive(c), isNot(contains(member)));
+
+      final again = c.listen(member, (_, __) {});
+      expect(await c.read(member.future), isNull);
+      expect(calls, 2);
+      again.close();
     });
   });
 }
