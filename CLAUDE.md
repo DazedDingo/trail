@@ -232,4 +232,5 @@ See `git log --oneline -20` for recent pattern.
 ## Related Docs
 
 - **`docs/PLAN.md`:** full design, battery budget, phase breakdown, open questions, confirmed decisions (19 total).
+- **`docs/PERF_PLAN.md`:** 2026-08-22 performance analysis + phased fix plan. Root cause of the slow multi-year pin load (per-pin `addCircle` is Θ(N²) in `maplibre_gl` 0.26.0, map remount on range change, `_controller = null` bug on cached ranges) and 22 ranked app-wide improvements. Read it before touching `full_map_panel.dart` rendering.
 - **`README.md`:** project summary, planned stack.
