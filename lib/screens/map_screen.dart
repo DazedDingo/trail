@@ -53,7 +53,7 @@ class MapScreen extends ConsumerWidget {
                 title: 'Pin colours',
                 body:
                     'Red = current fix (slider tip). Amber = previous fix. '
-                    'Teal = earlier fixes. The blue dot is your live '
+                    'Teal = earlier fixes, dimmer the older they are. The blue dot is your live '
                     'location from Android — toggle it via the my-location '
                     'icon in the control row.',
               ),

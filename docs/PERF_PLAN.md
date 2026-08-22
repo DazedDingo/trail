@@ -1,6 +1,6 @@
 # Trail performance plan — map pin loading + app-wide improvements
 
-**Date:** 2026-08-22 · **Baseline:** 0.13.10+94 (`adaa942`) · **Status:** plan only, nothing implemented yet.
+**Date:** 2026-08-22 · **Baseline:** 0.13.10+94 (`adaa942`) · **Status:** M1–M3 shipped in **0.14.0+95** (commits `b228935`, `115eed3`, `903a38e`, 2026-08-22; see "Implementation notes" under §2). M4, M5 and the §3 list are still pending.
 All `file:line` references are against that commit.
 
 ---
@@ -158,6 +158,13 @@ Details / decisions:
 ### Phase M5 — `maplibre_gl` 0.27.0 upgrade · effort S, separate commit
 
 Latest on pub.dev is 0.27.0. Relevant: large GeoJSON payloads encoded off the UI thread (#366) — redundant once M1 uses `editGeoJsonSource` + `Isolate.run`, but it also fixes the Android `maxzoom` key mismatch on GeoJSON sources, makes `queryRenderedFeaturesInRect` honour its `filter`, adds feature-state on Android, `clusterMinPoints`, and `MapLibreMap.preWarm()` (170–480 ms off first map on Android). Breaking: style content must be (re)added inside `onStyleLoadedCallback` — M1 already does that; `SourceProperties.copyWith` → named params. Do it after M1 lands, not before.
+
+### Implementation notes (0.14.0+95)
+
+- Helpers live in `lib/services/map/pin_geojson.dart` (34 unit tests). Source/layer ids: `trail-pins-src`, `trail-segs-src`, `trail-pins-lyr`, `trail-path-lyr`, `trail-heatmap-lyr`.
+- Deviations from the sketch above: taps use `onMapClick` + `queryRenderedFeaturesInRect` with `enableInteraction: false` (an interactive layer's direct hit suppresses `onMapClick` and would defeat the 24 dp fat-finger box); the heatmap layer reads the pins source with its own `setFilter` (`addHeatmapLayer` has no `filter` param); uploads are generation-guarded rather than routed through the old single-flight loop; below 256 fixes the GeoJSON is built inline (isolate spawn costs more than the build); `effectiveSliderMax` (null ⇒ last) landed in M1 because M1 needed one cursor definition. The `AnimatedSize` collapse of the filter panel (M2 sub-item) was left alone.
+- **Review finding (fixed before release):** the sketch above filters on `['get','ts']` with epoch-ms literals. That is wrong on Android — `Expression.Converter.convertToValue` narrows every numeric literal to float32 (`getAsFloat()`), so a ~1.76e12 ms bound is off by up to ±65 s (ulp 131 072 ms), hiding the head pin on ~50 % of slider positions and collapsing interpolate stops for windows < 131 s. Shipped design: every feature carries an ordinal `i`; the window is `['<=', ['get','i'], n-1]` with `n = visibleCount(...)`, head/prev/age-ramp are keyed on `i`, and a unit test asserts all emitted literals are float32-exact. Also from review: `dragEnabled: false` (otherwise Android applies `withSynchronousUpdate(true)` to every GeoJSON source and `editGeoJsonSource` parses on the render thread), and an upload whose `editGeoJsonSource` returns `false` now retries on the next trigger. Reviewer confirmed: `setLayerProperties` re-sends every paint prop the layer relies on (nulls reset to default natively, `visibility` null is ignored); tap coordinates are device px on both sides (pad × dpr is right); `properties.id` arrives as int; sources are always added before the first edit; generation guards hold after every await.
+- Device-only verification (cannot run in `flutter_test`): the `case`/`interpolate` pin style renders; the head pin is present at every slider position incl. playback at 16×; tap ~20 dp off a pin opens it; `editGeoJsonSource` returns true after every style load; pins restored after returning from picture mode; multi-year upload doesn't freeze the map.
 
 ### Expected outcome
 

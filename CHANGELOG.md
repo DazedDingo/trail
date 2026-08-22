@@ -4,6 +4,23 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.14.0+95] — 2026-08-22
+
+### Fixed
+- **Multi-year date ranges load instantly instead of drawing pins one by one for minutes.** Every pin used to be added to the map with its own platform call, and the map plugin re-sends *every pin so far* on each call — so a year of fixes (~2 200 at the default 4-hour cadence) cost ~2.4 million pin serialisations and three years cost ~25 million. Pins now go to the map once, as a single native layer, and the time slider just tells the map which ones to show. Same data, same look, constant cost whether you have a week or five years of history.
+- **Re-selecting a date range you'd already used showed stale pins (or none).** The panel forgot its map controller on every filter change but only got a new one when the map was rebuilt from scratch — which didn't happen for a range that was already cached. The controller is kept now.
+- **The "fixes shown" counter could disagree with what was on the map** after tapping "Latest" or toggling the path / heatmap. One source of truth for the slider position now.
+
+### Changed
+- **The map no longer goes blank and rebuilds when you change the date range.** Previously each new range tore down the map view, re-parsed the style, re-fetched visible tiles and flew the camera — half a second to two seconds of white before the first pin. The map stays put; a thin progress bar shows while the new range loads, and the camera snaps (rather than animates) to the new fixes.
+- **Opening the map or changing the range now shows every fix in the range** (the cursor starts at the latest fix; 0.13.7 started it at the earliest so that Play would run from the beginning). Play still starts from the earliest fix — pressing it with the cursor at the end rewinds first — so nothing is lost, and a freshly picked range no longer greets you with a single pin. Picture mode likewise opens on the latest photo.
+- **Slider scrubbing and playback are smoother.** A slider tick no longer rebuilds the whole map panel; only the slider and the counter redraw, and the visible-window maths is a binary search instead of a full scan. Playback's fastest tick is now 33 ms (two frames) — nothing faster was visible anyway.
+- Pin tap targets keep the 0.13.9 fat-finger radius (hit-testing now queries the map layer in a 24 dp box around the tap and picks the nearest pin).
+- **Earlier fixes now fade with age.** Pins ramp from a dimmed teal (oldest in the window) to full teal (just behind the cursor); the red head and amber previous pin are unchanged. The map help text describes the ramp.
+
+### Removed
+- The unused `TrailMap` widget (superseded by the full map panel since 0.10.13) and its test.
+
 ## [0.13.10+94] — 2026-05-20
 
 ### Changed
