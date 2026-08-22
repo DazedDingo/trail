@@ -41,11 +41,18 @@ void main() {
           const Duration(milliseconds: 350));
     });
 
-    test('2× halves the interval, 16× scales by 16', () {
+    test('2× halves the interval, 8× scales by 8', () {
       expect(playbackInterval(baseStep, 2.0),
           const Duration(milliseconds: 175));
+      expect(playbackInterval(baseStep, 8.0),
+          const Duration(milliseconds: 44));
+    });
+
+    test('16× on the 350 ms base step hits the 33 ms floor', () {
+      // 350 / 16 ≈ 22 ms — below what a setFilter round-trip can apply
+      // per frame, so it is clamped (0.14.0 raised the floor from 16).
       expect(playbackInterval(baseStep, 16.0),
-          const Duration(milliseconds: 22));
+          const Duration(milliseconds: 33));
     });
 
     test('0.5× doubles, 0.25× quadruples — within the clamp', () {
@@ -55,10 +62,10 @@ void main() {
           const Duration(milliseconds: 1400));
     });
 
-    test('clamps the floor at one display frame (16 ms)', () {
-      // Speed so high the math would compute < 16 ms — clamp must catch it.
+    test('clamps the floor at two display frames (33 ms)', () {
+      // Speed so high the math would compute < 33 ms — clamp must catch it.
       expect(playbackInterval(baseStep, 1000.0),
-          const Duration(milliseconds: 16));
+          const Duration(milliseconds: 33));
     });
 
     test('clamps the ceiling at 4 s — slow speeds on tiny base steps', () {

@@ -104,7 +104,21 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   /// `addHeatmapLayer`; tracked so we don't add twice / remove a ghost.
   bool _heatmapMounted = false;
 
-  DateTime? _sliderMax;
+  /// The slider cursor. A `ValueNotifier` rather than plain state so a
+  /// tick (drag, step, playback) rebuilds only the slider, the HUD and
+  /// the slideshow frame via `ValueListenableBuilder` — never the whole
+  /// panel, and never the `MapLibreMap` subtree. The map itself learns
+  /// about ticks through [_scheduleSync] → `setFilter` only. `null`
+  /// means "show everything"; see `effectiveSliderMax`.
+  final ValueNotifier<DateTime?> _sliderMaxN = ValueNotifier<DateTime?>(null);
+  DateTime? get _sliderMax => _sliderMaxN.value;
+
+  /// Coalesces [_scheduleSync] calls to at most one platform sync per
+  /// frame. A 120 Hz slider drag otherwise fires setFilter faster than
+  /// the renderer can apply it — the calls are ordered and idempotent,
+  /// but there is no point queueing work the next frame will overwrite.
+  bool _syncScheduled = false;
+
   bool _initialFitDone = false;
 
   /// Set the first time the body (with its MapLibreMap) is built. From
@@ -173,6 +187,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   @override
   void dispose() {
     _playbackTimer?.cancel();
+    _sliderMaxN.dispose();
     super.dispose();
   }
 
@@ -308,7 +323,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     _pausePlayback();
     setState(() {
       _dateFilter = range;
-      _sliderMax = null;
+      _sliderMaxN.value = null;
       _initialFitDone = false;
       _calendarOpen = false;
       // Drop the old snapshot so the slider / HUD don't describe the
@@ -350,10 +365,15 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     final now = DateTime.now().toUtc();
     final first = hasFixes ? chrono.first.timestampUtc : now;
     final last = hasFixes ? chrono.last.timestampUtc : now;
-    final sliderMax = hasFixes ? effectiveSliderMax(_sliderMax, chrono) : now;
-    final shown = hasFixes
-        ? visibleCount(snap.cols.tsMs, sliderMax.millisecondsSinceEpoch)
+
+    // Per-tick values are derived INSIDE the ValueListenableBuilders
+    // below; this pair only seeds the map's initial camera target.
+    DateTime cursorFor(DateTime? selected) =>
+        hasFixes ? effectiveSliderMax(selected, chrono) : now;
+    int shownFor(DateTime cursor) => hasFixes
+        ? visibleCount(snap.cols.tsMs, cursor.millisecondsSinceEpoch)
         : 0;
+    final shownAtBuild = shownFor(cursorFor(_sliderMax));
 
     return Column(
       children: [
@@ -393,11 +413,19 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
         ),
         Expanded(
           child: _slideshowMode
-              ? SlideshowView(
-                  visibleFixes:
-                      hasFixes ? chrono.sublist(0, shown) : const <Ping>[],
-                  sliderMax: sliderMax,
-                  hasAnyFixes: hasFixes,
+              ? ValueListenableBuilder<DateTime?>(
+                  valueListenable: _sliderMaxN,
+                  builder: (context, selected, _) {
+                    final cursor = cursorFor(selected);
+                    final shown = shownFor(cursor);
+                    return SlideshowView(
+                      visibleFixes: hasFixes
+                          ? chrono.sublist(0, shown)
+                          : const <Ping>[],
+                      sliderMax: cursor,
+                      hasAnyFixes: hasFixes,
+                    );
+                  },
                 )
               : FutureBuilder<String?>(
                   future: _styleFuture,
@@ -407,7 +435,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
                     }
                     return _buildMap(
                       context,
-                      shown,
+                      shownAtBuild,
                       style.data!,
                       region,
                       loading: loading,
@@ -416,32 +444,38 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
                   },
                 ),
         ),
-        _TimeSlider(
-          first: first,
-          last: last,
-          current: sliderMax,
-          visibleCount: shown,
-          totalCount: chrono.length,
-          playing: _playing,
-          playbackSpeed: _playbackSpeed,
-          onChanged: (v) {
-            _pausePlayback();
-            _setSliderMax(v);
+        ValueListenableBuilder<DateTime?>(
+          valueListenable: _sliderMaxN,
+          builder: (context, selected, _) {
+            final cursor = cursorFor(selected);
+            return _TimeSlider(
+              first: first,
+              last: last,
+              current: cursor,
+              visibleCount: shownFor(cursor),
+              totalCount: chrono.length,
+              playing: _playing,
+              playbackSpeed: _playbackSpeed,
+              onChanged: (v) {
+                _pausePlayback();
+                _setSliderMax(v);
+              },
+              onReset: () {
+                _pausePlayback();
+                _setSliderMax(null);
+              },
+              onJumpToStart: () {
+                _pausePlayback();
+                _setSliderMax(first);
+              },
+              onStepPrev: () => _stepBy(-1),
+              onStepNext: () => _stepBy(1),
+              onRwd5: () => _stepBy(-5),
+              onFwd5: () => _stepBy(5),
+              onTogglePlay: _togglePlayback,
+              onPickSpeed: _pickSpeed,
+            );
           },
-          onReset: () {
-            _pausePlayback();
-            _setSliderMax(null);
-          },
-          onJumpToStart: () {
-            _pausePlayback();
-            _setSliderMax(first);
-          },
-          onStepPrev: () => _stepBy(-1),
-          onStepNext: () => _stepBy(1),
-          onRwd5: () => _stepBy(-5),
-          onFwd5: () => _stepBy(5),
-          onTogglePlay: _togglePlayback,
-          onPickSpeed: _pickSpeed,
         ),
       ],
     );
@@ -449,15 +483,16 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
 
   Widget _buildMap(
     BuildContext context,
-    int shown,
+    int shownAtBuild,
     String styleJson,
     TilesRegion region, {
     required bool loading,
     required Object? error,
   }) {
     final snap = _snap;
-    final initial = shown > 0
-        ? LatLng(snap.cols.lats[shown - 1], snap.cols.lons[shown - 1])
+    final initial = shownAtBuild > 0
+        ? LatLng(
+            snap.cols.lats[shownAtBuild - 1], snap.cols.lons[shownAtBuild - 1])
         : const LatLng(54, -2); // GB centroid fallback
     final showLiveDot =
         ref.watch(liveLocationDotEnabledProvider).valueOrNull ?? true;
@@ -511,15 +546,26 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
             ),
           ),
         ),
-        if (shown > 0)
-          Positioned(
-            left: 8,
-            top: 8,
-            child: _PlaybackHud(
-              current: snap.chrono[shown - 1],
-              previous: shown >= 2 ? snap.chrono[shown - 2] : null,
-            ),
-          ),
+        // HUD tracks the cursor without rebuilding the map subtree.
+        ValueListenableBuilder<DateTime?>(
+          valueListenable: _sliderMaxN,
+          builder: (context, selected, _) {
+            if (snap.isEmpty) return const SizedBox.shrink();
+            final shown = visibleCount(
+              snap.cols.tsMs,
+              effectiveSliderMax(selected, snap.chrono).millisecondsSinceEpoch,
+            );
+            if (shown == 0) return const SizedBox.shrink();
+            return Positioned(
+              left: 8,
+              top: 8,
+              child: _PlaybackHud(
+                current: snap.chrono[shown - 1],
+                previous: shown >= 2 ? snap.chrono[shown - 2] : null,
+              ),
+            );
+          },
+        ),
         // Loading / empty / error states live ON the map now, never in
         // place of it.
         if (loading)
@@ -717,14 +763,28 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     return tsFilter(snap.cols.tsMs[0], t1);
   }
 
+  /// Move the cursor. No `setState`: the notifier rebuilds the slider /
+  /// HUD / slideshow frame, and the map gets one coalesced sync.
   void _setSliderMax(DateTime? v) {
     if (!mounted) return;
-    setState(() => _sliderMax = v);
+    _sliderMaxN.value = v;
     _scheduleSync();
   }
 
+  /// At most one [_syncTimeWindow] per frame, reading the cursor at the
+  /// moment it runs — a burst of drag events collapses into one
+  /// setFilter carrying the latest position.
   void _scheduleSync() {
-    unawaited(_syncTimeWindow());
+    if (_syncScheduled) return;
+    _syncScheduled = true;
+    final binding = WidgetsBinding.instance;
+    binding.addPostFrameCallback((_) {
+      _syncScheduled = false;
+      if (mounted) unawaited(_syncTimeWindow());
+    });
+    // Post-frame callbacks only fire if a frame is actually produced;
+    // the notifier normally guarantees one, but don't depend on it.
+    binding.scheduleFrame();
   }
 
   /// Push the current window + head/previous styling to the live layers.
@@ -1035,19 +1095,23 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   // Slider stepping + playback.
   // ---------------------------------------------------------------------
 
-  /// Move the slider [delta] pings along the chrono list. Pure dispatch to
-  /// [stepSliderTo] — a top-level so the playback dupe-timestamp fix can
-  /// be unit-tested without spinning up a `MapLibreMap` (which
-  /// `flutter_test` can't mount).
-  DateTime _stepTo(List<Ping> chrono, DateTime current, int delta) =>
-      stepSliderTo(chrono, current, delta);
+  /// Timestamp [delta] fixes away from the cursor, via the binary-search
+  /// [stepIndex] over the ts column (same pivot rule as the top-level
+  /// [stepSliderTo], which stays exported for tests and deep links).
+  /// Null when there is nothing to step through.
+  DateTime? _stepFrom(DateTime current, int delta) {
+    final snap = _snap;
+    if (snap.isEmpty) return null;
+    final idx = stepIndex(snap.cols.tsMs, current.millisecondsSinceEpoch, delta);
+    return idx < 0 ? null : snap.chrono[idx].timestampUtc;
+  }
 
   void _stepBy(int delta) {
     final chrono = _snap.chrono;
     if (chrono.isEmpty) return;
     _pausePlayback();
-    final current = effectiveSliderMax(_sliderMax, chrono);
-    _setSliderMax(_stepTo(chrono, current, delta));
+    final next = _stepFrom(effectiveSliderMax(_sliderMax, chrono), delta);
+    if (next != null) _setSliderMax(next);
   }
 
   void _togglePlayback() {
@@ -1082,8 +1146,8 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
         return;
       }
       final current = effectiveSliderMax(_sliderMax, chrono);
-      final next = _stepTo(chrono, current, 1);
-      if (!next.isAfter(current)) {
+      final next = _stepFrom(current, 1);
+      if (next == null || !next.isAfter(current)) {
         _pausePlayback();
         return;
       }
@@ -1154,6 +1218,8 @@ class _MapHostState extends State<_MapHost> {
 /// slowest. Order is **slow → fast** so the chip's label reads naturally
 /// as the user increases speed. Sub-1× speeds were added in 0.12.0 so
 /// the user can study high-frequency panic-burst pings frame by frame.
+/// The fastest entries are effectively capped by [playbackInterval]'s
+/// 33 ms floor (16× on the 350 ms base step ticks at ~30 Hz, not 45).
 const List<double> kPlaybackSpeeds = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
 
 /// Returns the next speed in [kPlaybackSpeeds] after [current], wrapping
@@ -1174,18 +1240,23 @@ double nextPlaybackSpeed(double current) {
 }
 
 /// Computes the Timer.periodic interval for a given playback speed.
-/// Clamps to `[16ms, 4000ms]` — the lower bound matches one display
-/// frame at 60Hz so faster speeds don't queue overlapping callbacks; the
-/// upper bound (4s) lets the 0.25× speed render naturally
-/// (`350ms / 0.25 = 1400ms` per step, well inside the cap) while still
-/// catching pathological inputs (e.g. speed=0 returning Infinity).
+/// Clamps to `[33ms, 4000ms]` — the lower bound is two display frames
+/// at 60 Hz: every tick is a `setFilter` + `setLayerProperties` round
+/// trip applied on the next render, so ticking faster than the filter
+/// can land just queues channel calls the renderer overwrites (the
+/// 0.7.1–0.13 floor was one frame, 16 ms, when ticks were Dart-side
+/// annotation edits). 16× on the 350 ms base step therefore runs at
+/// ~30 fps instead of the nominal 45. The upper bound (4 s) lets the
+/// 0.25× speed render naturally (`350ms / 0.25 = 1400ms` per step, well
+/// inside the cap) while still catching pathological inputs (e.g.
+/// speed=0 returning Infinity).
 ///
 /// Pure + exported so unit tests can hit it without a widget tree.
 Duration playbackInterval(Duration baseStep, double speed) {
   if (speed <= 0) speed = 1.0; // defensive — speed=0 → infinity loop
   return Duration(
     milliseconds:
-        (baseStep.inMilliseconds / speed).round().clamp(16, 4000),
+        (baseStep.inMilliseconds / speed).round().clamp(33, 4000),
   );
 }
 
@@ -1216,13 +1287,25 @@ String formatPlaybackSpeedLabel(double speed) {
 /// `next.isAfter(current)` guard fired, and the timer paused
 /// spuriously around the dupe. Pivoting on the last match means a
 /// forward step always lands on a strictly later index.
+///
+/// Binary search since 0.14.0 (the list is time-ascending straight from
+/// SQL): upper bound of `current`, minus one, floored at 0 — identical
+/// pivot to the old linear walk, O(log n) instead of O(n) per step.
+/// The panel itself steps through the columnar twin `stepIndex`; this
+/// list-based form is kept for tests and the `/map` deep-link export.
 DateTime stepSliderTo(List<Ping> chrono, DateTime current, int delta) {
   if (chrono.isEmpty) return current;
-  var idx = 0;
-  for (var i = 0; i < chrono.length; i++) {
-    if (chrono[i].timestampUtc.isAfter(current)) break;
-    idx = i;
+  var lo = 0;
+  var hi = chrono.length;
+  while (lo < hi) {
+    final mid = lo + ((hi - lo) >> 1);
+    if (chrono[mid].timestampUtc.isAfter(current)) {
+      hi = mid;
+    } else {
+      lo = mid + 1;
+    }
   }
+  final idx = lo > 0 ? lo - 1 : 0;
   final target = (idx + delta).clamp(0, chrono.length - 1);
   return chrono[target].timestampUtc;
 }

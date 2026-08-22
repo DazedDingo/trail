@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:trail/models/ping.dart';
 import 'package:trail/screens/map_screen.dart';
@@ -76,6 +78,42 @@ void main() {
     test('empty chrono is a no-op', () {
       final t = DateTime.utc(2026, 4, 18, 8);
       expect(stepSliderTo(const [], t, 1), t);
+    });
+
+    test('binary search (0.14.0) matches the original linear walk on '
+        'random lists with duplicates, for every cursor and delta', () {
+      // Reference: the pre-0.14 implementation, verbatim.
+      DateTime linear(List<Ping> chrono, DateTime current, int delta) {
+        if (chrono.isEmpty) return current;
+        var idx = 0;
+        for (var i = 0; i < chrono.length; i++) {
+          if (chrono[i].timestampUtc.isAfter(current)) break;
+          idx = i;
+        }
+        final target = (idx + delta).clamp(0, chrono.length - 1);
+        return chrono[target].timestampUtc;
+      }
+
+      final rng = Random(7);
+      for (var trial = 0; trial < 200; trial++) {
+        final n = 1 + rng.nextInt(25);
+        var minute = 0;
+        final chrono = <Ping>[];
+        for (var i = 0; i < n; i++) {
+          minute += rng.nextInt(3); // 0 keeps duplicate stamps in play
+          chrono.add(_pAt(DateTime.utc(2026, 4, 18, 0, minute)));
+        }
+        for (var m = -1; m <= minute + 1; m++) {
+          final cursor = DateTime.utc(2026, 4, 18, 0, m);
+          for (final delta in [-5, -1, 0, 1, 5]) {
+            expect(
+              stepSliderTo(chrono, cursor, delta),
+              linear(chrono, cursor, delta),
+              reason: 'n=$n cursor=$m delta=$delta',
+            );
+          }
+        }
+      }
     });
 
     group('±5 jump (0.13.7 — fast-forward/rewind buttons)', () {
