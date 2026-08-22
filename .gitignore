@@ -51,4 +51,7 @@ Thumbs.db
 
 # App-specific — never commit these
 *.mbtiles
+# ...except the tiny hand-built archive fixtures the tile-server tests read
+# (a few KB each; regenerate with test/fixtures/make_fixtures.py).
+!test/fixtures/*.mbtiles
 google-services.json

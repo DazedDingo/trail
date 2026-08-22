@@ -1,7 +1,7 @@
 name: trail
 description: "Trail — personal-safety GPS logger. Offline, encrypted, 4h-cadence background pings."
 publish_to: 'none'
-version: 0.14.1+96
+version: 0.15.0+97
 
 environment:
   sdk: ^3.5.0
@@ -75,7 +75,8 @@ dependencies:
   # MBTiles support. Different API: imperative
   # `MapLibreMapController.addLine/addCircle/addLayer` rather than
   # declarative `layers:`.
-  maplibre_gl: ^0.26.0
+  maplibre_gl: ^0.27.0
+  pmtiles: ^2.0.0
 
   # HTTP client — for the Wikimedia Commons GeoSearch lookups powering
   # the auto-photo feature (schema v2). Trail is otherwise offline-only,

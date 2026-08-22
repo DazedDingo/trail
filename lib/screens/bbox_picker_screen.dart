@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 
-import '../providers/mbtiles_provider.dart';
 import '../providers/tile_server_provider.dart';
+import '../services/local_tile_server.dart';
 import '../services/trail_style.dart';
 
 /// Modal map picker for the "Custom area" build flow. Pops with a
@@ -32,23 +32,23 @@ class BboxPickerScreen extends ConsumerStatefulWidget {
 class _BboxPickerScreenState extends ConsumerState<BboxPickerScreen> {
   MapLibreMapController? _controller;
   Future<String?>? _styleFuture;
-  String? _activeRegionPath;
   int? _tileServerPort;
+  bool _styleRequested = false;
 
   @override
   Widget build(BuildContext context) {
-    final activeRegion = ref.watch(activeRegionProvider).valueOrNull;
     final tileServerPort = ref.watch(tileServerProvider).valueOrNull;
 
-    if (activeRegion?.path != _activeRegionPath ||
-        tileServerPort != _tileServerPort ||
-        _styleFuture == null) {
-      _activeRegionPath = activeRegion?.path;
+    if (tileServerPort != _tileServerPort || !_styleRequested) {
       _tileServerPort = tileServerPort;
-      _styleFuture = TrailStyle.loadForRegion(
-        _activeRegionPath,
-        tileServerPort: tileServerPort,
-      );
+      _styleRequested = true;
+      _styleFuture = tileServerPort == null
+          ? Future<String?>.value(null)
+          : TrailStyle.loadForServer(
+              port: tileServerPort,
+              minZoom: LocalTileServer.instance.servedMinZoom,
+              maxZoom: LocalTileServer.instance.servedMaxZoom,
+            );
     }
 
     return Scaffold(

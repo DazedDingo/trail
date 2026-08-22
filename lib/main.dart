@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:maplibre_gl/maplibre_gl.dart';
 
 import 'app.dart';
 import 'providers/backup_provider.dart';
@@ -74,6 +75,10 @@ void main() async {
 ///     `isFailed` is sync and treats an unloaded denylist as "nothing
 ///     failed"; `register` awaits the preload so an early failure merges
 ///     into — never clobbers — the persisted set.
+///   - [MapLibreMap.preWarm] builds the native renderer's shared
+///     resources (maplibre_gl 0.27.0) before any map is mounted, so the
+///     first `/map` visit doesn't pay for it. Fire-and-forget by design;
+///     failing is a missed optimisation, not an error.
 ///
 /// Each runs fire-and-forget under [_guarded]: a failure here must not
 /// take down an app that has already painted.
@@ -81,6 +86,9 @@ void _initDeferredServices() {
   unawaited(_guarded('workmanager', WorkmanagerScheduler.initialize));
   unawaited(_guarded('notifications', NotificationService.initialize));
   unawaited(_guarded('failed-photo denylist', FailedPhotoUris.preload));
+  unawaited(MapLibreMap.preWarm().catchError((Object e) {
+    debugPrint('preWarm failed: $e');
+  }));
 }
 
 Future<void> _guarded(String label, Future<void> Function() init) async {

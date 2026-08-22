@@ -118,16 +118,28 @@ Goal: the app owns its coverage decisions from the ping history — a world-leve
 
 Ordering: Phases A + B ship **before or with the 0.16.0 Timeline import** so imported non-UK points land on real tiles, per the blocker in § 2 above.
 
-## Decisions for the commander
+#### Corrections found while building Phase A (2026-08-22, late session)
 
-Import:
-- Default thinning preset (recommend Normal: 15 min / 250 m).
-- Whether imported rows count in the stats heatmap at all, or only on the map.
-- Whether to bother with the legacy Takeout formats (only useful if an old zip exists).
+1. **MapLibre does not overzoom a 404 inside the source's zoom range.** Verified in maplibre-native (`src/mln/tile/tile_loader_impl.hpp`: `NotFound` → `tile.setData(nullptr)`; `geometry_tile_worker.cpp` parses the empty tile and `GeometryTile::onLayout` marks it `renderable`). An absent tile renders as *empty*, not as its parent — parent fallback only exists above the source `maxzoom`. The "z7–9 gap tiles overzoom from z6" assumption above was wrong, and with one style source there is one `maxzoom` for archives that stop at 6, 13 and 14. Phase A therefore does the overzoom **server-side**: on a miss the loopback finds the nearest ancestor tile in any archive, scales + translates + clips its MVT geometry into the requested child (`lib/services/tiles/mvt_overzoom.dart`, pure Dart, unit-tested) and serves that. Consequences: the style source `maxzoom` is rewritten to the max over served archives; coverage extracts may still start at z7 rather than z10 for crispness (z7–9 from z6 is coarse but present, never blank); a z13 region now renders at z14 where a z14 coverage file exists next to it.
+2. **Tile schema.** `docs/TILES.md` builds regions with planetiler in the **OpenMapTiles** schema (layers `transportation`, `place`, `landuse`, …) and the bundled OSM Liberty style only renders that schema. The sizing above was measured against the **Protomaps basemap** planet, whose layer names differ (`roads`, `places`, `landuse`, `earth`, …). The byte sizes still hold as estimates, but Phase B cannot simply `pmtiles extract` from the Protomaps build into the current style. Phase A is schema-agnostic (it serves whatever the archives hold), so it ships regardless. Phase B needs one of:
+   - **(a) Stay OpenMapTiles.** Clusters: planetiler with `--bounds` on the Geofabrik country extract that contains each cluster (cheap, minutes). World overview z0–6: planetiler needs the planet PBF (~80 GB download, hours, ~24 GB RAM with `--storage=mmap`) — a one-off that rarely needs refreshing — *or* a one-off Python pass translating the 45 MB Protomaps z0–6 extract into OMT layer names/attributes (lossy mapping, ~300 lines, brittle).
+   - **(b) Switch to the Protomaps basemap schema + style (recommended).** One pipeline (`pmtiles extract` against the daily planet) produces overview, coverage *and* the UK region from the same source, always fresh, no Java/planetiler on the VPS. Cost: bundle the Protomaps `dark` style + its Noto Sans glyphs/sprite (a few MB of assets), re-check the pin/heatmap layer ordering against the new layer ids, and re-extract the UK region once (~600 MB at z13, sideloaded like today). The OMT region keeps working until then because Phase A serves both schemas — it just renders with the style that matches it.
+   Decision for the commander; nothing in Phase A depends on it.
+
+## Decisions (locked 2026-08-22)
+
+Import — decided, apply when 0.16.0 starts:
+- Default thinning preset: **Normal (15 min / 250 m)**.
+- Imported rows are **map-only** — they do not count in the stats heatmap (stats stay real Trail data).
+- Legacy Takeout formats: **skip** unless an old zip turns up.
 - Release slot: after 0.14.x perf work → 0.16.0.
 
-Map coverage (§ 3 above):
-- World overview zoom: **z0–6 / 45 MB (recommended)** vs z0–7 / 187 MB.
-- Cluster detail maxzoom: **14 (recommended)** vs 15 (+~64 % per cluster).
-- Phase A slot: fold into **0.15.0** alongside the maplibre_gl 0.27.0 upgrade (both touch the map stack — one soak covers both) vs its own release.
-- Where the VPS job publishes coverage files: private GitHub release asset vs Oracle object storage vs plain scp-sideload.
+Map coverage (§ 3 above) — decided:
+- World overview zoom: **z0–6 (45 MB)**. z7 not worth 142 MB.
+- Cluster detail maxzoom: **14**.
+- Phase A slot: **folded into 0.15.0** with the maplibre_gl 0.27.0 upgrade (shipped as 0.15.0+97 — multi-archive loopback, `.pmtiles` read path, roles, server-side overzoom).
+- Phase B publish channel: **private GitHub release asset** on this repo ($0, `gh` already wired, versioned; `TileDownloader` can fetch it by URL).
+
+Still open (raised by the corrections above):
+- Phase B tile schema: **(a) stay OpenMapTiles** vs **(b) switch to Protomaps basemap + style** — recommendation (b).
+- Coverage extract minzoom: 7 (crisper z7–9, a few hundred KB per cluster) vs 10 (rely on server-side overzoom from the z6 overview) — recommendation 7.

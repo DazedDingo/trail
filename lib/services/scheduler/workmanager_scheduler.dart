@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 
+import 'package:battery_plus/battery_plus.dart';
 import 'package:flutter/widgets.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
 import 'package:geolocator/geolocator.dart';
@@ -52,6 +54,23 @@ class WorkmanagerScheduler {
   // tested without workmanager. Aliased here for public call-sites.
   static const defaultCadence = SchedulerPolicy.defaultCadence;
   static const retryDelay = SchedulerPolicy.retryDelay;
+
+  /// SharedPreferences key for the cadence (in minutes) most recently
+  /// registered with WorkManager. Written by [enqueuePeriodic] right after
+  /// `registerPeriodicTask` succeeds, so every caller (UI cadence picker,
+  /// `switchSchedulerMode`, boot, the periodic tick itself) records it for
+  /// free. Read by the periodic tick via [lastEnqueuedMinutes] to decide
+  /// whether re-registering this tick is even necessary
+  /// ([SchedulerPolicy.shouldReenqueuePeriodic]).
+  static const _lastEnqueuedMinutesKey = 'trail_scheduler_last_enqueued_min_v1';
+
+  /// The cadence, in minutes, last successfully registered with
+  /// WorkManager — or `null` if we've never recorded one (fresh install,
+  /// cleared prefs, or upgrading from a version predating this marker).
+  static Future<int?> lastEnqueuedMinutes() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt(_lastEnqueuedMinutesKey);
+  }
 
   /// Registers the top-level [_callbackDispatcher] with the native
   /// plugin. Memoised per isolate: the first call does the channel
@@ -114,6 +133,8 @@ class WorkmanagerScheduler {
       ),
       tag: tagScheduled,
     );
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_lastEnqueuedMinutesKey, effective.inMinutes);
   }
 
   /// Enqueue a single delayed retry after a no-fix.
@@ -224,13 +245,20 @@ void _callbackDispatcher() {
   });
 }
 
-Future<bool> _handleScheduled() async {
+/// [db] lets the boot path (which already opened its own handle for the
+/// boot-marker row) pass it through instead of paying a second SQLCipher
+/// key-derivation cost. Whoever opens the handle is responsible for
+/// closing it — when [db] is supplied, this function leaves it open for
+/// the caller.
+Future<bool> _handleScheduled({Database? db}) async {
   // Open the DB first so a locked-backup install bails before spending
   // ~30s on GPS. `TrailDatabase.open` throws [PassphraseNeededException]
-  // in that case, caught by the dispatcher.
-  final db = await TrailDatabase.open();
+  // in that case, caught by the dispatcher. Skipped entirely when [db] is
+  // already supplied.
+  final closeWhenDone = db == null;
+  final database = db ?? await TrailDatabase.open();
   try {
-    final dao = PingDao(db);
+    final dao = PingDao(database);
 
     // Motion-aware short-circuit. When the user has it on AND the last
     // two real fixes are < 50 m apart AND the latest is < 2 h old we
@@ -298,25 +326,48 @@ Future<bool> _handleScheduled() async {
     // Settings → Map → Auto-fetch photos. Privacy: leaks lat/lon to
     // Wikimedia Commons. Best-effort — failures are swallowed because
     // photos are decorative; the ping row is already committed.
+    //
+    // The network/charging gate is evaluated AFTER `isEnabled()` so a user
+    // who has the feature off never pays the extra `Battery().batteryState`
+    // platform call. Metered connections only qualify while charging — no
+    // reason to burn a user's mobile data *and* battery on decorative
+    // photos in the same tick.
     if (snapshot.source != PingSource.noFix &&
         snapshot.lat != null &&
         snapshot.lon != null &&
         await AutoPhotoService().isEnabled()) {
-      await _autoFetchPhotos(
-        db,
-        pingId: insertedId,
-        lat: snapshot.lat!,
-        lon: snapshot.lon!,
-      );
+      final isCharging = await _isCharging();
+      if (SchedulerPolicy.shouldAutoFetchPhotos(
+        networkState: snapshot.networkState,
+        isCharging: isCharging,
+      )) {
+        await _autoFetchPhotos(
+          database,
+          pingId: insertedId,
+          lat: snapshot.lat!,
+          lon: snapshot.lon!,
+        );
+      } else {
+        debugPrint('[scheduler] Skipping auto-photo fetch — '
+            'network=${snapshot.networkState}, charging=$isCharging.');
+      }
     }
 
     final userCadence = await CadenceStore.get();
-    await WorkmanagerScheduler.enqueuePeriodic(
-      frequency: SchedulerPolicy.nextCadence(
-        snapshot.batteryPct,
-        base: userCadence.value,
-      ),
+    final effectiveCadence = SchedulerPolicy.nextCadence(
+      snapshot.batteryPct,
+      base: userCadence.value,
     );
+    // Re-registering with WorkManager is a platform round-trip that briefly
+    // cancels + re-arms the native job; only pay for it when the cadence
+    // this tick actually differs from what's currently registered.
+    final lastEnqueuedMinutes = await WorkmanagerScheduler.lastEnqueuedMinutes();
+    if (SchedulerPolicy.shouldReenqueuePeriodic(
+      effective: effectiveCadence,
+      lastEnqueuedMinutes: lastEnqueuedMinutes,
+    )) {
+      await WorkmanagerScheduler.enqueuePeriodic(frequency: effectiveCadence);
+    }
 
     if (SchedulerPolicy.shouldRetry(snapshot)) {
       await WorkmanagerScheduler.enqueueRetry();
@@ -328,7 +379,22 @@ Future<bool> _handleScheduled() async {
     );
     return true;
   } finally {
-    await db.close();
+    if (closeWhenDone) await database.close();
+  }
+}
+
+/// Single passive `Battery().batteryState` read, used only to gate the
+/// auto-photo fetch (`SchedulerPolicy.shouldAutoFetchPhotos`). `.charging`
+/// and `.full` both count as "charging" — `.full` means plugged in and
+/// topped off, which is exactly as safe to spend metered data/battery on
+/// as actively charging. Any platform failure (no battery API, channel
+/// error) degrades to "not charging" — the safer default for the gate.
+Future<bool> _isCharging() async {
+  try {
+    final state = await Battery().batteryState;
+    return state == BatteryState.charging || state == BatteryState.full;
+  } catch (_) {
+    return false;
   }
 }
 
@@ -495,11 +561,13 @@ Future<bool> _handleBoot() async {
       outcome: 'ok',
       note: 'boot marker written',
     );
+    // And immediately attempt a fresh ping without waiting for the 4h
+    // window — pass this same handle through so the tick doesn't pay a
+    // second SQLCipher key-derivation cost (one DB open per boot tick).
+    return await _handleScheduled(db: db);
   } finally {
     await db.close();
   }
-  // And immediately attempt a fresh ping without waiting for the 4h window.
-  return _handleScheduled();
 }
 
 /// Decides whether the periodic worker should short-circuit GPS for

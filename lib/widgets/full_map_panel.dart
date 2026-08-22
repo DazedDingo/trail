@@ -16,6 +16,7 @@ import '../providers/map_settings_provider.dart';
 import '../providers/mbtiles_provider.dart';
 import '../providers/pings_provider.dart';
 import '../providers/tile_server_provider.dart';
+import '../services/local_tile_server.dart';
 import '../services/map/pin_geojson.dart';
 import '../services/mbtiles_service.dart';
 import '../services/trail_style.dart';
@@ -83,8 +84,23 @@ class FullMapPanel extends ConsumerStatefulWidget {
 class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   MapLibreMapController? _controller;
   Future<String?>? _styleFuture;
-  String? _activeRegionPath;
+
+  /// Loopback tile-server port, or `null` when nothing is being served.
+  /// This — not the active region — is what says "there is a map":
+  /// coverage packs and the world overview are served with or without
+  /// an active region (see `TilesService.servedArchives`).
   int? _tileServerPort;
+
+  /// Whether the regions screen's remote-demo diagnostic is on. The
+  /// style then points at the public Protomaps archive and the loopback
+  /// stays down, so the map is available with a null port.
+  bool _sentinelActive = false;
+
+  /// Archive paths the server was serving when [_styleFuture] was
+  /// built. Part of the `_MapHost` key: a different archive set means a
+  /// different port means a different tile URL, and MapLibre only picks
+  /// that up on a fresh platform view.
+  List<String> _servedPaths = const [];
 
   /// True once `onStyleLoadedCallback` has run for the live controller
   /// AND the pin/segment sources + layers are installed on it. Every
@@ -203,23 +219,31 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   @override
   Widget build(BuildContext context) {
     final pingsAsync = ref.watch(pingsByRangeProvider(_dateFilter));
-    final activeRegion = ref.watch(activeRegionProvider).valueOrNull;
-    final tileServerPort = ref.watch(tileServerProvider).valueOrNull;
+    final served =
+        ref.watch(servedArchivesProvider).valueOrNull ?? const <TilesRegion>[];
+    final sentinelActive = served
+        .any((r) => r.path == TilesService.diagnosticRemoteSentinel);
+    final tileServerAsync = ref.watch(tileServerProvider);
+    final tileServerPort = tileServerAsync.valueOrNull;
     final liveDotState = ref.watch(liveLocationDotEnabledProvider);
     final liveDotOn = liveDotState.asData?.value ?? true;
 
-    final regionChanged = activeRegion?.path != _activeRegionPath;
-    final portChanged = tileServerPort != _tileServerPort;
-    if (regionChanged || portChanged || _styleFuture == null) {
-      _activeRegionPath = activeRegion?.path;
+    // A map exists whenever the loopback is up (one or more archives) or
+    // the remote-demo diagnostic is on. The port IS the archive-set
+    // identity — `LocalTileServer.start` rebinds on any change to the
+    // list — so nothing else needs comparing here.
+    final mapAvailable = tileServerPort != null || sentinelActive;
+    if (tileServerPort != _tileServerPort ||
+        sentinelActive != _sentinelActive ||
+        _styleFuture == null) {
       _tileServerPort = tileServerPort;
-      _styleFuture = TrailStyle.loadForRegion(
-        _activeRegionPath,
-        tileServerPort: tileServerPort,
-      );
-      if (regionChanged) _initialFitDone = false;
+      _sentinelActive = sentinelActive;
+      _servedPaths = List<String>.of(LocalTileServer.instance.servedPaths);
+      _styleFuture = _buildStyleFuture();
+      _initialFitDone = false;
       // A new style means a new map; whatever controller we hold is
-      // about to be torn down with it.
+      // about to be torn down with it. Only ever on a port change —
+      // gotcha 22: a data or range change must NOT come through here.
       _forgetController();
     }
 
@@ -245,15 +269,22 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     // layers all survive a range change; loading is a thin progress bar
     // over the live map and an empty result is a chip, not a teardown.
     final Widget child;
-    if (activeRegion == null) {
+    if (!mapAvailable && tileServerAsync.isLoading) {
+      // The loopback is still binding (cold start, or an archive set
+      // that just changed). Don't flash "install an archive" at a user
+      // who has one — `valueOrNull` keeps the previous port across a
+      // refresh, so this only ever shows on the very first resolve.
+      child = const Center(child: CircularProgressIndicator());
+    } else if (!mapAvailable) {
       child = pingsAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(child: Text('Error: $e')),
         data: (_) => _EmptyState(
           message: _snap.isEmpty
               ? 'No fixes yet — trail will appear after a few pings.'
-              : 'Install an offline map region to see your trail. '
-                  'Tap the layers icon → Install.',
+              : 'Install an offline map archive in Settings → Offline map '
+                  '→ Regions (a region, coverage pack or world overview) '
+                  'to see your trail.',
         ),
       );
     } else if (!_mapShown) {
@@ -271,7 +302,6 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
         _mapShown = true;
         child = _buildBody(
           context,
-          activeRegion,
           liveDotOn,
           liveDotState.isLoading,
           loading: pingsAsync.isLoading,
@@ -281,7 +311,6 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     } else {
       child = _buildBody(
         context,
-        activeRegion,
         liveDotOn,
         liveDotState.isLoading,
         loading: pingsAsync.isLoading,
@@ -290,6 +319,24 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     }
 
     return SizedBox(height: widget.height, child: child);
+  }
+
+  /// The style for the current server state. Three cases:
+  ///   * remote-demo diagnostic on → the bundled style pointed at the
+  ///     public Protomaps archive (no loopback involved);
+  ///   * loopback up → the bundled style pointed at `127.0.0.1:<port>`,
+  ///     re-ranged to the zoom span the served archives actually hold;
+  ///   * nothing served → a resolved `null`, which no one awaits (the
+  ///     body renders the empty state instead of the map).
+  Future<String?> _buildStyleFuture() {
+    if (_sentinelActive) return TrailStyle.loadRemoteDemo();
+    final port = _tileServerPort;
+    if (port == null) return Future<String?>.value(null);
+    return TrailStyle.loadForServer(
+      port: port,
+      minZoom: LocalTileServer.instance.servedMinZoom,
+      maxZoom: LocalTileServer.instance.servedMaxZoom,
+    );
   }
 
   /// The controller we hold is dead or about to be. Never call this for
@@ -359,7 +406,6 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
 
   Widget _buildBody(
     BuildContext context,
-    TilesRegion region,
     bool liveDotOn,
     bool liveDotLoading, {
     required bool loading,
@@ -446,7 +492,6 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
                       context,
                       shownAtBuild,
                       style.data!,
-                      region,
                       loading: loading,
                       error: error,
                     );
@@ -493,8 +538,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   Widget _buildMap(
     BuildContext context,
     int shownAtBuild,
-    String styleJson,
-    TilesRegion region, {
+    String styleJson, {
     required bool loading,
     required Object? error,
   }) {
@@ -509,10 +553,11 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     return Stack(
       children: [
         _MapHost(
-          // Identity is the style's inputs and nothing else: a region or
-          // tile-server-port change legitimately needs a fresh map, a
-          // date-range / data change must not.
-          key: ValueKey('${region.path}|$_tileServerPort'),
+          // Identity is the style's inputs and nothing else: a change to
+          // the served archive set (which always means a fresh port)
+          // legitimately needs a fresh map; a date-range / data change
+          // must not.
+          key: ValueKey('${_servedPaths.join('|')}|$_tileServerPort'),
           onMount: () => ++_mapEpoch,
           onUnmount: _onMapUnmounted,
           child: MapLibreMap(

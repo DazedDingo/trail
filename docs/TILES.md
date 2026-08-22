@@ -1,15 +1,42 @@
 # Building offline `.pmtiles` for Trail
 
 Trail's map viewer reads `.pmtiles` (single-file vector tile archives,
-[Protomaps spec](https://docs.protomaps.com/pmtiles/)) from the app's
-documents directory. Build one on your PC, push it to the phone,
-install via **Settings → Offline map → Regions → Install**, and then
-set it as active. The viewer renders a placeholder until a region is
-active; the app is offline-only and there is no online tile fallback.
+[Protomaps spec](https://docs.protomaps.com/pmtiles/)) and `.mbtiles`
+(SQLite) from the app's documents directory. Build one on your PC, push
+it to the phone, install via **Settings → Offline map → Regions →
+Install**, and give it a role. The viewer renders a placeholder until
+at least one archive is installed; the app is offline-only and there is
+no online tile fallback.
+
+## Roles and how tiles are served (0.15.0+)
+
+Every installed archive has a role, set from the row menu (the installer
+guesses from the file name: `…overview…` → world overview,
+`…coverage…` → coverage, anything else → region):
+
+| Role | How many | Typical file | Purpose |
+|---|---|---|---|
+| **Region** | one *active* at a time | `gb-z13.pmtiles` (500 MB) | the big detailed archive for where you live |
+| **Coverage** | any number, always served | `coverage-lisbon-z7-14.pmtiles` (6 MB) | detail around places you visited |
+| **World overview** | usually one, always served | `overview-z0-6.pmtiles` (45 MB) | context for every pin on Earth |
+
+All of them are served through one in-app loopback HTTP server
+(`LocalTileServer`) — MapLibre's own `pmtiles://` / `mbtiles://` file
+URLs never worked on Android, which is why `.pmtiles` regions rendered
+nothing between 0.8.0 and 0.14.1. For each tile the server asks the
+archives in order *coverage → active region → overview* and returns the
+first hit. If **no** archive holds that tile, the server finds the
+nearest coarser tile in any archive and overzooms it itself (scales,
+translates and clips the vector geometry into the requested tile), so an
+area that only the z0–6 overview covers still draws — coarse, never
+blank. MapLibre would otherwise render a missing tile as empty: it only
+overzooms past the source's `maxzoom`, which Trail sets to the highest
+zoom any installed archive holds.
 
 This doc is the one-time build pipeline — nothing here runs on the
-phone. Switched from raster MBTiles to vector PMTiles in 0.8.0+29; if
-you have an old `.mbtiles` file lying around it won't load any more.
+phone. Switched from raster MBTiles to vector in 0.8.0+29; raster
+`.mbtiles` files still won't render (the style expects vector layers),
+but vector `.mbtiles` from planetiler work exactly like `.pmtiles`.
 
 ## Why vector
 
@@ -99,7 +126,12 @@ active region. If you ever swap the bundled style for a different one
 the runtime substitution won't work.
 
 Use the **OpenMapTiles** schema (planetiler's default) — anything else
-won't match the layer names in `style.json`.
+won't match the layer names in `style.json`. In particular the Protomaps
+daily planet builds are the *Protomaps basemap* schema (`roads`,
+`places`, `earth`, …): they install and serve fine, but OSM Liberty
+only draws their `water`/`landuse` layers. See `docs/TIMELINE_IMPORT.md`
+§ 3 "Corrections" for the pending choice between staying on
+OpenMapTiles and switching the bundled style.
 
 ## Backup behaviour
 

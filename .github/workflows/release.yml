@@ -57,30 +57,57 @@ jobs:
       - run: flutter pub get
 
       - name: Build APK
-        run: flutter build apk --release
+        # Per-ABI APKs (PERF_PLAN §3 #20): R8 + resource shrinking are now
+        # enabled (android/app/build.gradle.kts), and --split-per-abi builds
+        # one APK per architecture instead of one fat APK containing all
+        # three sets of native libraries — each install only downloads the
+        # ~1 architecture's worth of native code it actually needs.
+        #
+        # versionCode is NOT the plain pubspec build number here. When
+        # --split-per-abi is set, the Flutter Gradle plugin overrides each
+        # output's versionCode with `abiIndex * 1000 + <pubspec build
+        # number>` (flutter_tools/gradle/src/main/kotlin/FlutterPlugin.kt:
+        # `output.versionCodeOverride = abiVersionCode * 1000 + (...)`),
+        # using this ABI -> index mapping (FlutterPluginConstants.kt):
+        #   armeabi-v7a -> 1   arm64-v8a -> 2   x86_64 -> 4
+        # (index 3 was reserved for x86, whose support Flutter later
+        # dropped — the gap is intentional, not a bug.)
+        # So for pubspec build number 96 the three APKs ship versionCode
+        # 1096 / 2096 / 4096, not 96. This is a one-way door: a future fat
+        # APK built with a plain versionCode (e.g. 97) would be LOWER than
+        # an existing per-ABI install's 1096/2096/4096 and Android would
+        # reject it as a downgrade. If Trail ever needs to go back to a
+        # single fat APK, the versionCode must be bumped past the highest
+        # per-ABI value any user could already have installed.
+        run: flutter build apk --release --split-per-abi
 
-      - name: Verify APK is signed with the expected keystore
-        # If AGP sidesteps our pinned signingConfig for any reason, the APK's
+      - name: Verify APKs are signed with the expected keystore
+        # If AGP sidesteps our pinned signingConfig for any reason, an APK's
         # cert SHA-1 will not match EXPECTED_SHA1 and this step fails. That
         # stops us from ever shipping a release that can't upgrade existing
-        # installs.
+        # installs. --split-per-abi produces one APK per ABI, so loop over
+        # all of them — a mismatch on any single one must fail the build.
         run: |
-          APK=build/app/outputs/flutter-apk/app-release.apk
           APKSIGNER=$(ls -t $ANDROID_HOME/build-tools/*/apksigner 2>/dev/null | head -1)
           if [ -z "$APKSIGNER" ]; then
             echo "::error::apksigner not found in $ANDROID_HOME/build-tools"
             exit 1
           fi
           echo "Using apksigner: $APKSIGNER"
-          CERTS=$("$APKSIGNER" verify --print-certs "$APK")
-          echo "$CERTS"
-          ACTUAL=$(echo "$CERTS" | grep -i 'SHA-1 digest' | awk '{print $NF}')
           EXPECTED_COMPACT=$(echo "$EXPECTED_SHA1" | tr -d ':' | tr 'A-F' 'a-f')
-          if [ "$ACTUAL" != "$EXPECTED_COMPACT" ]; then
-            echo "::error::APK signed with $ACTUAL but expected $EXPECTED_COMPACT — existing installs will reject the upgrade."
-            exit 1
-          fi
-          echo "✓ APK signed with the pinned keystore."
+          for APK in build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
+                     build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk \
+                     build/app/outputs/flutter-apk/app-x86_64-release.apk; do
+            echo "--- $APK ---"
+            CERTS=$("$APKSIGNER" verify --print-certs "$APK")
+            echo "$CERTS"
+            ACTUAL=$(echo "$CERTS" | grep -i 'SHA-1 digest' | awk '{print $NF}')
+            if [ "$ACTUAL" != "$EXPECTED_COMPACT" ]; then
+              echo "::error::$APK signed with $ACTUAL but expected $EXPECTED_COMPACT — existing installs will reject the upgrade."
+              exit 1
+            fi
+            echo "✓ $APK signed with the pinned keystore."
+          done
 
       - name: Get version from pubspec
         id: version
@@ -125,8 +152,12 @@ jobs:
           cat release_notes.md
           echo "---- end ----"
 
-      - name: Rename APK
-        run: mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/Trail-${{ steps.version.outputs.tag }}.apk
+      - name: Rename APKs
+        run: |
+          TAG=${{ steps.version.outputs.tag }}
+          mv build/app/outputs/flutter-apk/app-arm64-v8a-release.apk build/app/outputs/flutter-apk/Trail-$TAG-arm64-v8a.apk
+          mv build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk build/app/outputs/flutter-apk/Trail-$TAG-armeabi-v7a.apk
+          mv build/app/outputs/flutter-apk/app-x86_64-release.apk build/app/outputs/flutter-apk/Trail-$TAG-x86_64.apk
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -134,5 +165,8 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.name }}
           body_path: release_notes.md
-          files: build/app/outputs/flutter-apk/Trail-${{ steps.version.outputs.tag }}.apk
+          files: |
+            build/app/outputs/flutter-apk/Trail-${{ steps.version.outputs.tag }}-arm64-v8a.apk
+            build/app/outputs/flutter-apk/Trail-${{ steps.version.outputs.tag }}-armeabi-v7a.apk
+            build/app/outputs/flutter-apk/Trail-${{ steps.version.outputs.tag }}-x86_64.apk
           fail_on_unmatched_files: true

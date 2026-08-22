@@ -12,7 +12,7 @@ Personal-safety + curious-data-gathering Android app. Pings GPS at a user-select
 
 ## Install
 
-Head to the [**latest release**](https://github.com/DazedDingo/trail/releases/latest), grab the `.apk`, and open it on Android. First-time install? You may need to allow your browser to install apps from unknown sources. Upgrades install over the top — your encrypted log, panic contacts, and home location all survive.
+Head to the [**latest release**](https://github.com/DazedDingo/trail/releases/latest), grab the `.apk` for your phone — `…-arm64-v8a.apk` for any phone from the last ~8 years, `…-armeabi-v7a.apk` for old 32-bit devices, `…-x86_64.apk` only for emulators (since 0.15.0 releases are per-ABI and R8-shrunk, roughly a third the size of the old single file) — and open it on Android. First-time install? You may need to allow your browser to install apps from unknown sources. Upgrades install over the top — your encrypted log, panic contacts, and home location all survive.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for what's new in each build, or any release page for plain-English bullets.
 

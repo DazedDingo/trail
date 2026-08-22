@@ -1,100 +1,156 @@
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 import 'package:flutter/services.dart' show rootBundle;
 
 /// Builds the MapLibre style JSON for the offline map viewer.
 ///
-/// Loads the bundled OSM Liberty `style.json` and substitutes the
-/// `pmtiles://__TRAIL_ACTIVE_REGION__` placeholder with the right URL
-/// for the active region — using the localhost HTTP server when an
-/// MBTiles file is active (workaround for MapLibre Native 13.0.x's
-/// broken local-file rendering on Android), or the native
-/// `pmtiles://file://` form for PMTiles (in case the upstream fix
-/// lands).
+/// The bundled OSM Liberty `style.json` ships placeholders instead of
+/// real URLs — the loopback tile server binds a random port at every
+/// launch, so nothing about the source URL is known at build time.
+/// [substituteTileServer] rewrites them to `http://127.0.0.1:<port>/…`
+/// and re-ranges the vector source to whatever the served archives
+/// actually hold.
+///
+/// There is no local-file branch any more: `mbtiles://<path>` and
+/// `pmtiles://file://<path>` silently render nothing on MapLibre Native
+/// 13.0.x under Android (CLAUDE.md gotcha 17), so **every** archive goes
+/// over the loopback. The one exception is the regions screen's
+/// diagnostic sentinel, which points the renderer at the public
+/// Protomaps demo over the real internet ([loadRemoteDemo]) to tell
+/// "renderer broken" apart from "local archive broken".
 class TrailStyle {
   static const _placeholder = 'pmtiles://__TRAIL_ACTIVE_REGION__';
   static const _styleAsset = 'assets/maptiles/style.json';
 
+  /// Id of the vector source in the bundled style whose URL + zoom
+  /// range we rewrite. Must match `assets/maptiles/style.json`.
+  static const _sourceId = 'openmaptiles';
+
   /// Sentinel path used by the Regions screen's diagnostic-mode button
   /// to flip the renderer to the public Protomaps demo PMTiles URL.
-  /// Used to tell apart "renderer broken" from "local file broken"
-  /// without writing native code.
   static const _diagnosticRemoteSentinel = '__remote_demo__';
   static const diagnosticRemoteSentinel = _diagnosticRemoteSentinel;
 
-  /// Returns the style JSON string with the active region's URL
-  /// substituted in. Returns `null` when no region is active — caller
-  /// must render a placeholder instead of mounting the map.
+  /// Loaded + substituted styles, keyed on `port|minZoom|maxZoom`.
   ///
-  /// [tileServerPort] is the port from
-  /// `LocalTileServer.instance` (via `tileServerProvider`); when
-  /// non-null and the active region is an `.mbtiles`, the substitution
-  /// points the source at `http://127.0.0.1:<port>/tilejson.json`
-  /// instead of the broken `mbtiles://<path>` URL.
-  static Future<String?> loadForRegion(
-    String? activeRegionPath, {
-    int? tileServerPort,
+  /// `rootBundle.loadString` memoises the raw asset, but the
+  /// substitution does not come free: a 74 KB JSON decode + re-encode
+  /// per call, and the panel rebuilds its style future on every
+  /// port/range change (`docs/PERF_PLAN.md` §3 #11). Bounded to
+  /// [_cacheLimit] entries, evicting oldest-first — the live port plus a
+  /// couple of stale ones is all anyone ever asks for.
+  static final Map<String, String> _cache = <String, String>{};
+  static const _cacheLimit = 4;
+
+  /// Returns the bundled style pointed at the running loopback server.
+  ///
+  /// [minZoom] / [maxZoom] are `LocalTileServer.servedMinZoom` /
+  /// `servedMaxZoom` — the union over every served archive. Passing
+  /// them matters: with one style source there is one zoom range, and
+  /// leaving the bundled `0–13` in place would stop MapLibre asking for
+  /// the z14 tiles a coverage pack holds. `null` leaves the bundled
+  /// values alone.
+  ///
+  /// Nullable return purely so call sites can keep a single
+  /// `FutureBuilder<String?>`; this never returns `null` in practice.
+  static Future<String?> loadForServer({
+    required int port,
+    int? minZoom,
+    int? maxZoom,
   }) async {
-    if (activeRegionPath == null) return null;
+    final key = '$port|$minZoom|$maxZoom';
+    final cached = _cache[key];
+    if (cached != null) return cached;
     final raw = await rootBundle.loadString(_styleAsset);
-    if (activeRegionPath == _diagnosticRemoteSentinel) {
-      return raw.replaceAll(
-        _placeholder,
-        'pmtiles://https://demo-bucket.protomaps.com/v4.pmtiles',
-      );
-    }
-    return substituteRegionPath(
+    final style = substituteTileServer(
       raw,
-      activeRegionPath,
-      tileServerPort: tileServerPort,
+      port: port,
+      minZoom: minZoom,
+      maxZoom: maxZoom,
+    );
+    _cache[key] = style;
+    while (_cache.length > _cacheLimit) {
+      _cache.remove(_cache.keys.first);
+    }
+    return style;
+  }
+
+  /// The diagnostic style: the bundled JSON with the source pointed at
+  /// the public Protomaps demo archive. Glyph/sprite placeholders are
+  /// deliberately left as-is — with no loopback running there is
+  /// nothing to serve them, and the diagnostic only asks "does the
+  /// renderer draw remote vector tiles at all?".
+  static Future<String?> loadRemoteDemo() async {
+    final raw = await rootBundle.loadString(_styleAsset);
+    return raw.replaceAll(
+      _placeholder,
+      'pmtiles://https://demo-bucket.protomaps.com/v4.pmtiles',
     );
   }
 
-  /// Substitutes the bundled-style placeholder with the right MapLibre
-  /// URL for the active region's file. Public for unit testing — same
-  /// substitution used by [loadForRegion] but without touching the
-  /// asset bundle.
+  /// Drops the memoised styles. Tests only — production keys on the
+  /// port, which is unique per server start.
+  @visibleForTesting
+  static void clearCache() => _cache.clear();
+
+  /// Rewrites the bundled style for the loopback server on [port].
+  /// Pure — public for unit testing, and used by [loadForServer].
   ///
-  /// URL formats:
-  ///   - `*.mbtiles` + [tileServerPort] non-null →
-  ///     `http://127.0.0.1:<port>/tilejson.json` (the workaround path,
-  ///     served by `LocalTileServer`).
-  ///   - `*.mbtiles` + no port → `mbtiles:///<abs-path>` (native code
-  ///     path; broken on Android 13.0.x but kept for parity).
-  ///   - `*.pmtiles` → `pmtiles://file://<abs-path>` (also broken on
-  ///     Android, kept for when the upstream fix lands).
-  static String substituteRegionPath(
-    String rawStyleJson,
-    String activeRegionPath, {
-    int? tileServerPort,
+  ///   * tiles → `http://127.0.0.1:<port>/{z}/{x}/{y}.pbf` (a per-tile
+  ///     template, not a TileJSON URL: skips a round-trip, 0.8.0+46);
+  ///   * `__TRAIL_GLYPHS__` / `__TRAIL_SPRITE__` → the same loopback.
+  ///     maplibre_gl on Android cannot read `asset://flutter_assets/…`
+  ///     (confirmed by the +48 log capture: "Could not read asset" for
+  ///     every Roboto fontstack), and a missing-glyphs failure cascades
+  ///     — maplibre cancels in-flight tile requests and renders nothing;
+  ///   * the `openmaptiles` source's `minzoom`/`maxzoom`, when
+  ///     [minZoom] / [maxZoom] are supplied.
+  static String substituteTileServer(
+    String rawStyleJson, {
+    required int port,
+    int? minZoom,
+    int? maxZoom,
   }) {
-    final lower = activeRegionPath.toLowerCase();
-    final tileUrl = switch ((lower.endsWith('.mbtiles'), tileServerPort)) {
-      // 0.8.0+46: bypass TileJSON entirely. The bundled style declares
-      // `tiles: ["pmtiles://__TRAIL_ACTIVE_REGION__"]`; we substitute
-      // the placeholder with a per-tile URL template so MapLibre
-      // fetches MVT directly without a TileJSON round-trip.
-      (true, final int port) =>
-        'http://127.0.0.1:$port/{z}/{x}/{y}.pbf',
-      (true, _) => 'mbtiles://$activeRegionPath',
-      _ => 'pmtiles://file://$activeRegionPath',
-    };
-    // 0.8.0+49: glyphs and sprites also go through the loopback now.
-    // maplibre_gl on Android can't read `asset://flutter_assets/...`
-    // URLs (confirmed by the +48 log capture: "Could not read asset"
-    // for every Roboto fontstack), and a missing-glyphs failure
-    // cascades — maplibre cancels in-flight tile requests and
-    // renders nothing. LocalTileServer now serves
-    // `/glyphs/<fontstack>/<range>.pbf` and `/sprites/<name>` from
-    // the bundled rootBundle, so we get a single delivery path the
-    // renderer is happy with.
-    final glyphsBase = tileServerPort != null
-        ? 'http://127.0.0.1:$tileServerPort/glyphs'
-        : 'asset://flutter_assets/assets/maptiles/glyphs';
-    final spriteBase = tileServerPort != null
-        ? 'http://127.0.0.1:$tileServerPort/sprites/osm-liberty'
-        : 'asset://flutter_assets/assets/maptiles/sprites/osm-liberty';
-    return rawStyleJson
-        .replaceAll(_placeholder, tileUrl)
-        .replaceAll('__TRAIL_GLYPHS__', glyphsBase)
-        .replaceAll('__TRAIL_SPRITE__', spriteBase);
+    final substituted = rawStyleJson
+        .replaceAll(_placeholder, 'http://127.0.0.1:$port/{z}/{x}/{y}.pbf')
+        .replaceAll('__TRAIL_GLYPHS__', 'http://127.0.0.1:$port/glyphs')
+        .replaceAll(
+          '__TRAIL_SPRITE__',
+          'http://127.0.0.1:$port/sprites/osm-liberty',
+        );
+    if (minZoom == null && maxZoom == null) return substituted;
+    return _rewriteSourceZooms(
+      substituted,
+      minZoom: minZoom,
+      maxZoom: maxZoom,
+    );
+  }
+
+  /// Re-encodes the style with the vector source's zoom range replaced.
+  /// A decode + encode of 74 KB is a few ms and only happens on a
+  /// port/range change (then it's memoised) — cheaper to reason about
+  /// than a regex over JSON. Anything that isn't a style object with
+  /// that source comes back untouched, so a caller can hand this a
+  /// fragment (tests do) without it throwing.
+  static String _rewriteSourceZooms(
+    String styleJson, {
+    int? minZoom,
+    int? maxZoom,
+  }) {
+    try {
+      final decoded = jsonDecode(styleJson);
+      if (decoded is! Map) return styleJson;
+      final sources = decoded['sources'];
+      if (sources is! Map) return styleJson;
+      final source = sources[_sourceId];
+      if (source is! Map) return styleJson;
+      if (minZoom != null) source['minzoom'] = minZoom;
+      if (maxZoom != null) source['maxzoom'] = maxZoom;
+      return jsonEncode(decoded);
+    } catch (e) {
+      debugPrint('TrailStyle: source zoom-range rewrite skipped — $e');
+      return styleJson;
+    }
   }
 }

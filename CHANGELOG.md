@@ -4,6 +4,20 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.15.0+97] — 2026-08-22
+
+### Added
+- **Offline maps can now be layered.** Every installed archive gets a role from its row menu in *Settings → Offline map → Regions*: one active **region** (your big detailed file, as before), any number of **coverage packs** (small detailed extracts around places you've visited) and a **world overview** (a ~45 MB file that gives every pin on Earth some context). Coverage packs and the overview are always shown; the app serves each map tile from the most detailed archive that has it. File names containing "overview" or "coverage" get the right role automatically on install.
+- **Zoomed-in areas no archive covers are no longer blank.** When none of your archives has a tile, Trail builds it from the nearest coarser tile it does have — scaled and clipped on the phone — so zooming into a pin that only the world overview covers shows coarse roads and water instead of nothing. (MapLibre itself only does this past the last zoom level of a source, which is why a missing tile used to render empty.)
+- **`.pmtiles` archives finally render.** They had silently drawn nothing on Android since 0.8.0 because the map engine's file-URL support is broken there; every archive now goes through the app's own tile server, the way `.mbtiles` files already did. Both formats can be mixed.
+- Regions screen rows show each archive's zoom range and size.
+
+### Changed
+- **Map engine updated to `maplibre_gl` 0.27.0** and pre-warmed right after the first frame, which takes roughly 170–480 ms off the first map open.
+- **Smaller downloads: releases are now built per CPU architecture and shrunk with R8.** Pick `…-arm64-v8a.apk` on any phone from the last ~8 years (`…-armeabi-v7a.apk` only for old 32-bit devices, `…-x86_64.apk` only for emulators). Upgrading over 0.14.1 works as usual; this is the last time the download will be ~108 MB.
+- **Background pings are a little cheaper.** A reboot now opens the encrypted database once instead of twice, the periodic job is only re-registered when your cadence (or the low-battery stretch) actually changes instead of on every tick, and the automatic Wikimedia photo lookup only runs on Wi-Fi/Ethernet or on mobile data while charging — it no longer spends two 8-second timeouts on every ping taken with no signal. Pings that skipped the lookup pick their photos up from *Settings → Retry / backfill photos* as before.
+- The map style is built once per tile-server session instead of on every map mount, and glyph/sprite files are served from memory after the first request.
+
 ## [0.14.1+96] — 2026-08-22
 
 ### Fixed

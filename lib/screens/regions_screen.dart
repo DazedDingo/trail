@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../providers/mbtiles_provider.dart';
 import '../services/github_api.dart';
+import '../services/local_tile_server.dart';
 import '../services/mbtiles_service.dart';
 import '../services/region_presets.dart';
 import '../services/tile_catalog.dart';
@@ -12,16 +13,37 @@ import '../services/tile_downloader.dart';
 import '../widgets/help_button.dart';
 import 'bbox_picker_screen.dart';
 
-/// Offline-map region library.
+/// Offline-map archive library.
 ///
 /// The logging pipeline is already fully offline; this screen makes the
 /// history *viewer* offline too by letting the user sideload `.pmtiles`
-/// files built from OpenStreetMap on a PC (see `docs/TILES.md`).
-class RegionsScreen extends ConsumerWidget {
+/// / `.mbtiles` archives built from OpenStreetMap on a PC (see
+/// `docs/TILES.md`), and tag each one with the role it plays in the
+/// served stack (`TileRole`).
+class RegionsScreen extends ConsumerStatefulWidget {
   const RegionsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<RegionsScreen> createState() => _RegionsScreenState();
+}
+
+class _RegionsScreenState extends ConsumerState<RegionsScreen> {
+  /// Memoised [LocalTileServer.probe] calls, keyed by archive path.
+  ///
+  /// A probe opens the archive, reads its metadata and closes it again —
+  /// cheap, but not free, and `ListView` rebuilds a row on every scroll
+  /// frame. Caching the *future* (not the value) also collapses the
+  /// duplicate calls a rebuild-during-probe would otherwise make.
+  /// Dropped for a path when that archive is deleted or re-installed.
+  final Map<String, Future<ServedArchiveSummary>> _probes = {};
+
+  Future<ServedArchiveSummary> _probe(String path) =>
+      _probes.putIfAbsent(path, () => LocalTileServer.probe(path));
+
+  void _forgetProbe(String path) => _probes.remove(path);
+
+  @override
+  Widget build(BuildContext context) {
     final regions = ref.watch(installedRegionsProvider);
     final active = ref.watch(activeRegionProvider);
 
@@ -39,30 +61,46 @@ class RegionsScreen extends ConsumerWidget {
             sections: [
               HelpSection(
                 icon: Icons.cloud_download_outlined,
-                title: 'What\'s a region?',
+                title: 'What\'s an archive?',
                 body:
-                    'A `.pmtiles` file with vector map data for an area '
-                    '(e.g. UK, Lake District, Cairngorms). Trail is fully '
-                    'offline — without an active region, the maps go '
-                    'blank. Regions live under the app\'s documents '
-                    'folder so they survive uninstall-restore.',
+                    'A `.pmtiles` or `.mbtiles` file with vector map data '
+                    'for an area (e.g. UK, Lake District, Cairngorms). '
+                    'Trail is fully offline — with nothing installed, the '
+                    'maps go blank. Archives live under the app\'s '
+                    'documents folder so they survive uninstall-restore.',
+              ),
+              HelpSection(
+                icon: Icons.layers_outlined,
+                title: 'Roles',
+                body:
+                    'Every archive is a region, a coverage pack or the '
+                    'world overview. Coverage packs and the overview are '
+                    'always shown; one region can be active alongside '
+                    'them. Tiles are served detailed-first, and zooms no '
+                    'archive holds are drawn from the nearest coarser '
+                    'tile. A file name containing "coverage" or '
+                    '"overview" is tagged for you — change it any time '
+                    'from the row menu → Role.',
               ),
               HelpSection(
                 icon: Icons.add_circle_outline,
-                title: 'Add a region',
+                title: 'Add an archive',
                 body:
                     'Tap "Add region" for four sources: pick a `.pmtiles` '
-                    'file from your device, paste a download URL, browse '
-                    'the curated catalog (built from raw.githubusercontent), '
-                    'or build one on demand from a bbox or national-park '
-                    'preset (needs a GitHub PAT for the workflow_dispatch).',
+                    'or `.mbtiles` file from your device, paste a download '
+                    'URL, browse the curated catalog (built from '
+                    'raw.githubusercontent), or build one on demand from a '
+                    'bbox or national-park preset (needs a GitHub PAT for '
+                    'the workflow_dispatch).',
               ),
               HelpSection(
                 icon: Icons.check_circle_outline,
                 title: 'Set active',
                 body:
-                    'Only one region is active at a time — tap a row to '
-                    'set it. The map rebuilds on the next visit.',
+                    'Only one region is active at a time — tap a region '
+                    'row to set it. Coverage packs and the world overview '
+                    'need no activating. The map rebuilds on the next '
+                    'visit.',
               ),
             ],
           ),
@@ -80,7 +118,7 @@ class RegionsScreen extends ConsumerWidget {
                 path: TilesService.diagnosticRemoteSentinel,
                 bytes: 0,
               ));
-              ref.invalidate(activeRegionProvider);
+              invalidateTileProviders(ref);
               if (context.mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text(
@@ -93,7 +131,12 @@ class RegionsScreen extends ConsumerWidget {
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _showAddSheet(context, ref),
+        onPressed: () async {
+          await widget._showAddSheet(context, ref);
+          // A new file (or an overwrite of an existing name) invalidates
+          // whatever the cached probes said about the library.
+          _probes.clear();
+        },
         icon: const Icon(Icons.add),
         label: const Text('Add region'),
       ),
@@ -111,14 +154,24 @@ class RegionsScreen extends ConsumerWidget {
               if (i == 0) return _Header(activeRegion: activeRegion);
               final r = list[i - 1];
               final isActive = activeRegion?.path == r.path;
-              return _RegionTile(region: r, isActive: isActive);
+              return _RegionTile(
+                region: r,
+                isActive: isActive,
+                probe: _probe,
+                onFileChanged: _forgetProbe,
+              );
             },
           );
         },
       ),
     );
   }
+}
 
+/// The file-picker install flow. On the widget rather than the state
+/// because it touches no state — same reason the URL / catalog / build
+/// variants sit in `_RegionsScreenAddFlows` further down.
+extension _RegionsScreenInstall on RegionsScreen {
   Future<void> _showAddSheet(BuildContext context, WidgetRef ref) async {
     final choice = await showModalBottomSheet<_AddSource>(
       context: context,
@@ -131,20 +184,22 @@ class RegionsScreen extends ConsumerWidget {
               leading: const Icon(Icons.folder_open),
               title: const Text('From file'),
               subtitle: const Text(
-                'Pick an .mbtiles you already have on the device',
+                'Pick a .pmtiles or .mbtiles you already have on the device',
               ),
               onTap: () => Navigator.pop(c, _AddSource.filePicker),
             ),
             ListTile(
               leading: const Icon(Icons.link),
               title: const Text('From URL'),
-              subtitle: const Text('Direct link to an .mbtiles file'),
+              subtitle: const Text(
+                'Direct link to a .pmtiles or .mbtiles file',
+              ),
               onTap: () => Navigator.pop(c, _AddSource.url),
             ),
             ListTile(
               leading: const Icon(Icons.storefront_outlined),
               title: const Text('Browse curated catalog'),
-              subtitle: const Text('Pre-built regions, one tap to install'),
+              subtitle: const Text('Pre-built archives, one tap to install'),
               onTap: () => Navigator.pop(c, _AddSource.catalog),
             ),
             ListTile(
@@ -197,10 +252,10 @@ class RegionsScreen extends ConsumerWidget {
     }
     try {
       await TilesService.install(path);
-      ref.invalidate(installedRegionsProvider);
+      invalidateTileProviders(ref);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Region installed')),
+          const SnackBar(content: Text('Archive installed')),
         );
       }
     } catch (e) {
@@ -220,19 +275,35 @@ class _Header extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final text = activeRegion == null
-        ? 'No active region — map viewer is empty until one is set.'
-        : 'Active: ${activeRegion!.name} · viewer reads from this file.';
+        ? 'No active region.'
+        : 'Active region: ${activeRegion!.name}.';
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Icon(
               activeRegion == null ? Icons.map_outlined : Icons.storage,
               size: 20,
             ),
             const SizedBox(width: 10),
-            Expanded(child: Text(text)),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(text),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Coverage packs and the world overview are always '
+                    'shown; one region can be active. Tiles are served '
+                    'detailed-first, and zooms no archive holds are drawn '
+                    'from the nearest coarser tile.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
       ),
@@ -243,38 +314,95 @@ class _Header extends StatelessWidget {
 class _RegionTile extends ConsumerWidget {
   final TilesRegion region;
   final bool isActive;
-  const _RegionTile({required this.region, required this.isActive});
+
+  /// Memoised metadata read, owned by `_RegionsScreenState`.
+  final Future<ServedArchiveSummary> Function(String path) probe;
+
+  /// Called when the file behind [region] is deleted or retagged, so the
+  /// screen can drop its cached probe.
+  final void Function(String path) onFileChanged;
+
+  const _RegionTile({
+    required this.region,
+    required this.isActive,
+    required this.probe,
+    required this.onFileChanged,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final scheme = Theme.of(context).colorScheme;
+    final isRegionRole = region.role == TileRole.region;
     return Card(
       child: ListTile(
+        isThreeLine: true,
         leading: Icon(
-          isActive ? Icons.check_circle : Icons.map_outlined,
-          color: isActive ? Theme.of(context).colorScheme.primary : null,
+          switch (region.role) {
+            TileRole.coverage => Icons.layers_outlined,
+            TileRole.overview => Icons.public,
+            TileRole.region =>
+              isActive ? Icons.check_circle : Icons.map_outlined,
+          },
+          color: isActive && isRegionRole ? scheme.primary : null,
         ),
-        title: Text(region.name),
-        subtitle: Text(_formatBytes(region.bytes)),
+        title: Row(
+          children: [
+            Flexible(child: Text(region.name, overflow: TextOverflow.ellipsis)),
+            const SizedBox(width: 8),
+            _RoleChip(role: region.role, active: isActive && isRegionRole),
+          ],
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(_formatBytes(region.bytes)),
+            // Zoom range + format, read from the archive itself. Lazy:
+            // one probe per file, cached by the screen.
+            FutureBuilder<ServedArchiveSummary>(
+              future: probe(region.path),
+              builder: (context, snap) {
+                final String detail;
+                if (snap.hasError) {
+                  detail = 'Unreadable archive';
+                } else if (!snap.hasData) {
+                  detail = 'Reading…';
+                } else {
+                  final s = snap.data!;
+                  detail = 'z${s.minZoom}–${s.maxZoom}'
+                      '${s.format == null ? '' : ' · ${s.format}'}';
+                }
+                return Text(
+                  detail,
+                  style: Theme.of(context).textTheme.bodySmall,
+                );
+              },
+            ),
+          ],
+        ),
         trailing: PopupMenuButton<_RegionAction>(
           onSelected: (a) => _handle(context, ref, a),
           itemBuilder: (_) => [
-            if (!isActive)
+            if (isRegionRole && !isActive)
               const PopupMenuItem(
                 value: _RegionAction.setActive,
                 child: Text('Set as active'),
               ),
-            if (isActive)
+            if (isRegionRole && isActive)
               const PopupMenuItem(
                 value: _RegionAction.clearActive,
                 child: Text('Clear active'),
               ),
+            const PopupMenuItem(
+              value: _RegionAction.changeRole,
+              child: Text('Role…'),
+            ),
             const PopupMenuItem(
               value: _RegionAction.delete,
               child: Text('Delete'),
             ),
           ],
         ),
-        onTap: isActive
+        onTap: !isRegionRole || isActive
             ? null
             : () => _handle(context, ref, _RegionAction.setActive),
       ),
@@ -289,11 +417,63 @@ class _RegionTile extends ConsumerWidget {
     switch (action) {
       case _RegionAction.setActive:
         await TilesService.setActive(region);
-        ref.invalidate(activeRegionProvider);
+        invalidateTileProviders(ref);
         break;
       case _RegionAction.clearActive:
         await TilesService.clearActive();
-        ref.invalidate(activeRegionProvider);
+        invalidateTileProviders(ref);
+        break;
+      case _RegionAction.changeRole:
+        final picked = await showDialog<TileRole>(
+          context: context,
+          builder: (c) => AlertDialog(
+            title: Text('Role for ${region.name}'),
+            content: SingleChildScrollView(
+              child: RadioGroup<TileRole>(
+                groupValue: region.role,
+                onChanged: (v) => Navigator.pop(c, v),
+                child: const Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    RadioListTile<TileRole>(
+                      title: Text('Region'),
+                      subtitle: Text(
+                        'A normal pack. Served only while it is the '
+                        'active region.',
+                      ),
+                      value: TileRole.region,
+                    ),
+                    RadioListTile<TileRole>(
+                      title: Text('Coverage'),
+                      subtitle: Text(
+                        'Detailed extract around places visited. Always '
+                        'served, ahead of the region.',
+                      ),
+                      value: TileRole.coverage,
+                    ),
+                    RadioListTile<TileRole>(
+                      title: Text('World overview'),
+                      subtitle: Text(
+                        'Coarse whole-world pack. Always served, last.',
+                      ),
+                      value: TileRole.overview,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(c),
+                child: const Text('Cancel'),
+              ),
+            ],
+          ),
+        );
+        if (picked == null || picked == region.role) break;
+        await TilesService.setRole(region, picked);
+        onFileChanged(region.path);
+        invalidateTileProviders(ref);
         break;
       case _RegionAction.delete:
         final ok = await showDialog<bool>(
@@ -317,15 +497,47 @@ class _RegionTile extends ConsumerWidget {
         );
         if (ok == true) {
           await TilesService.delete(region);
-          ref.invalidate(installedRegionsProvider);
-          ref.invalidate(activeRegionProvider);
+          onFileChanged(region.path);
+          invalidateTileProviders(ref);
         }
         break;
     }
   }
 }
 
-enum _RegionAction { setActive, clearActive, delete }
+/// Role badge next to an archive's name. The active region additionally
+/// reads "Region · active" — role and active are different axes and the
+/// row has to show both without a second icon.
+class _RoleChip extends StatelessWidget {
+  final TileRole role;
+  final bool active;
+  const _RoleChip({required this.role, required this.active});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final highlight = active || role != TileRole.region;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: highlight
+            ? scheme.primaryContainer
+            : scheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        active ? '${role.label} · active' : role.label,
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: highlight
+                  ? scheme.onPrimaryContainer
+                  : scheme.onSurfaceVariant,
+            ),
+      ),
+    );
+  }
+}
+
+enum _RegionAction { setActive, clearActive, changeRole, delete }
 
 enum _AddSource { filePicker, url, catalog, build }
 
@@ -879,7 +1091,7 @@ extension _RegionsScreenAddFlows on RegionsScreen {
       );
       if (!context.mounted) return;
       if (!dismissed) Navigator.pop(context); // close progress dialog
-      ref.invalidate(installedRegionsProvider);
+      invalidateTileProviders(ref);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Installed ${region.name}'),
@@ -887,7 +1099,7 @@ extension _RegionsScreenAddFlows on RegionsScreen {
             label: 'Set active',
             onPressed: () async {
               await TilesService.setActive(region);
-              ref.invalidate(activeRegionProvider);
+              invalidateTileProviders(ref);
             },
           ),
         ),

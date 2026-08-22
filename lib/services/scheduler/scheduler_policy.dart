@@ -106,4 +106,46 @@ class SchedulerPolicy {
   static bool shouldRetry(Ping snapshot) {
     return snapshot.source == PingSource.noFix && snapshot.note != skipNote;
   }
+
+  /// True when the periodic WorkManager task should be re-registered this
+  /// tick. `registerPeriodicTask` with `ExistingPeriodicWorkPolicy.update`
+  /// is not free — every call round-trips the platform channel and briefly
+  /// cancels + re-arms the native job — so we only pay that cost when the
+  /// [effective] cadence for this tick actually differs from
+  /// [lastEnqueuedMinutes] (the cadence, in minutes, that was registered
+  /// last time `enqueuePeriodic` succeeded). `null` means we've never
+  /// recorded one (fresh install, cleared prefs, or upgrading from a
+  /// version that didn't write the marker) — always re-enqueue then so the
+  /// native registration exists at all.
+  static bool shouldReenqueuePeriodic({
+    required Duration effective,
+    required int? lastEnqueuedMinutes,
+  }) {
+    if (lastEnqueuedMinutes == null) return true;
+    return lastEnqueuedMinutes != effective.inMinutes;
+  }
+
+  /// Whether the background worker should attempt the online Wikimedia
+  /// photo fetch (#6) this tick. Unmetered connections (`wifi`/`ethernet`)
+  /// are always fine; a metered `mobile` connection only qualifies while
+  /// [isCharging] (the user isn't paying battery *and* data for decorative
+  /// photos at the same time). `none`, `unknown`, and `null` all mean "we
+  /// don't know it's safe" → false. Pure and dependency-free so the
+  /// truth table is unit-tested without a platform battery/connectivity
+  /// read; the worker supplies both inputs from the ping snapshot + a
+  /// single `Battery().batteryState` call.
+  static bool shouldAutoFetchPhotos({
+    required String? networkState,
+    required bool isCharging,
+  }) {
+    switch (networkState) {
+      case 'wifi':
+      case 'ethernet':
+        return true;
+      case 'mobile':
+        return isCharging;
+      default:
+        return false;
+    }
+  }
 }
