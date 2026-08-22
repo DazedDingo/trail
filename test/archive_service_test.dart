@@ -56,6 +56,13 @@ Future<Database> _openMemDb() async {
     );
   ''');
   await db.execute('CREATE INDEX idx_pings_ts_utc ON pings(ts_utc DESC);');
+  // idx_pings_ts_fix (schema v4) — partial covering index the fixes-only
+  // map read + latestSuccessful walk. Mirror of
+  // TrailDatabase._pingsTsFixIndexSql; keep byte-identical (gotcha 20).
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_pings_ts_fix ON pings(ts_utc, lat, lon) '
+    'WHERE lat IS NOT NULL AND lon IS NOT NULL;',
+  );
   return db;
 }
 

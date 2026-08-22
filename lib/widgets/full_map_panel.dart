@@ -1998,10 +1998,14 @@ class _DeletePingButtonState extends ConsumerState<_DeletePingButton> {
       final db = await TrailDatabase.shared();
       await PingDao(db).deleteById(id);
       // Invalidate every provider that hangs off the pings table so the
-      // map, history, and trip-detection all pick up the gap immediately.
+      // map, history, trip-detection and the home cards all pick up the
+      // gap immediately (the deleted pin may have been the latest fix).
       ref.invalidate(allPingsProvider);
       ref.invalidate(recentPingsProvider);
       ref.invalidate(pingsByRangeProvider);
+      ref.invalidate(lastSuccessfulPingProvider);
+      ref.invalidate(heartbeatHealthyProvider);
+      ref.invalidate(pingCountProvider);
       if (mounted) Navigator.of(context).pop(); // close the detail sheet
     } catch (e) {
       if (!mounted) return;

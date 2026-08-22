@@ -27,11 +27,16 @@ import '../widgets/help_button.dart';
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
 
+  /// Explicit user refresh (app-bar button + pull-to-refresh). Covers
+  /// the map too: a ping the worker wrote since the last build only
+  /// shows up once its fixes-only family is re-queried.
   void _refreshAll(WidgetRef ref) {
     ref.invalidate(lastSuccessfulPingProvider);
     ref.invalidate(heartbeatHealthyProvider);
     ref.invalidate(pingCountProvider);
     ref.invalidate(recentPingsProvider);
+    ref.invalidate(allPingsProvider);
+    ref.invalidate(pingsByRangeProvider);
   }
 
   @override
@@ -424,6 +429,9 @@ class _PanicHeaderActionState extends ConsumerState<_PanicHeaderAction>
     ref.invalidate(heartbeatHealthyProvider);
     ref.invalidate(pingCountProvider);
     ref.invalidate(recentPingsProvider);
+    // The panic row is a fix — the map and stats should show it too.
+    ref.invalidate(allPingsProvider);
+    ref.invalidate(pingsByRangeProvider);
 
     if (error != null || result == null) {
       ScaffoldMessenger.of(context).showSnackBar(

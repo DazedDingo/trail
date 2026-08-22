@@ -11,6 +11,13 @@ class PingDao {
   final Database db;
   PingDao(this.db);
 
+  /// "This row is a real fix." Byte-identical to the WHERE clause of the
+  /// partial index `idx_pings_ts_fix` (schema v4, `TrailDatabase`) —
+  /// SQLite only considers a partial index when the query's WHERE
+  /// *syntactically* implies the index's, so keep this text and the
+  /// index DDL in lock-step. Every fixes-only read composes it.
+  static const fixPredicate = 'lat IS NOT NULL AND lon IS NOT NULL';
+
   Future<int> insert(Ping p) async {
     final map = p.toMap()..remove('id');
     return db.insert('pings', map);
@@ -54,10 +61,16 @@ class PingDao {
 
   /// Most-recent successful fix — used by the "last successful ping" card
   /// on the home screen. Rejects `no_fix` and null-coord rows.
+  ///
+  /// Leads with [fixPredicate] so the planner walks `idx_pings_ts_fix`
+  /// backwards and stops at its first entry — O(1) regardless of how
+  /// many no_fix rows a stationary/indoor streak has piled on top of the
+  /// last real fix (pre-v4 this scanned `idx_pings_ts_utc` through every
+  /// one of them). The `source` check is evaluated on that one row.
   Future<Ping?> latestSuccessful() async {
     final rows = await db.query(
       'pings',
-      where: "source != 'no_fix' AND lat IS NOT NULL AND lon IS NOT NULL",
+      where: "$fixPredicate AND source != 'no_fix'",
       orderBy: 'ts_utc DESC',
       limit: 1,
     );
@@ -92,6 +105,53 @@ class PingDao {
         startUtc.millisecondsSinceEpoch,
         endUtc.millisecondsSinceEpoch,
       ],
+      orderBy: 'ts_utc ASC',
+    );
+    return rows.map(Ping.fromMap).toList();
+  }
+
+  /// Fixes only — rows with a usable `lat`/`lon` — oldest-first,
+  /// optionally clipped to `[startUtc, endUtc]` (both ends inclusive;
+  /// either bound may be omitted, neither = every fix ever). This is the
+  /// map's read (0.14.1, PERF_PLAN §2 M4): the map never draws a
+  /// coordinate-less `no_fix`/boot row, so they are dropped here instead
+  /// of in `buildPinSnapshot`, and [fixPredicate] lets the planner range-
+  /// scan the partial index `idx_pings_ts_fix` — only fix rows are
+  /// touched, and the index carries the (ts_utc, lat, lon) triple the
+  /// map needs.
+  ///
+  /// Deliberately still `SELECT *` rather than a 5-column projection: the
+  /// pin detail sheet reads accuracy / altitude / speed / battery /
+  /// network / cell / wifi / note / comment straight off the `id → Ping`
+  /// map the panel builds from this list, so a narrower row would force
+  /// a second per-tap read. Row decode is off the hot path (~30–50 ms per
+  /// 10k rows, PERF_PLAN §1.1); the pin-upload cost it sat next to is gone.
+  ///
+  /// Bounds are UTC instants. The local-day → UTC expansion the UI needs
+  /// lives in `pings_provider.dart` (`mapRangeUtcBounds`), keeping this
+  /// layer free of Flutter types.
+  Future<List<Ping>> fixesByDateRange({
+    DateTime? startUtc,
+    DateTime? endUtc,
+  }) async {
+    final where = StringBuffer(fixPredicate);
+    final args = <Object?>[];
+    if (startUtc != null && endUtc != null) {
+      where.write(' AND ts_utc BETWEEN ? AND ?');
+      args
+        ..add(startUtc.millisecondsSinceEpoch)
+        ..add(endUtc.millisecondsSinceEpoch);
+    } else if (startUtc != null) {
+      where.write(' AND ts_utc >= ?');
+      args.add(startUtc.millisecondsSinceEpoch);
+    } else if (endUtc != null) {
+      where.write(' AND ts_utc <= ?');
+      args.add(endUtc.millisecondsSinceEpoch);
+    }
+    final rows = await db.query(
+      'pings',
+      where: where.toString(),
+      whereArgs: args,
       orderBy: 'ts_utc ASC',
     );
     return rows.map(Ping.fromMap).toList();

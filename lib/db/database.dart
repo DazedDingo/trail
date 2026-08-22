@@ -38,7 +38,13 @@ class TrailDatabase {
   // lookups so repeat visits to the same place don't re-hit Wikimedia.
   // Cell key is the quantized lat/lon (3 decimals ≈ ~110 m at the
   // equator). Also additive — existing data untouched.
-  static const _schemaVersion = 3;
+  // v4 (0.14.1): adds `idx_pings_ts_fix`, a PARTIAL covering index on
+  // (ts_utc, lat, lon) WHERE lat/lon IS NOT NULL. The map only ever draws
+  // fixes, so its range read (`PingDao.fixesByDateRange`) walks fix rows
+  // alone, and `latestSuccessful` stops scanning every no_fix row of a
+  // stationary streak. Index-only — no row data changes. `ANALYZE` runs
+  // once after the step so the planner has row estimates for it.
+  static const _schemaVersion = 4;
 
   /// Cached handle for the UI isolate. Kept as a `Future` (not a resolved
   /// `Database`) so parallel first-callers all await the same open — avoids
@@ -178,6 +184,33 @@ class TrailDatabase {
     _shared = null;
   }
 
+  /// Test-only hook: make [shared] resolve to [db] (an in-memory
+  /// `sqflite_common_ffi` handle) so Riverpod providers that go through
+  /// `TrailDatabase.shared()` can be exercised without SQLCipher or the
+  /// Keystore. Pair with [resetSharedForTest] in `tearDown`.
+  @visibleForTesting
+  static void useSharedForTest(Database db) {
+    _shared = Future.value(db);
+  }
+
+  /// Test-only: run the production `onCreate` DDL against an arbitrary
+  /// handle. The migration tests exercise the real statements rather than
+  /// a hand-mirrored copy (the DAO tests still mirror the schema — gotcha
+  /// 20 — because they predate this hook and assert against it).
+  @visibleForTesting
+  static Future<void> createSchemaForTest(Database db) =>
+      _onCreate(db, _schemaVersion);
+
+  /// Test-only: run the production `onUpgrade` chain from [from] up to
+  /// the current [_schemaVersion] against an arbitrary handle.
+  @visibleForTesting
+  static Future<void> upgradeSchemaForTest(Database db, {required int from}) =>
+      _onUpgrade(db, from, _schemaVersion);
+
+  /// Test-only: the schema version `openDatabase` is asked for.
+  @visibleForTesting
+  static int get schemaVersionForTest => _schemaVersion;
+
   /// Runs SQLite's `PRAGMA integrity_check`. A healthy DB returns a single
   /// row `{ 'integrity_check': 'ok' }`; anything else is a corruption
   /// signal (the result set lists every malformed index / orphaned row).
@@ -219,6 +252,7 @@ class TrailDatabase {
     await db.execute(
       'CREATE INDEX idx_pings_ts_utc ON pings(ts_utc DESC);',
     );
+    await db.execute(_pingsTsFixIndexSql);
     await db.execute('''
       CREATE TABLE emergency_contacts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -258,7 +292,35 @@ class TrailDatabase {
         await txn.execute(_areaPhotosIndexSql);
       });
     }
+    if (oldVersion < 4) {
+      // v3 → v4: partial covering index for the map's fixes-only read
+      // and `latestSuccessful`. Index-only, so the only failure mode is
+      // "index missing" — `IF NOT EXISTS` makes a retried migration a
+      // no-op rather than an error. ANALYZE follows (outside the DDL
+      // transaction, still inside sqflite's open transaction) so the
+      // planner sees the new index's row count straight away instead of
+      // guessing from defaults; it is the only ANALYZE the app ever runs.
+      await db.transaction((txn) async {
+        await txn.execute(_pingsTsFixIndexSql);
+      });
+      await db.execute('ANALYZE;');
+    }
   }
+
+  // ─── idx_pings_ts_fix (v4) ───────────────────────────────────────────
+  //
+  // Partial (only rows with a usable lat/lon — i.e. actual fixes) and
+  // covering for the (ts_utc, lat, lon) triple. The map's read
+  // (`PingDao.fixesByDateRange`) and `PingDao.latestSuccessful` carry the
+  // identical `lat IS NOT NULL AND lon IS NOT NULL` predicate, which is
+  // what lets SQLite's planner choose this index over `idx_pings_ts_utc`
+  // (verified with EXPLAIN QUERY PLAN in `database_migration_test.dart`
+  // and `ping_dao_test.dart`). The predicate text must stay byte-identical
+  // between the index and the DAO queries — SQLite proves implication
+  // syntactically, not semantically.
+  static const _pingsTsFixIndexSql =
+      'CREATE INDEX IF NOT EXISTS idx_pings_ts_fix ON pings(ts_utc, lat, lon) '
+      'WHERE lat IS NOT NULL AND lon IS NOT NULL;';
 
   // ─── ping_photos schema (v2) ─────────────────────────────────────────
   //

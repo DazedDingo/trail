@@ -111,12 +111,17 @@ class _ArchiveScreenState extends ConsumerState<ArchiveScreen> {
         cutoffUtc: _cutoff,
         format: _format,
       );
-      // Invalidate ping-derived providers so the home screen / map /
-      // recent history re-query the now-smaller table.
+      // Invalidate every provider that hangs off the pings table so the
+      // home screen / map / recent history / stats re-query the now-
+      // smaller table. The map's family was missing here until 0.14.1 —
+      // a cached range kept showing archived pins until app restart.
       ref
         ..invalidate(recentPingsProvider)
         ..invalidate(allPingsProvider)
-        ..invalidate(lastSuccessfulPingProvider);
+        ..invalidate(pingsByRangeProvider)
+        ..invalidate(lastSuccessfulPingProvider)
+        ..invalidate(heartbeatHealthyProvider)
+        ..invalidate(pingCountProvider);
       if (!mounted) return;
       await Share.shareXFiles(
         result.exportedFiles.map(XFile.new).toList(),

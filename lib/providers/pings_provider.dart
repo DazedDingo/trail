@@ -19,35 +19,68 @@ final recentPingsProvider = FutureProvider<List<Ping>>((ref) async {
   return PingDao(db).recent();
 });
 
-/// Full chronological (oldest-first) history. Used by the Phase 4 full
-/// map screen where the time slider sweeps forward through the day — no
-/// pagination, the entire `pings` table is loaded into memory once
-/// because raster tiles are the byte-heavy thing, not 100-byte rows.
+/// Full chronological (oldest-first) history — EVERY row, including the
+/// coordinate-less `no_fix` / boot markers. Its consumers are the ones
+/// that need gaps to be visible: stats (`topPlacesProvider`, daily and
+/// hourly counts), trip detection (`tripsProvider`), the Trips screen.
+///
+/// The map does NOT read this. Since 0.14.1 it goes through
+/// [pingsByRangeProvider], which is a *different* query (fixes only, a
+/// partial-index walk — see `PingDao.fixesByDateRange`), so the two
+/// reads are not a duplicate of one another and nothing is gained by
+/// deriving one from the other: the map would either decode no_fix
+/// rows it never draws, or stats would lose the gaps they exist to show.
+/// Kept non-autoDispose on purpose — one copy, shared by three derived
+/// providers, invalidated only on writes.
 final allPingsProvider = FutureProvider<List<Ping>>((ref) async {
   final db = await TrailDatabase.shared();
   return PingDao(db).all();
 });
 
-/// Date-bounded chronological history. Same shape as
-/// [allPingsProvider] but clipped at the SQL layer so a "last
-/// weekend" filter doesn't round-trip the full `pings` table only to
-/// drop most rows in Dart. Pass `null` to fall back to the unbounded
-/// query — equivalent to `allPingsProvider` but goes through this
-/// provider's family identity so the map screen can switch between
-/// filtered and unfiltered without flipping providers.
-final pingsByRangeProvider =
-    FutureProvider.family<List<Ping>, DateTimeRange?>((ref, range) async {
+/// UTC instants for the SQL `BETWEEN` of a map date filter. The picker
+/// hands back local-day boundaries; `end` is widened to the last
+/// millisecond of its day so a single-day filter catches the whole day.
+/// Both bounds are inclusive (that is `BETWEEN`'s contract). Pure, so
+/// `pings_provider_test.dart` can pin the boundary without a DB.
+///
+/// Note this is NOT the export dialog's rule (`exportRangeUtcBounds`,
+/// `[start, nextMidnight)`): the map's presets can carry a time-of-day
+/// in `end`, and widening by `1 day − 1 ms` from *that* instant is the
+/// behaviour the map has always had. Don't unify them blindly.
+({DateTime startUtc, DateTime endUtc}) mapRangeUtcBounds(DateTimeRange range) {
+  return (
+    startUtc: range.start.toUtc(),
+    endUtc: range.end
+        .add(const Duration(days: 1) - const Duration(milliseconds: 1))
+        .toUtc(),
+  );
+}
+
+/// The map's pin data: fixes only (rows with a usable lat/lon),
+/// oldest-first, clipped at the SQL layer to the user's date filter —
+/// `null` means every fix ever. Backed by `PingDao.fixesByDateRange`,
+/// which walks the v4 partial index; no_fix/boot rows never reach Dart.
+///
+/// `autoDispose`: a member lives exactly as long as something watches
+/// it. `FullMapPanel` watches the active range continuously from
+/// `build`, so that member is retained by the watch itself; the moment
+/// the user picks another range the old member loses its listener and
+/// is released after the frame. There is deliberately NO unconditional
+/// `ref.keepAlive()` — that would pin every range ever selected for the
+/// life of the session, which is the 0.13 leak this replaces. It is
+/// safe against the in-flight upload: the panel copies the resolved list
+/// into its own `_snap` before building GeoJSON, so disposal of the
+/// provider never pulls data out from under an upload.
+///
+/// Invalidate the whole family (`ref.invalidate(pingsByRangeProvider)`)
+/// after any write to `pings` — delete, archive, manual ping.
+final pingsByRangeProvider = FutureProvider.autoDispose
+    .family<List<Ping>, DateTimeRange?>((ref, range) async {
   final db = await TrailDatabase.shared();
   final dao = PingDao(db);
-  if (range == null) return dao.all();
-  // The user-facing range is local-day; convert to UTC for the
-  // SQL where-clause. End-of-day is `start-of-next-day - 1ms` so
-  // a single-day filter actually catches the entire day.
-  final startUtc = range.start.toUtc();
-  final endUtc = range.end
-      .add(const Duration(days: 1) - const Duration(milliseconds: 1))
-      .toUtc();
-  return dao.byDateRange(startUtc, endUtc);
+  if (range == null) return dao.fixesByDateRange();
+  final b = mapRangeUtcBounds(range);
+  return dao.fixesByDateRange(startUtc: b.startUtc, endUtc: b.endUtc);
 });
 
 /// Last successful fix (null-coord rows excluded). Feeds the home-screen

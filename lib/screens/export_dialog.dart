@@ -16,23 +16,33 @@ import '../services/export/gpx_exporter.dart';
 /// Format toggles for the date-range export dialog.
 enum ExportFormat { gpxAndCsv, gpxOnly, csvOnly }
 
-/// Returns the pings whose UTC timestamp falls inside [range]. The
-/// picker returns `end` as a date-only DateTime at 00:00 local, so we
-/// bump it to the following midnight — "2026-04-20 → 2026-04-20" then
-/// includes every ping from that day, not just the midnight instant.
+/// UTC bounds of a picked export range as the half-open interval
+/// `[startUtc, endUtcExclusive)`. The picker returns `end` as a date-only
+/// DateTime at 00:00 local, so it is bumped to the following local
+/// midnight — "2026-04-20 → 2026-04-20" then covers every ping from that
+/// day, not just the midnight instant. Single definition of the
+/// boundary, shared by the pure gate [filterPingsByRange] and the SQL
+/// clip in `_run()` so the two can't drift.
+({DateTime startUtc, DateTime endUtcExclusive}) exportRangeUtcBounds(
+  DateTimeRange range,
+) {
+  final endOfDay = DateTime(range.end.year, range.end.month, range.end.day)
+      .add(const Duration(days: 1));
+  return (startUtc: range.start.toUtc(), endUtcExclusive: endOfDay.toUtc());
+}
+
+/// Returns the pings whose UTC timestamp falls inside [range] — see
+/// [exportRangeUtcBounds] for the boundary rule.
 ///
 /// When [range] is null (the "All history" preset), [rows] is returned
 /// unchanged.
 List<Ping> filterPingsByRange(List<Ping> rows, DateTimeRange? range) {
   if (range == null) return rows;
-  final startUtc = range.start.toUtc();
-  final endOfDay = DateTime(range.end.year, range.end.month, range.end.day)
-      .add(const Duration(days: 1));
-  final endUtc = endOfDay.toUtc();
+  final b = exportRangeUtcBounds(range);
   return rows
       .where((p) =>
-          !p.timestampUtc.isBefore(startUtc) &&
-          p.timestampUtc.isBefore(endUtc))
+          !p.timestampUtc.isBefore(b.startUtc) &&
+          p.timestampUtc.isBefore(b.endUtcExclusive))
       .toList(growable: false);
 }
 
@@ -90,8 +100,26 @@ class _ExportDialogState extends State<ExportDialog> {
     });
     try {
       final db = await TrailDatabase.shared();
-      final rows = await PingDao(db).all();
-      final filtered = filterPingsByRange(rows, _range);
+      final dao = PingDao(db);
+      final range = _range;
+      // Clip at the SQL layer (an `idx_pings_ts_utc` range scan) instead
+      // of materialising the whole table and dropping most of it in Dart
+      // (PERF_PLAN §3 #8). `byDateRange` is inclusive on both ends while
+      // the export gate is `[start, end)`, hence the 1 ms trim.
+      // `filterPingsByRange` still runs over the result: it is the single
+      // definition of the boundary (gotcha 13) and a no-op pass on an
+      // already-clipped list.
+      final List<Ping> rows;
+      if (range == null) {
+        rows = await dao.all();
+      } else {
+        final b = exportRangeUtcBounds(range);
+        rows = await dao.byDateRange(
+          b.startUtc,
+          b.endUtcExclusive.subtract(const Duration(milliseconds: 1)),
+        );
+      }
+      final filtered = filterPingsByRange(rows, range);
       if (filtered.isEmpty) {
         setState(() {
           _working = false;

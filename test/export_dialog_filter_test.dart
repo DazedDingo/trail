@@ -95,4 +95,51 @@ void main() {
       expect(filterPingsByRange([c, a, b], range), equals([c, a, b]));
     });
   });
+
+  group('exportRangeUtcBounds', () {
+    test('start is the picked start instant in UTC', () {
+      final start = DateTime(2026, 4, 19);
+      final b = exportRangeUtcBounds(
+        DateTimeRange(start: start, end: DateTime(2026, 4, 20)),
+      );
+      expect(b.startUtc, start.toUtc());
+      expect(b.startUtc.isUtc, isTrue);
+    });
+
+    test('end is the local midnight AFTER the end day (exclusive)', () {
+      final b = exportRangeUtcBounds(
+        DateTimeRange(start: DateTime(2026, 4, 19), end: DateTime(2026, 4, 20)),
+      );
+      expect(b.endUtcExclusive, DateTime(2026, 4, 21).toUtc());
+      expect(b.endUtcExclusive.isUtc, isTrue);
+    });
+
+    test('a time-of-day on end is truncated to its day first', () {
+      final b = exportRangeUtcBounds(
+        DateTimeRange(
+          start: DateTime(2026, 4, 19),
+          end: DateTime(2026, 4, 20, 15, 30),
+        ),
+      );
+      expect(b.endUtcExclusive, DateTime(2026, 4, 21).toUtc());
+    });
+
+    test('filterPingsByRange agrees with the bounds at both edges', () {
+      final range = DateTimeRange(
+        start: DateTime(2026, 4, 19),
+        end: DateTime(2026, 4, 20),
+      );
+      final b = exportRangeUtcBounds(range);
+      final atStart = _pingAt(b.startUtc);
+      final justBefore =
+          _pingAt(b.startUtc.subtract(const Duration(milliseconds: 1)));
+      final lastMs =
+          _pingAt(b.endUtcExclusive.subtract(const Duration(milliseconds: 1)));
+      final atEnd = _pingAt(b.endUtcExclusive);
+      expect(
+        filterPingsByRange([justBefore, atStart, lastMs, atEnd], range),
+        [atStart, lastMs],
+      );
+    });
+  });
 }

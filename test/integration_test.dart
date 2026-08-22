@@ -69,6 +69,13 @@ Future<Database> _openMemDb() async {
     );
   ''');
   await db.execute('CREATE INDEX idx_pings_ts_utc ON pings(ts_utc DESC);');
+  // idx_pings_ts_fix (schema v4) — partial covering index the fixes-only
+  // map read + latestSuccessful walk. Mirror of
+  // TrailDatabase._pingsTsFixIndexSql; keep byte-identical (gotcha 20).
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_pings_ts_fix ON pings(ts_utc, lat, lon) '
+    'WHERE lat IS NOT NULL AND lon IS NOT NULL;',
+  );
   return db;
 }
 
@@ -384,6 +391,49 @@ void main() {
       expect(result.single.values.first, 'ok');
     });
   });
+  // -------------------------------------------------------------------------
+  // 6. Export dialog SQL clip ≡ pure gate.
+  //    Since 0.14.1 `_run()` clips at the SQL layer with
+  //    `dao.byDateRange(bounds.startUtc, bounds.endUtcExclusive - 1 ms)`
+  //    instead of reading the whole table; `filterPingsByRange` stays the
+  //    definition of the boundary. The two must agree at every edge, or
+  //    the SQL path would silently export a different set than the test-
+  //    covered pure one.
+  // -------------------------------------------------------------------------
+  group('export SQL clip matches filterPingsByRange', () {
+    test('identical row sets at the inclusive start and exclusive end',
+        () async {
+      final range = DateTimeRange(
+        start: DateTime(2026, 4, 19),
+        end: DateTime(2026, 4, 20),
+      );
+      final b = exportRangeUtcBounds(range);
+      final probes = <DateTime>[
+        b.startUtc.subtract(const Duration(milliseconds: 1)),
+        b.startUtc,
+        b.startUtc.add(const Duration(hours: 30)),
+        b.endUtcExclusive.subtract(const Duration(milliseconds: 1)),
+        b.endUtcExclusive,
+        b.endUtcExclusive.add(const Duration(days: 3)),
+      ];
+      for (var i = 0; i < probes.length; i++) {
+        await dao.insert(_p(probes[i], lat: i.toDouble(), lon: 0));
+      }
+      // No-fix rows are exported too (gap visibility) — make sure the SQL
+      // path keeps them exactly like the pure gate does.
+      await dao.insert(_p(b.startUtc.add(const Duration(hours: 1)),
+          source: PingSource.noFix));
+
+      final pure = filterPingsByRange(await dao.all(), range);
+      final sql = await dao.byDateRange(
+        b.startUtc,
+        b.endUtcExclusive.subtract(const Duration(milliseconds: 1)),
+      );
+      expect(sql.map((p) => p.id), pure.map((p) => p.id));
+      expect(sql.map((p) => p.lat), [1.0, null, 2.0, 3.0]);
+    });
+  });
+
 }
 
 /// Minimal replacement for `dart:convert`'s LineSplitter without

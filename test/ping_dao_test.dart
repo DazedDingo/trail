@@ -66,6 +66,13 @@ Future<Database> _openMemDb() async {
     );
   ''');
   await db.execute('CREATE INDEX idx_pings_ts_utc ON pings(ts_utc DESC);');
+  // idx_pings_ts_fix (schema v4) — partial covering index the fixes-only
+  // map read + latestSuccessful walk. Mirror of
+  // TrailDatabase._pingsTsFixIndexSql; keep byte-identical (gotcha 20).
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_pings_ts_fix ON pings(ts_utc, lat, lon) '
+    'WHERE lat IS NOT NULL AND lon IS NOT NULL;',
+  );
   // ping_photos (schema v2) — kept in lock-step with TrailDatabase._onCreate
   // so the DAO tests can exercise photo CRUD without a real SQLCipher open.
   await db.execute('''
@@ -529,6 +536,128 @@ void main() {
       final keepRows = await db.query('ping_photos',
           where: 'ping_id = ?', whereArgs: [keep]);
       expect(keepRows, hasLength(1));
+    });
+  });
+
+  group('PingDao.fixesByDateRange (schema v4 map read)', () {
+    late int idA, idNoFix, idB, idHalf, idC;
+
+    setUp(() async {
+      idA = await dao.insert(_p(DateTime.utc(2026, 3, 1, 8), lat: 1, lon: 1));
+      idNoFix = await dao.insert(_p(DateTime.utc(2026, 3, 1, 12),
+          source: PingSource.noFix, note: 'timeout'));
+      idB = await dao.insert(_p(DateTime.utc(2026, 3, 2, 8), lat: 2, lon: 2));
+      // lat present, lon missing — not a drawable fix either.
+      idHalf = await dao.insert(_p(DateTime.utc(2026, 3, 2, 12), lat: 3));
+      idC = await dao.insert(_p(DateTime.utc(2026, 3, 3, 8), lat: 4, lon: 4));
+    });
+
+    test('no bounds → every row with BOTH coords, oldest-first', () async {
+      final rows = await dao.fixesByDateRange();
+      expect(rows.map((p) => p.id), [idA, idB, idC]);
+      expect(rows.map((p) => p.id), isNot(contains(idNoFix)));
+      expect(rows.map((p) => p.id), isNot(contains(idHalf)));
+    });
+
+    test('rows are full Ping objects (detail sheet reads every column)',
+        () async {
+      final row = (await dao.fixesByDateRange()).first;
+      expect(row.id, idA);
+      expect(row.source, PingSource.scheduled);
+      expect(row.timestampUtc, DateTime.utc(2026, 3, 1, 8));
+      // Columns the map itself never draws but the sheet renders.
+      expect(row.note, isNull);
+      expect(row.comment, isNull);
+      expect(row.batteryPct, isNull);
+    });
+
+    test('bounds are inclusive on both ends', () async {
+      final rows = await dao.fixesByDateRange(
+        startUtc: DateTime.utc(2026, 3, 1, 8),
+        endUtc: DateTime.utc(2026, 3, 3, 8),
+      );
+      expect(rows.map((p) => p.id), [idA, idB, idC]);
+    });
+
+    test('1 ms outside either bound is excluded', () async {
+      final rows = await dao.fixesByDateRange(
+        startUtc: DateTime.utc(2026, 3, 1, 8, 0, 0, 1),
+        endUtc: DateTime.utc(2026, 3, 3, 7, 59, 59, 999),
+      );
+      expect(rows.map((p) => p.id), [idB]);
+    });
+
+    test('a window containing only no_fix / half rows returns empty',
+        () async {
+      final rows = await dao.fixesByDateRange(
+        startUtc: DateTime.utc(2026, 3, 1, 12),
+        endUtc: DateTime.utc(2026, 3, 1, 12),
+      );
+      expect(rows, isEmpty);
+    });
+
+    test('one-sided bounds work', () async {
+      final from = await dao.fixesByDateRange(
+        startUtc: DateTime.utc(2026, 3, 2),
+      );
+      expect(from.map((p) => p.id), [idB, idC]);
+      final until = await dao.fixesByDateRange(
+        endUtc: DateTime.utc(2026, 3, 2, 23, 59),
+      );
+      expect(until.map((p) => p.id), [idA, idB]);
+    });
+
+    test('ordering is ascending even when inserted out of order', () async {
+      await dao.insert(_p(DateTime.utc(2026, 2, 1), lat: 9, lon: 9));
+      final rows = await dao.fixesByDateRange();
+      final ts = rows.map((p) => p.timestampUtc).toList();
+      expect(ts, ts.toList()..sort());
+      expect(ts.first, DateTime.utc(2026, 2, 1));
+    });
+
+    test('empty table → empty list', () async {
+      await db.delete('pings');
+      expect(await dao.fixesByDateRange(), isEmpty);
+    });
+  });
+
+  group('PingDao query plans (idx_pings_ts_fix, schema v4)', () {
+    Future<String> plan(String sql, [List<Object?>? args]) async {
+      final rows = await db.rawQuery('EXPLAIN QUERY PLAN $sql', args);
+      return rows.map((r) => r['detail']).join('\n');
+    }
+
+    test('fixesByDateRange walks the partial index, not idx_pings_ts_utc',
+        () async {
+      final p = await plan(
+        'SELECT * FROM pings WHERE ${PingDao.fixPredicate} '
+        'AND ts_utc BETWEEN ? AND ? ORDER BY ts_utc ASC',
+        [0, 1],
+      );
+      expect(p, contains('idx_pings_ts_fix'));
+      expect(p, isNot(contains('idx_pings_ts_utc')));
+    });
+
+    test('latestSuccessful walks the partial index backwards', () async {
+      final p = await plan(
+        'SELECT * FROM pings WHERE ${PingDao.fixPredicate} '
+        "AND source != 'no_fix' ORDER BY ts_utc DESC LIMIT 1",
+      );
+      expect(p, contains('idx_pings_ts_fix'));
+      expect(p, isNot(contains('TEMP B-TREE')));
+    });
+
+    test('latestSuccessful ignores a long no_fix streak on top of the last '
+        'fix', () async {
+      await dao.insert(_p(DateTime.utc(2026, 1, 1), lat: 7, lon: 7));
+      for (var i = 1; i <= 300; i++) {
+        await dao.insert(_p(
+          DateTime.utc(2026, 1, 1).add(Duration(hours: i)),
+          source: PingSource.noFix,
+          note: 'indoors',
+        ));
+      }
+      expect((await dao.latestSuccessful())!.lat, 7);
     });
   });
 }

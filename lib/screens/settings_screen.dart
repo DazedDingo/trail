@@ -106,6 +106,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     ref.invalidate(heartbeatHealthyProvider);
     ref.invalidate(pingCountProvider);
     ref.invalidate(recentPingsProvider);
+    // "Ping now" wrote a row — the map's fixes-only family and the
+    // stats/trips source must re-query too.
+    ref.invalidate(allPingsProvider);
+    ref.invalidate(pingsByRangeProvider);
 
     final messenger = ScaffoldMessenger.of(context);
     messenger.showSnackBar(
