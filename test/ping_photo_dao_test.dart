@@ -133,6 +133,59 @@ void main() {
       expect(out, isEmpty);
     });
 
+    test('byPingIds chunks the IN-list: 2 000 ids over 3 statements, every '
+        'photo exactly once, per-ping ordinal order kept', () async {
+      const n = 2000;
+      expect((n / PingPhotoDao.inListChunk).ceil(), 3,
+          reason: 'the scenario must actually span three chunks');
+      // Two photos per ping, ordinal 1 inserted BEFORE ordinal 0 so a
+      // naive insertion-order merge would come out backwards.
+      await dao.insertAll([
+        for (var id = 1; id <= n; id++) ...[
+          _photo(pingId: id, ordinal: 1, uri: 'p$id-1.jpg'),
+          _photo(pingId: id, ordinal: 0, uri: 'p$id-0.jpg'),
+        ],
+      ]);
+
+      final out = await dao.byPingIds([for (var id = 1; id <= n; id++) id]);
+
+      expect(out.keys.length, n);
+      final allUris = out.values.expand((l) => l.map((p) => p.uri)).toList();
+      expect(allUris.length, 2 * n, reason: 'no photo dropped');
+      expect(allUris.toSet().length, 2 * n, reason: 'no photo duplicated');
+      for (final id in [1, PingPhotoDao.inListChunk, PingPhotoDao.inListChunk + 1,
+          2 * PingPhotoDao.inListChunk, 2 * PingPhotoDao.inListChunk + 1, n]) {
+        expect(out[id]!.map((p) => p.uri).toList(), ['p$id-0.jpg', 'p$id-1.jpg'],
+            reason: 'ping $id must keep ordinal order across the chunk edge');
+      }
+    });
+
+    test('byPingIds tolerates duplicate ids without duplicating photos',
+        () async {
+      await dao.insertAll([
+        _photo(pingId: 7, ordinal: 0, uri: 'a.jpg'),
+        _photo(pingId: 7, ordinal: 1, uri: 'b.jpg'),
+      ]);
+      // 7 appears three times, spread far enough apart to land in
+      // different chunks if dedupe were skipped.
+      final ids = <int>[7, ...List.generate(PingPhotoDao.inListChunk, (i) => 100 + i), 7, 7];
+      final out = await dao.byPingIds(ids);
+      expect(out.keys, [7]);
+      expect(out[7]!.map((p) => p.uri).toList(), ['a.jpg', 'b.jpg']);
+    });
+
+    test('byPingIds with exactly inListChunk + 1 ids reaches the second '
+        'chunk', () async {
+      final last = PingPhotoDao.inListChunk + 1;
+      await dao.insertAll([
+        _photo(pingId: 1, ordinal: 0, uri: 'first.jpg'),
+        _photo(pingId: last, ordinal: 0, uri: 'last.jpg'),
+      ]);
+      final out = await dao.byPingIds(List.generate(last, (i) => i + 1));
+      expect(out.keys.toSet(), {1, last});
+      expect(out[last]!.single.uri, 'last.jpg');
+    });
+
     test('onlineCountForPing only counts wikimedia source', () async {
       await dao.insertAll([
         _photo(pingId: 5, ordinal: 0, source: PingPhotoSource.wikimedia),

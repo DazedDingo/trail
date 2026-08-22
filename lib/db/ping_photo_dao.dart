@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
 import '../models/ping_photo.dart';
@@ -28,26 +30,45 @@ class PingPhotoDao {
     return rows.map(PingPhoto.fromMap).where(_renderable).toList();
   }
 
+  /// Upper bound on ids per `IN (...)` statement in [byPingIds].
+  /// SQLCipher's `SQLITE_MAX_VARIABLE_NUMBER` is 32 766 — a slideshow
+  /// over a long range at 30-min cadence (~17k fixes/year) blew straight
+  /// through it with "too many SQL variables" — and very long IN-lists
+  /// plan badly anyway (one ephemeral b-tree per statement). 900 keeps
+  /// every statement under the classic 999 ceiling with headroom.
+  static const inListChunk = 900;
+
   /// Batch-load all photos for a set of pings. Returned as
   /// `Map<pingId, List<PingPhoto>>` so the picture-mode playback can
-  /// hydrate the whole trail in a single SQLite query instead of N+1.
-  /// Empty/missing keys mean the ping has no photos. Same read-time
+  /// hydrate the whole trail in a handful of SQLite queries instead of
+  /// N+1. Empty/missing keys mean the ping has no photos. Same read-time
   /// tombstone filter as [byPingId].
+  ///
+  /// Ids are deduplicated, then queried in chunks of ≤ [inListChunk]
+  /// (PERF_PLAN §3 #9). Every ping's rows come from exactly one chunk and
+  /// each chunk is ordered `ordinal ASC, id ASC`, so per-ping display
+  /// order is preserved across the merge; the order of *keys* in the
+  /// returned map is not meaningful (it never was).
   Future<Map<int, List<PingPhoto>>> byPingIds(Iterable<int> pingIds) async {
-    final ids = pingIds.toList();
+    // Dedupe first: a repeated id landing in two chunks would append its
+    // photos twice.
+    final ids = pingIds.toSet().toList(growable: false);
     if (ids.isEmpty) return const {};
-    final placeholders = List.filled(ids.length, '?').join(',');
-    final rows = await db.query(
-      'ping_photos',
-      where: 'ping_id IN ($placeholders)',
-      whereArgs: ids,
-      orderBy: 'ping_id ASC, ordinal ASC, id ASC',
-    );
     final out = <int, List<PingPhoto>>{};
-    for (final r in rows) {
-      final p = PingPhoto.fromMap(r);
-      if (!_renderable(p)) continue;
-      (out[p.pingId] ??= <PingPhoto>[]).add(p);
+    for (var start = 0; start < ids.length; start += inListChunk) {
+      final chunk = ids.sublist(start, math.min(start + inListChunk, ids.length));
+      final placeholders = List.filled(chunk.length, '?').join(',');
+      final rows = await db.query(
+        'ping_photos',
+        where: 'ping_id IN ($placeholders)',
+        whereArgs: chunk,
+        orderBy: 'ping_id ASC, ordinal ASC, id ASC',
+      );
+      for (final r in rows) {
+        final p = PingPhoto.fromMap(r);
+        if (!_renderable(p)) continue;
+        (out[p.pingId] ??= <PingPhoto>[]).add(p);
+      }
     }
     return out;
   }
