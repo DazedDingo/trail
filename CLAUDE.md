@@ -44,7 +44,8 @@ lib/
 ├── app.dart                     # Router (GoRouter), root ConsumerWidget
 ├── models/                      # Data classes (Ping, EmergencyContact)
 ├── db/                          # Database layer
-│   ├── database.dart           # TrailDatabase (SQLCipher wrapper, schema v1)
+│   ├── database.dart           # TrailDatabase (SQLCipher wrapper, schema v5 — see gotchas 20, 26, 28, 34)
+│   ├── import_dao.dart         # `imports` table CRUD (0.16.0)
 │   ├── ping_dao.dart           # CRUD for pings table
 │   ├── contact_dao.dart        # CRUD for emergency_contacts
 │   └── keystore_key.dart       # Keystore-backed passphrase
@@ -88,7 +89,20 @@ lib/
 │   ├── local_tile_server.dart   # Loopback HTTP tile server (0.15.0: ordered multi-archive, server-side overzoom, union tilejson, memoised glyph/sprite assets, 16 MB tile LRU). See gotcha 31
 │   ├── mbtiles_service.dart     # TilesService: install/list/delete archives under <docs>/tiles/, active region (`trail_active_tiles_v1`), roles (`trail_tiles_roles_v1`), servedArchives() ordering
 │   ├── trail_style.dart         # Bundled style loader: substituteTileServer(port, minZoom, maxZoom) + 4-entry memo; remote demo sentinel
-│   ├── tile_downloader.dart     # Whole-archive HTTP download into <docs>/tiles/ (atomic .partial rename)
+│   ├── tile_downloader.dart     # Whole-archive HTTP download into <docs>/tiles/ (atomic .partial rename; headers + Content-Disposition since 0.16.0)
+│   ├── import/                  # Google Maps Timeline import (0.16.0) — see gotcha 35
+│   │   ├── timeline_models.dart        # ImportCandidate / ImportKind / ImportPreset / ImportCounts / ImportFrequentPlace
+│   │   ├── timeline_splitter.dart      # Byte-level streaming JSON splitter (bounded memory)
+│   │   ├── timeline_mappers.dart       # Element → candidates (path / visit / activity / raw / profile), permissive
+│   │   ├── import_thinning.dart        # thinCandidates / dedupeAgainstExisting / projectImport (pure)
+│   │   ├── import_file_hash.dart       # sha256(first MiB)+length identity
+│   │   ├── timeline_import_worker.dart # Isolate.spawn entry: parse → thin → dedupe → batches (no DB)
+│   │   └── timeline_import_service.dart # preview / commit / undo / history on the UI isolate
+│   ├── coverage/                # Auto-fetch map detail (0.16.0) — see gotcha 36
+│   │   ├── coverage_planner.dart       # GeoPoint / CoverageBox / planCoverage / isCoveredInDetail / shouldAutoFetchNow (pure)
+│   │   ├── coverage_prefs.dart         # Cross-isolate prefs: extents, pending queue, settings, server URL; token in secure storage
+│   │   ├── tile_server_client.dart     # /v1/health, /v1/extract (dry-run + download) client
+│   │   └── coverage_service.dart       # refreshExtents / planForPoints / fetchPlan / processPendingOnAppOpen / noteFixInWorker
 │   └── tiles/
 │       ├── tile_schema.dart     # TileSchema + detectTileSchema(vectorLayers) + pickStyleSchema(served, byPath) (0.15.1)
 │       ├── tile_archive.dart    # TileArchive (minZoom/maxZoom/bounds/vectorLayers/schema/mayContain/tile) + MbtilesArchive (sqflite, TMS flip) + PmtilesArchive (package:pmtiles) + tileIntersectsBounds/unionBounds
@@ -98,7 +112,8 @@ lib/
 │   ├── home_screen.dart         # Pinned top block (last ping + heartbeat + hold-to-panic + summary + export + map preview) with a scrollable Recent-pings list at the bottom. Recent tiles show reverse-geocoded labels. Layout shipped 0.7.1+24.
 │   ├── history_screen.dart      # Paginated full history list
 │   ├── map_screen.dart          # Full-screen map over all pings: time slider with playback (play/pause/step/1×-16×), path-line toggle, bbox-fit default viewport. Playback shipped 0.7.1+24; base shipped 0.4.0+13.
-│   ├── regions_screen.dart      # Offline tiles library: install (.pmtiles picker), delete, set-active. PMTiles since 0.8.0+29.
+│   ├── regions_screen.dart      # Offline archive library: install (file / URL / catalog / build-on-demand), roles, schema chips, delete, set-active
+│   ├── import_timeline_screen.dart # Google Maps Timeline import flow: pick → preview + preset → import with progress → undo / coverage offer (0.16.0)
 │   ├── archive_screen.dart      # Archive older pings: cutoff picker, format radio, preview, export-and-delete confirm. Shipped 0.5.0+14.
 │   ├── diagnostics_screen.dart  # Permission matrix, DB integrity-check button, last-20 worker runs, copy-all action. Shipped 0.6.0+15.
 │   ├── export_dialog.dart       # Date-range + format picker dialog (replaces home screen's two export buttons). Shipped 0.6.0+15.
@@ -274,10 +289,16 @@ See `git log --oneline -20` for recent pattern.
 
 33. **Worker tick hygiene (0.15.0).** `_handleBoot` opens the DB once and passes the handle into `_handleScheduled({db})`; only the opener closes. `enqueuePeriodic` records `trail_scheduler_last_enqueued_min_v1` and a tick re-registers the periodic task only when `SchedulerPolicy.shouldReenqueuePeriodic` sees a different effective cadence (battery stretch included) — the tick running is itself proof the task exists, so the per-tick `update` re-registration was pure WorkManager churn. `SchedulerPolicy.shouldAutoFetchPhotos(networkState:, isCharging:)` gates the in-worker Wikimedia fetch: wifi/ethernet always, mobile only while charging, `none`/`unknown` never (those used to burn 2 × 8 s timeouts on every off-grid ping). Pings that were gated get photos later from the manual backfill sheet (gotcha 21). Both rules are pure statics with truth-table tests; if the commander wants photos on mobile data back, flip the one branch, don't add a second gate.
 
+34. **Schema v5 (0.16.0) — imports are additive and map-only.** `pings.import_id INTEGER` + `imports(id, imported_at_utc, file_name, file_hash UNIQUE, preset, row_count, ts_min_utc, ts_max_utc)` + partial index `idx_pings_import`. `PingSource.imported` ↔ `'import'`. Exclusion contract (don't loosen it without the commander): `latestSuccessful`, `recent`, `allPings()` (stats / trips / heatmap / clock / top places) and `selectEligibleForBackfill` exclude imports; `fixesByDateRange` (map), `byDateRange` (export / archive) and History include them. Imported coordinates must never reach Wikimedia (gotcha 21). Undo = `PingDao.deleteByImportId` + `ImportDao.delete`, then invalidate `pingsByRangeProvider` (family), `allPingsProvider`, `recentPingsProvider`, `lastSuccessfulPingProvider` (gotcha 29). Mirrored in `createSchemaForTest`; the three hand-rolled test schemas were updated too.
+
+35. **Timeline import is a streaming isolate pipeline (`lib/services/import/`).** `timeline_splitter.dart` is a byte-level JSON splitter (tracks string/escape/depth, yields each depth-2 element of `semanticSegments` / `rawSignals` and the whole `userLocationProfile`; iOS bare-array root → section `root`; chunk-boundary agnostic; memory = one chunk + one element) — never `jsonDecode` a whole export, a 200 MB file is a ~500 MB object tree. `timeline_mappers.dart` is permissive (unknown shapes → `ignoredElements`, failures → `malformedElements`, never throws; coordinates are `"51.5°, -0.1°"` strings; `rawSignals` use `LatLng` with a capital L; raw accuracy > 100 m rejected). `import_thinning.dart`: 60-s group dedupe (raw beats path) → preset gap/distance (visit endpoints always kept) → activity endpoints only without a kept neighbour within ±5 min → binary-search dedupe vs existing fixes (±60 s, < 25 m). `timeline_import_worker.dart` runs in `Isolate.spawn` (progress + cancel need a SendPort; `Isolate.run` can't), holds the kept list between preview and commit, and never touches the DB (gotcha 1) — the UI isolate inserts in `Batch`es of ≤ 2 000 and on cancel/error deletes by `import_id` so an import is all-or-nothing. File identity = sha256(first 1 MiB) + length (`import_file_hash.dart`). Fixtures in `test/fixtures/timeline/` are hand-written (never copy AGPL Dawarich/Reitti samples). iOS `timelinePath` points carry `durationMinutesOffsetFromStartTime` and are currently counted as malformed — deliberate, Android-only for now.
+
+36. **Auto-coverage (`lib/services/coverage/`) is prefs-driven so the worker stays DB- and network-free.** `CoveragePrefs` holds the installed-archive extents (written by the UI isolate after probing), the pending-points queue (5 km dedupe, cap 200), settings (enabled + Wi-Fi-only, both default true), server URL (prefs) and token (secure storage). The WorkManager tick calls `CoverageService.noteFixInWorker(lat, lon)` after a real fix: `isCoveredInDetail` (some archive with maxZoom ≥ 12 whose bounds contain the point; null bounds = not covered) else `addPending`. `CoverageResumeObserver` (post-frame + `onResume`, throttled 10 min) runs `processPendingOnAppOpen`: `shouldAutoFetchNow` gate → `refreshExtents` → `planCoverage` (greedy centroid 15 km → pad 3 km → merge overlaps → drop boxes already covered) → dry-run sizing against the server → auto-fetch ≤ 20 MB, otherwise re-queue + a one-line notice on the Settings tile. Downloads land in `<docs>/tiles/coverage-<slug>-z7-14-<date>.pmtiles`; the `coverage` name is what gives them their role (gotcha 31), so the multi-archive loopback serves them with no further registration — just `invalidateTileProviders`. The server contract (`GET /v1/health`, `/v1/extract?bbox&minzoom&maxzoom[&dry_run=1]`, bearer token, 413 above 1 sq deg) is `tools/coverage/server.py`; the phone never contacts Protomaps. `TileDownloader.download` now takes `headers` and honours `Content-Disposition`.
+
 ## Related Docs
 
 - **`docs/PLAN.md`:** full design, battery budget, phase breakdown, open questions, confirmed decisions (19 total).
 - **`docs/PERF_PLAN.md`:** 2026-08-22 performance analysis + phased fix plan (M1–M3 shipped in 0.14.0+95; M4 + §3 #2, #3, #4, #5, #9 in 0.14.1+96; M5 + #10, #12, #20 + coverage Phase A in 0.15.0+97; 0.14.2's screen polish and the rest of §3 pending). Root cause of the slow multi-year pin load (per-pin `addCircle` is Θ(N²) in `maplibre_gl` 0.26.0, map remount on range change, `_controller = null` bug on cached ranges) and 22 ranked app-wide improvements. Read it before touching `full_map_panel.dart` rendering.
 - **`docs/TILES.md`:** archives = `pmtiles extract` of the Protomaps daily planet (sizes/timings table), the four ways they reach the phone, roles, the two bundled styles, legacy planetiler notes. `tools/coverage/README.md` covers the VPS script + extract service.
-- **`docs/TIMELINE_IMPORT.md`:** 2026-08-22 feasibility + plan for importing Google Maps Timeline exports; § 3 is the map-coverage design (Phase A shipped in 0.15.0, Phase B decisions open — read the "Corrections" block first) (`Timeline.json`, iOS dialect, legacy Takeout). Not built; read it before starting that feature — it records the export paths that still exist, the format, the thinning/dedupe rules and the exclusions (heartbeat, Wikimedia auto-fetch) that must ship with it.
+- **`docs/TIMELINE_IMPORT.md`:** the Timeline import design (shipped in 0.16.0 — Android export, undo; iOS dialect + legacy Takeout deferred) and § 3 the map-coverage design (Phase A 0.15.0, Phase B 0.15.1, Phase C auto-fetch 0.16.0) (`Timeline.json`, iOS dialect, legacy Takeout). Not built; read it before starting that feature — it records the export paths that still exist, the format, the thinning/dedupe rules and the exclusions (heartbeat, Wikimedia auto-fetch) that must ship with it.
 - **`README.md`:** project summary, planned stack.

@@ -16,15 +16,35 @@ export '../services/geocoding_service.dart' show GeocodeKey, geocodeKey;
 /// Loads the N most recent pings. Re-runs on invalidation — call
 /// `ref.invalidate(recentPingsProvider)` after an export or a manual
 /// ping-now action.
+///
+/// Excludes Timeline imports (schema v5, `PingDao.recent`'s default) —
+/// the Home screen's "Recent" list must show live device activity, not
+/// an old export (docs/TIMELINE_IMPORT.md exclusions). The History
+/// screen wants the full list including imports; see
+/// [historyPingsProvider].
 final recentPingsProvider = FutureProvider<List<Ping>>((ref) async {
   final db = await TrailDatabase.shared();
   return PingDao(db).recent();
 });
 
-/// Full chronological (oldest-first) history — EVERY row, including the
-/// coordinate-less `no_fix` / boot markers. Its consumers are the ones
-/// that need gaps to be visible: stats (`topPlacesProvider`, daily and
-/// hourly counts), trip detection (`tripsProvider`), the Trips screen.
+/// Same shape as [recentPingsProvider] but INCLUDES Timeline imports —
+/// the History screen is the one place imports belong in a ping list
+/// (docs/TIMELINE_IMPORT.md: imports are map-only for stats/heartbeat,
+/// but the full history view should still show them; the existing
+/// `source` label already reads "import" for these rows, so no extra
+/// UI marker is needed).
+final historyPingsProvider = FutureProvider<List<Ping>>((ref) async {
+  final db = await TrailDatabase.shared();
+  return PingDao(db).recent(includeImported: true);
+});
+
+/// Full chronological (oldest-first) history — EVERY non-imported row,
+/// including the coordinate-less `no_fix` / boot markers. Its consumers
+/// are the ones that need gaps to be visible: stats
+/// (`topPlacesProvider`, daily and hourly counts), trip detection
+/// (`tripsProvider`), the Trips screen. Excludes Timeline imports
+/// (schema v5, `PingDao.allPings`'s default) — imports are map-only per
+/// the commander's decision; stats/trips stay real Trail data.
 ///
 /// The map does NOT read this. Since 0.14.1 it goes through
 /// [pingsByRangeProvider], which is a *different* query (fixes only, a
@@ -36,7 +56,7 @@ final recentPingsProvider = FutureProvider<List<Ping>>((ref) async {
 /// providers, invalidated only on writes.
 final allPingsProvider = FutureProvider<List<Ping>>((ref) async {
   final db = await TrailDatabase.shared();
-  return PingDao(db).all();
+  return PingDao(db).allPings();
 });
 
 /// UTC instants for the SQL `BETWEEN` of a map date filter. The picker

@@ -43,6 +43,29 @@ void main() {
       expect(out, isEmpty);
     });
 
+    test('skips imported rows even with real coords and no wikimedia row '
+        '(CLAUDE.md gotcha 21 — imported coordinates must never reach '
+        'Wikimedia)', () {
+      final out = selectEligibleForBackfill(
+        [_p(id: 1, source: PingSource.imported)],
+        const <int>{},
+      );
+      expect(out, isEmpty);
+    });
+
+    test('imported rows are excluded even among otherwise-eligible pings',
+        () {
+      final out = selectEligibleForBackfill(
+        [
+          _p(id: 1),
+          _p(id: 2, source: PingSource.imported),
+          _p(id: 3),
+        ],
+        const <int>{},
+      );
+      expect(out.map((p) => p.id).toList(), [1, 3]);
+    });
+
     test('skips rows with null lat or lon', () {
       final out = selectEligibleForBackfill(
         [

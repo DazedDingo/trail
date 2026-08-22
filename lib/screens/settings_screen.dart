@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -9,7 +11,9 @@ import 'package:go_router/go_router.dart';
 import '../widgets/help_button.dart';
 import '../db/database.dart';
 import 'export_dialog.dart';
+import 'import_timeline_screen.dart';
 import '../db/keystore_key.dart';
+import '../db/ping_dao.dart';
 import '../services/github_api.dart';
 import '../services/github_pat_service.dart';
 import '../models/ping.dart';
@@ -22,7 +26,13 @@ import '../providers/photos_provider.dart';
 import '../providers/panic_provider.dart';
 import '../providers/pings_provider.dart';
 import '../providers/scheduler_provider.dart';
+import '../providers/mbtiles_provider.dart';
+import '../services/coverage/coverage_planner.dart';
+import '../services/coverage/coverage_prefs.dart';
+import '../services/coverage/coverage_service.dart';
+import '../services/coverage/tile_server_client.dart';
 import '../services/failed_photo_uris.dart';
+import '../services/tile_downloader.dart';
 import '../services/how_is_it_service.dart';
 import '../services/panic/panic_service.dart';
 import 'photo_backfill_sheet.dart';
@@ -332,6 +342,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           const _LiveLocationDotTile(),
           const _GithubPatTile(),
           const Divider(),
+          const _MapDetailServerGroup(),
+          const Divider(),
           const _SectionHeader('Insights'),
           ListTile(
             leading: const Icon(Icons.insights_outlined),
@@ -377,6 +389,25 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             ),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => context.push('/archive'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.upload_file_outlined),
+            title: const Text('Import Google Timeline'),
+            subtitle: const Text(
+              'Add your Google Maps location history to the map. '
+              'Thinned, deduped against your own pings, undoable.',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => context.push('/import-timeline'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.history_toggle_off),
+            title: const Text('Timeline imports'),
+            subtitle: const Text(
+              'Past imports, with an undo for each one.',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => showTimelineImportsSheet(context),
           ),
           const Divider(),
           const _SectionHeader('Cloud backup'),
@@ -1483,3 +1514,373 @@ class _LiveLocationDotTile extends ConsumerWidget {
     );
   }
 }
+
+/// "Map detail server" group (Phase C, docs/TIMELINE_IMPORT.md §3).
+///
+/// One stateful widget for the whole group rather than five separate
+/// tiles: they all read the same four values (URL, token, settings,
+/// pending count) and every action changes at least two of them, so a
+/// single `_load()` keeps them consistent without a provider per key.
+class _MapDetailServerGroup extends ConsumerStatefulWidget {
+  const _MapDetailServerGroup();
+
+  @override
+  ConsumerState<_MapDetailServerGroup> createState() =>
+      _MapDetailServerGroupState();
+}
+
+class _MapDetailServerGroupState extends ConsumerState<_MapDetailServerGroup> {
+  String? _url;
+  String? _maskedToken;
+  CoverageSettings _settings = const CoverageSettings();
+  int _pending = 0;
+  String? _notice;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final url = await CoveragePrefs.readServerUrl();
+    final token = await CoveragePrefs.readToken();
+    final settings = await CoveragePrefs.readSettings();
+    final pending = await CoveragePrefs.pendingCount();
+    final notice = await CoveragePrefs.readNotice();
+    if (!mounted) return;
+    setState(() {
+      _url = url;
+      _maskedToken = token == null ? null : CoveragePrefs.maskToken(token);
+      _settings = settings;
+      _pending = pending;
+      _notice = notice;
+    });
+  }
+
+  void _snack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _editUrl() async {
+    final controller = TextEditingController(text: _url ?? '');
+    final entered = await showDialog<String>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Map detail server'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'Base URL of your own pmtiles extract server. Trail asks it '
+              'for a small archive around each place you have been.',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              keyboardType: TextInputType.url,
+              decoration: const InputDecoration(
+                labelText: 'https://host:8443',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (entered == null) return;
+    await CoveragePrefs.writeServerUrl(entered);
+    await _load();
+  }
+
+  Future<void> _editToken() async {
+    final controller = TextEditingController();
+    final entered = await showDialog<String>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Server token'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'Sent as `Authorization: Bearer …`. Stored in the same '
+              'Keystore-backed storage as the database key.',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: 'Token'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (entered == null || entered.isEmpty) return;
+    await CoveragePrefs.writeToken(entered);
+    await _load();
+  }
+
+  Future<void> _clearToken() async {
+    await CoveragePrefs.clearToken();
+    await _load();
+  }
+
+  Future<void> _testConnection() async {
+    final url = _url;
+    if (url == null) {
+      _snack('Set the server URL first.');
+      return;
+    }
+    setState(() => _busy = true);
+    final client =
+        TileServerClient(baseUrl: url, token: await CoveragePrefs.readToken());
+    try {
+      final health = await client.health();
+      _snack(health.ok
+          ? 'Connected — planet ${health.planetDate}'
+          : 'Server reachable but not ready.');
+    } on TileServerException catch (e) {
+      _snack('Failed: ${e.message}');
+    } catch (e) {
+      _snack('Failed: $e');
+    } finally {
+      client.close();
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _setEnabled(bool value) async {
+    await CoveragePrefs.writeSettings(_settings.copyWith(enabled: value));
+    await _load();
+  }
+
+  Future<void> _setWifiOnly(bool value) async {
+    await CoveragePrefs.writeSettings(_settings.copyWith(wifiOnly: value));
+    await _load();
+  }
+
+  /// Reads the last year of fixes (the cheapest existing query —
+  /// `fixesByDateRange` walks the partial index `idx_pings_ts_fix` and
+  /// never decodes a coordinate-less row), caps at 5 000 points, plans,
+  /// confirms, downloads, then refreshes the tile providers so the
+  /// loopback restarts with the new packs.
+  Future<void> _fetchNow() async {
+    setState(() => _busy = true);
+    try {
+      final db = await TrailDatabase.shared();
+      final since = DateTime.now().toUtc().subtract(const Duration(days: 365));
+      final fixes = await PingDao(db).fixesByDateRange(startUtc: since);
+      final points = <GeoPoint>[
+        for (final p in fixes.take(_maxFetchPoints))
+          if (p.lat != null && p.lon != null) GeoPoint(p.lat!, p.lon!)
+      ];
+      if (points.isEmpty) {
+        _snack('No fixes in the last year to cover.');
+        return;
+      }
+      await CoverageService.instance.refreshExtents();
+      final plan = await CoverageService.instance.planForPoints(points);
+      if (!mounted) return;
+      if (plan.isEmpty) {
+        _snack('Every place you have been is already covered in detail.');
+        return;
+      }
+      final ok = await showDialog<bool>(
+            context: context,
+            builder: (c) => AlertDialog(
+              title: const Text('Download map detail?'),
+              content: Text(
+                '${plan.boxes.length} area'
+                '${plan.boxes.length == 1 ? '' : 's'} · '
+                '${_formatMb(plan.totalBytes)} · planet '
+                '${plan.planetDate ?? 'unknown'}',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(c, false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(c, true),
+                  child: const Text('Download'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
+      if (!ok || !mounted) return;
+
+      final cancelToken = TileDownloadCancelToken();
+      final progress = ValueNotifier<String>('Starting…');
+      unawaited(showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (c) => AlertDialog(
+          title: const Text('Downloading map detail'),
+          content: ValueListenableBuilder<String>(
+            valueListenable: progress,
+            builder: (_, text, __) => Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const LinearProgressIndicator(),
+                const SizedBox(height: 12),
+                Text(text),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                cancelToken.isCancelled = true;
+                Navigator.pop(c);
+              },
+              child: const Text('Cancel'),
+            ),
+          ],
+        ),
+      ));
+
+      final result = await CoverageService.instance.fetchPlan(
+        plan,
+        cancelToken: cancelToken,
+        onProgress: (i, count, received, total) {
+          progress.value = 'Area ${i + 1} of $count · '
+              '${_formatMb(received)}${total == null ? '' : ' / ${_formatMb(total)}'}';
+        },
+        onInstalled: () {
+          if (mounted) invalidateTileProviders(ref);
+        },
+      );
+      if (mounted && Navigator.of(context).canPop()) Navigator.of(context).pop();
+      progress.dispose();
+      if (result.cancelled) {
+        _snack('Cancelled after ${result.downloaded} area(s).');
+      } else if (result.error != null) {
+        _snack('Failed: ${result.error}');
+      } else {
+        _snack('Downloaded ${result.downloaded} area'
+            '${result.downloaded == 1 ? '' : 's'} '
+            '(${_formatMb(result.bytes)}).');
+      }
+      await CoveragePrefs.writeNotice(null);
+      await CoveragePrefs.clearPending();
+    } catch (e) {
+      _snack('Failed: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+      await _load();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const _SectionHeader('Map detail server'),
+        ListTile(
+          leading: const Icon(Icons.dns_outlined),
+          title: const Text('Server URL'),
+          subtitle: Text(_url ?? 'Not set'),
+          trailing: const Icon(Icons.edit),
+          onTap: _busy ? null : _editUrl,
+        ),
+        ListTile(
+          leading: const Icon(Icons.vpn_key_outlined),
+          title: const Text('Server token'),
+          subtitle: Text(_maskedToken == null ? 'Not set' : 'Set: $_maskedToken'),
+          trailing: _maskedToken == null
+              ? const Icon(Icons.add)
+              : Wrap(
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline),
+                      tooltip: 'Clear token',
+                      onPressed: _busy ? null : _clearToken,
+                    ),
+                    const Icon(Icons.edit),
+                  ],
+                ),
+          onTap: _busy ? null : _editToken,
+        ),
+        ListTile(
+          leading: _busy
+              ? const SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.network_check),
+          title: const Text('Test connection'),
+          subtitle: const Text('Checks the server and shows its planet date.'),
+          onTap: _busy ? null : _testConnection,
+        ),
+        SwitchListTile(
+          secondary: const Icon(Icons.auto_awesome_motion_outlined),
+          title: const Text('Auto-download map detail for new places'),
+          subtitle: const Text(
+            'Sends the area around new pins to your own server.',
+          ),
+          value: _settings.enabled,
+          onChanged: _busy ? null : _setEnabled,
+        ),
+        SwitchListTile(
+          secondary: const Icon(Icons.wifi),
+          title: const Text('Wi-Fi only'),
+          subtitle: const Text('Never download map detail on mobile data.'),
+          value: _settings.wifiOnly,
+          onChanged: _busy || !_settings.enabled ? null : _setWifiOnly,
+        ),
+        ListTile(
+          leading: const Icon(Icons.download_for_offline_outlined),
+          title: const Text('Fetch map detail for my pins now'),
+          subtitle: Text(
+            _notice ??
+                'Covers the last 365 days of fixes. Shows the size before '
+                    'downloading.',
+          ),
+          trailing: _pending == 0
+              ? const Icon(Icons.chevron_right)
+              : Badge(label: Text('$_pending')),
+          onTap: _busy ? null : _fetchNow,
+        ),
+      ],
+    );
+  }
+}
+
+/// Cap on how many fixes the manual run feeds the planner. Clustering is
+/// O(points × clusters); 5 000 points is a year of 4 h pings several
+/// times over and still plans in milliseconds.
+const int _maxFetchPoints = 5000;
+
+String _formatMb(int bytes) => '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';

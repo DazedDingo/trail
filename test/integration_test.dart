@@ -65,7 +65,8 @@ Future<Database> _openMemDb() async {
       wifi_ssid TEXT,
       source TEXT NOT NULL,
       note TEXT,
-      comment TEXT
+      comment TEXT,
+      import_id INTEGER
     );
   ''');
   await db.execute('CREATE INDEX idx_pings_ts_utc ON pings(ts_utc DESC);');
@@ -75,6 +76,12 @@ Future<Database> _openMemDb() async {
   await db.execute(
     'CREATE INDEX IF NOT EXISTS idx_pings_ts_fix ON pings(ts_utc, lat, lon) '
     'WHERE lat IS NOT NULL AND lon IS NOT NULL;',
+  );
+  // idx_pings_import (schema v5) — mirror of
+  // TrailDatabase._pingsImportIndexSql.
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_pings_import ON pings(import_id) '
+    'WHERE import_id IS NOT NULL;',
   );
   return db;
 }
@@ -136,7 +143,7 @@ void main() {
       expect(gpxBody, isNot(contains('lat="4.0"')));
 
       // DB now has only the post-cutoff rows.
-      final remaining = await dao.all();
+      final remaining = await dao.allPings(includeImported: true);
       expect(remaining.map((p) => p.lat).toList(), [3.0, 4.0]);
     });
 
@@ -179,7 +186,7 @@ void main() {
       final archivedGpx =
           File(archive.exportedFiles.single).readAsStringSync();
 
-      final survivors = await dao.all();
+      final survivors = await dao.allPings(includeImported: true);
       final range = DateTimeRange(
         start: DateTime.utc(2026, 3, 1),
         end: DateTime.utc(2026, 4, 20),
@@ -424,7 +431,10 @@ void main() {
       await dao.insert(_p(b.startUtc.add(const Duration(hours: 1)),
           source: PingSource.noFix));
 
-      final pure = filterPingsByRange(await dao.all(), range);
+      final pure = filterPingsByRange(
+        await dao.allPings(includeImported: true),
+        range,
+      );
       final sql = await dao.byDateRange(
         b.startUtc,
         b.endUtcExclusive.subtract(const Duration(milliseconds: 1)),

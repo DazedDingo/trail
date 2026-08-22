@@ -62,7 +62,8 @@ Future<Database> _openMemDb() async {
       wifi_ssid TEXT,
       source TEXT NOT NULL,
       note TEXT,
-      comment TEXT
+      comment TEXT,
+      import_id INTEGER
     );
   ''');
   await db.execute('CREATE INDEX idx_pings_ts_utc ON pings(ts_utc DESC);');
@@ -72,6 +73,13 @@ Future<Database> _openMemDb() async {
   await db.execute(
     'CREATE INDEX IF NOT EXISTS idx_pings_ts_fix ON pings(ts_utc, lat, lon) '
     'WHERE lat IS NOT NULL AND lon IS NOT NULL;',
+  );
+  // idx_pings_import (schema v5) — partial index for import-batch lookups
+  // (`deleteByImportId` / `countByImportId`). Mirror of
+  // TrailDatabase._pingsImportIndexSql.
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_pings_import ON pings(import_id) '
+    'WHERE import_id IS NOT NULL;',
   );
   // ping_photos (schema v2) — kept in lock-step with TrailDatabase._onCreate
   // so the DAO tests can exercise photo CRUD without a real SQLCipher open.
@@ -107,6 +115,19 @@ Future<Database> _openMemDb() async {
   ''');
   await db.execute(
       'CREATE INDEX idx_area_photos_cell ON area_photos(cell_lat, cell_lon);');
+  // imports (schema v5) — mirror of TrailDatabase._importsCreateSql.
+  await db.execute('''
+    CREATE TABLE imports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      imported_at_utc INTEGER NOT NULL,
+      file_name TEXT,
+      file_hash TEXT NOT NULL UNIQUE,
+      preset TEXT NOT NULL,
+      row_count INTEGER NOT NULL,
+      ts_min_utc INTEGER,
+      ts_max_utc INTEGER
+    );
+  ''');
   return db;
 }
 
@@ -168,6 +189,27 @@ void main() {
       final rows = await db.query('pings');
       expect(rows.first['lat'], isNull);
       expect(rows.first['source'], 'no_fix');
+    });
+
+    test('a plain (non-import) ping round-trips with a NULL import_id '
+        '(schema v5)', () async {
+      final id = await dao.insert(_p(DateTime.utc(2026, 1, 1), lat: 1, lon: 2));
+      final got = await dao.byId(id);
+      expect(got!.importId, isNull);
+    });
+
+    test('Ping.importId round-trips through toMap/fromMap when set directly',
+        () async {
+      final id = await dao.insert(Ping(
+        timestampUtc: DateTime.utc(2026, 1, 1),
+        lat: 1,
+        lon: 2,
+        source: PingSource.imported,
+        importId: 42,
+      ));
+      final got = await dao.byId(id);
+      expect(got!.source, PingSource.imported);
+      expect(got.importId, 42);
     });
   });
 
@@ -247,6 +289,25 @@ void main() {
       expect(latest, isNotNull);
       expect(latest!.source, PingSource.panic);
     });
+
+    test('skips a NEWER imported row and returns the previous live fix '
+        '(schema v5 — an export must never become "the last ping")',
+        () async {
+      await dao.insert(_p(DateTime.utc(2026, 1, 1, 10),
+          lat: 51.5, lon: -0.1, source: PingSource.scheduled));
+      await dao.insert(_p(DateTime.utc(2026, 1, 1, 12),
+          lat: 51.9, lon: -0.9, source: PingSource.imported));
+      final latest = await dao.latestSuccessful();
+      expect(latest, isNotNull);
+      expect(latest!.source, PingSource.scheduled);
+      expect(latest.lat, 51.5);
+    });
+
+    test('returns null when every fix is imported', () async {
+      await dao.insert(_p(DateTime.utc(2026, 1, 1, 10),
+          lat: 1, lon: 2, source: PingSource.imported));
+      expect(await dao.latestSuccessful(), isNull);
+    });
   });
 
   group('PingDao.recent', () {
@@ -293,9 +354,30 @@ void main() {
     test('empty table returns an empty list, not null', () async {
       expect(await dao.recent(), isEmpty);
     });
+
+    test('excludes imported rows by default (schema v5 — Home "Recent" '
+        'must show live activity)', () async {
+      await dao.insert(_p(DateTime.utc(2026, 1, 1, 10), lat: 1, lon: 1));
+      await dao.insert(_p(DateTime.utc(2026, 1, 1, 12),
+          lat: 2, lon: 2, source: PingSource.imported));
+      final rows = await dao.recent();
+      expect(rows.map((r) => r.source), [PingSource.scheduled]);
+    });
+
+    test('includeImported: true returns imports too, still newest-first',
+        () async {
+      await dao.insert(_p(DateTime.utc(2026, 1, 1, 10), lat: 1, lon: 1));
+      await dao.insert(_p(DateTime.utc(2026, 1, 1, 12),
+          lat: 2, lon: 2, source: PingSource.imported));
+      final rows = await dao.recent(includeImported: true);
+      expect(rows.map((r) => r.timestampUtc), [
+        DateTime.utc(2026, 1, 1, 12),
+        DateTime.utc(2026, 1, 1, 10),
+      ]);
+    });
   });
 
-  group('PingDao.all', () {
+  group('PingDao.allPings', () {
     test('returns rows in ASCENDING order (opposite of recent())', () async {
       // This asymmetry matters for exports — GPX readers expect
       // chronological order, not reverse. A regression that swapped this
@@ -303,7 +385,7 @@ void main() {
       await dao.insert(_p(DateTime.utc(2026, 1, 1, 12), lat: 1, lon: 1));
       await dao.insert(_p(DateTime.utc(2026, 1, 1, 10), lat: 2, lon: 2));
       await dao.insert(_p(DateTime.utc(2026, 1, 1, 11), lat: 3, lon: 3));
-      final rows = await dao.all();
+      final rows = await dao.allPings();
       expect(rows.map((r) => r.timestampUtc).toList(), [
         DateTime.utc(2026, 1, 1, 10),
         DateTime.utc(2026, 1, 1, 11),
@@ -311,7 +393,7 @@ void main() {
       ]);
     });
 
-    test('returns EVERY row — no implicit limit on all()', () async {
+    test('returns EVERY row — no implicit limit on allPings()', () async {
       for (var i = 0; i < 300; i++) {
         await dao.insert(_p(
           DateTime.utc(2026, 1, 1).add(Duration(minutes: i)),
@@ -319,7 +401,24 @@ void main() {
           lon: 2,
         ));
       }
-      expect((await dao.all()).length, 300);
+      expect((await dao.allPings()).length, 300);
+    });
+
+    test('excludes imported rows by default (schema v5 — stats/trips stay '
+        'live Trail data)', () async {
+      await dao.insert(_p(DateTime.utc(2026, 1, 1, 10), lat: 1, lon: 1));
+      await dao.insert(_p(DateTime.utc(2026, 1, 1, 11),
+          lat: 2, lon: 2, source: PingSource.imported));
+      final rows = await dao.allPings();
+      expect(rows.map((r) => r.source), [PingSource.scheduled]);
+    });
+
+    test('includeImported: true returns every row', () async {
+      await dao.insert(_p(DateTime.utc(2026, 1, 1, 10), lat: 1, lon: 1));
+      await dao.insert(_p(DateTime.utc(2026, 1, 1, 11),
+          lat: 2, lon: 2, source: PingSource.imported));
+      final rows = await dao.allPings(includeImported: true);
+      expect(rows, hasLength(2));
     });
   });
 
@@ -402,7 +501,7 @@ void main() {
       await dao.insert(_p(DateTime.utc(2026, 1, 10), lat: 1, lon: 1));
       await dao.insert(_p(DateTime.utc(2026, 2, 5), lat: 9, lon: 9));
       await dao.deleteOlderThan(cutoff);
-      final rows = await dao.all();
+      final rows = await dao.allPings();
       expect(rows, hasLength(1));
       expect(rows.single.lat, 9);
       expect(rows.single.timestampUtc, DateTime.utc(2026, 2, 5));
@@ -658,6 +757,146 @@ void main() {
         ));
       }
       expect((await dao.latestSuccessful())!.lat, 7);
+    });
+
+    test('latestSuccessful with the schema-v5 import exclusion still walks '
+        'idx_pings_ts_fix', () async {
+      final p = await plan(
+        'SELECT * FROM pings WHERE ${PingDao.fixPredicate} '
+        "AND source != 'no_fix' AND ${PingDao.notImportedPredicate} "
+        'ORDER BY ts_utc DESC LIMIT 1',
+      );
+      expect(p, contains('idx_pings_ts_fix'));
+    });
+  });
+
+  group('PingDao.existingFixesInRange (schema v5, import dedupe)', () {
+    test('returns (ts, lat, lon) tuples in range, oldest-first', () async {
+      await dao.insert(_p(DateTime.utc(2026, 3, 1, 8), lat: 1, lon: 1));
+      await dao.insert(_p(DateTime.utc(2026, 3, 1, 12))); // no_fix, excluded
+      await dao.insert(_p(DateTime.utc(2026, 3, 2, 8), lat: 2, lon: 2));
+      await dao.insert(_p(DateTime.utc(2026, 3, 5, 8), lat: 3, lon: 3));
+
+      final lo = DateTime.utc(2026, 3, 1).millisecondsSinceEpoch;
+      final hi = DateTime.utc(2026, 3, 3).millisecondsSinceEpoch;
+      final rows = await dao.existingFixesInRange(lo, hi);
+      expect(rows.map((r) => r.lat), [1, 2]);
+      expect(rows.map((r) => r.lon), [1, 2]);
+      expect(rows[0].tsUtcMs, DateTime.utc(2026, 3, 1, 8).millisecondsSinceEpoch);
+    });
+
+    test('bounds are inclusive on both ends', () async {
+      final t = DateTime.utc(2026, 3, 1, 8);
+      await dao.insert(_p(t, lat: 5, lon: 5));
+      final ms = t.millisecondsSinceEpoch;
+      expect((await dao.existingFixesInRange(ms, ms)), hasLength(1));
+    });
+
+    test('includes previously-imported rows — a re-import must dedupe '
+        'against them too', () async {
+      await dao.insert(_p(DateTime.utc(2026, 3, 1, 8),
+          lat: 1, lon: 1, source: PingSource.imported));
+      final lo = DateTime.utc(2026, 3, 1).millisecondsSinceEpoch;
+      final hi = DateTime.utc(2026, 3, 2).millisecondsSinceEpoch;
+      expect(await dao.existingFixesInRange(lo, hi), hasLength(1));
+    });
+
+    test('empty table / no rows in range → empty list', () async {
+      final lo = DateTime.utc(2026, 1, 1).millisecondsSinceEpoch;
+      final hi = DateTime.utc(2026, 1, 2).millisecondsSinceEpoch;
+      expect(await dao.existingFixesInRange(lo, hi), isEmpty);
+    });
+  });
+
+  group('PingDao.insertImportedBatch (schema v5)', () {
+    List<Ping> buildRows(int n, {DateTime? start}) => [
+          for (var i = 0; i < n; i++)
+            Ping(
+              timestampUtc:
+                  (start ?? DateTime.utc(2026, 1, 1)).add(Duration(minutes: i)),
+              lat: 51.0 + i * 0.001,
+              lon: -0.1,
+              // Deliberately the "wrong" source/importId — insertImportedBatch
+              // must stamp its own values regardless of what the caller sets.
+              source: PingSource.scheduled,
+            ),
+        ];
+
+    test('stamps source=import and import_id, returns the inserted count',
+        () async {
+      final count =
+          await dao.insertImportedBatch(buildRows(3), importId: 7);
+      expect(count, 3);
+      final rows = await dao.allPings(includeImported: true);
+      expect(rows, hasLength(3));
+      expect(rows.every((p) => p.source == PingSource.imported), isTrue);
+      expect(rows.every((p) => p.importId == 7), isTrue);
+    });
+
+    test('empty list is a no-op and returns 0', () async {
+      expect(await dao.insertImportedBatch(const [], importId: 1), 0);
+      expect(await dao.count(), 0);
+    });
+
+    test('1200 rows insert as 3 chunks of the 500-row batch size and all '
+        'land', () async {
+      // 500 + 500 + 200 — ceil(1200 / 500) == 3 chunks, exercising the
+      // final partial chunk as well as two full ones.
+      expect((1200 / PingDao.importBatchChunkSize).ceil(), 3);
+      final rows = buildRows(1200);
+      final count = await dao.insertImportedBatch(rows, importId: 3);
+      expect(count, 1200);
+      expect(await dao.countByImportId(3), 1200);
+    });
+
+    test('is atomic per call — a second batch gets its own import_id',
+        () async {
+      await dao.insertImportedBatch(buildRows(2), importId: 1);
+      await dao.insertImportedBatch(
+        buildRows(2, start: DateTime.utc(2026, 2, 1)),
+        importId: 2,
+      );
+      expect(await dao.countByImportId(1), 2);
+      expect(await dao.countByImportId(2), 2);
+    });
+  });
+
+  group('PingDao.deleteByImportId / countByImportId (schema v5)', () {
+    test('deleteByImportId removes only that import\'s rows', () async {
+      await dao.insertImportedBatch(
+        [Ping(timestampUtc: DateTime.utc(2026, 1, 1), lat: 1, lon: 1, source: PingSource.scheduled)],
+        importId: 1,
+      );
+      await dao.insertImportedBatch(
+        [Ping(timestampUtc: DateTime.utc(2026, 1, 2), lat: 2, lon: 2, source: PingSource.scheduled)],
+        importId: 2,
+      );
+      await dao.insert(_p(DateTime.utc(2026, 1, 3), lat: 3, lon: 3)); // live ping
+
+      final deleted = await dao.deleteByImportId(1);
+      expect(deleted, 1);
+      expect(await dao.countByImportId(1), 0);
+      expect(await dao.countByImportId(2), 1);
+      expect(await dao.count(), 2, reason: 'import 2 + the live ping survive');
+    });
+
+    test('countByImportId returns 0 for an unknown/empty import', () async {
+      expect(await dao.countByImportId(999), 0);
+    });
+
+    test('deleteByImportId on an unknown import deletes 0 and does not '
+        'throw', () async {
+      expect(await dao.deleteByImportId(999), 0);
+    });
+
+    test('query plans for import-id lookups use idx_pings_import, not a '
+        'full scan', () async {
+      final p = await db.rawQuery(
+        'EXPLAIN QUERY PLAN SELECT * FROM pings WHERE import_id = ?',
+        [1],
+      );
+      final detail = p.map((r) => r['detail']).join('\n');
+      expect(detail, contains('idx_pings_import'));
     });
   });
 }

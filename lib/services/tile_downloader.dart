@@ -16,38 +16,59 @@ import 'mbtiles_service.dart';
 /// at the next chunk and the future completes with a
 /// [TileDownloadCancelled].
 class TileDownloader {
-  /// Streams [url] to `<docs>/tiles/<filename>` (filename inferred
-  /// from the URL when [filename] is null) and reports progress in
+  /// Streams [url] to `<docs>/tiles/<filename>` and reports progress in
   /// bytes via [onProgress]. Returns the installed region.
+  ///
+  /// When [filename] is null the name is taken from the response's
+  /// `Content-Disposition` header, falling back to the last URL
+  /// segment. That matters for the coverage-extract server (Phase C,
+  /// `docs/TIMELINE_IMPORT.md` §3), whose download URL is a query
+  /// endpoint (`/v1/extract?bbox=…`) with no usable last segment — the
+  /// server is the only party that knows the planet date belonging in
+  /// the file name, and the `coverage-` prefix is what makes
+  /// `inferRoleFromFileName` tag the result as a coverage pack.
+  ///
+  /// [headers] are set on the request (the extract server needs
+  /// `Authorization: Bearer …`); nothing from them is ever logged.
   static Future<TilesRegion> download({
     required Uri url,
     String? filename,
+    Map<String, String>? headers,
     void Function(int received, int? total)? onProgress,
     TileDownloadCancelToken? cancelToken,
     HttpClient? httpClient,
   }) async {
+    // Validate an explicitly-supplied name before opening a socket, so
+    // a caller's typo still fails fast rather than after a 30 MB body.
+    if (filename != null) _requireArchiveExtension(filename);
     final client = httpClient ?? HttpClient();
     client.userAgent = 'Trail/0.8 (mbtiles fetch)';
-    final inferredName = filename ?? _inferFilename(url);
-    final lower = inferredName.toLowerCase();
-    if (!lower.endsWith('.mbtiles') && !lower.endsWith('.pmtiles')) {
-      throw ArgumentError(
-        'Filename must end with .mbtiles or .pmtiles (got "$inferredName")',
-      );
-    }
-    final dest = await _destinationFile(inferredName);
-    final tmp = File('${dest.path}.partial');
+    File? tmp;
     try {
       final req = await client.getUrl(url);
+      headers?.forEach(req.headers.set);
       final resp = await req.close();
       if (resp.statusCode < 200 || resp.statusCode >= 300) {
+        // Drain so the socket is released rather than left half-read.
+        try {
+          await resp.drain<void>();
+        } catch (_) {/* body already gone — nothing to release */}
         throw HttpException(
           'Download failed: HTTP ${resp.statusCode}',
           uri: url,
         );
       }
+      final inferredName = filename ??
+          filenameFromContentDisposition(
+            resp.headers.value('content-disposition'),
+          ) ??
+          _inferFilename(url);
+      _requireArchiveExtension(inferredName);
+      final dest = await _destinationFile(inferredName);
+      final partial = File('${dest.path}.partial');
+      tmp = partial;
       final total = resp.contentLength == -1 ? null : resp.contentLength;
-      final sink = tmp.openWrite();
+      final sink = partial.openWrite();
       var received = 0;
       try {
         await for (final chunk in resp) {
@@ -65,7 +86,7 @@ class TileDownloader {
       // Atomic rename so a half-written file never gets picked up by
       // listInstalled if the user kills the app mid-download.
       if (await dest.exists()) await dest.delete();
-      await tmp.rename(dest.path);
+      await partial.rename(dest.path);
       final stat = await dest.stat();
       return TilesRegion(
         name: _stem(inferredName),
@@ -75,14 +96,24 @@ class TileDownloader {
     } catch (e) {
       // Clean up partial on any error so the user can retry without a
       // stale `.partial` lying around.
-      if (await tmp.exists()) {
+      final partial = tmp;
+      if (partial != null && await partial.exists()) {
         try {
-          await tmp.delete();
+          await partial.delete();
         } catch (_) {/* swallow — best-effort cleanup */}
       }
       rethrow;
     } finally {
       if (httpClient == null) client.close();
+    }
+  }
+
+  static void _requireArchiveExtension(String name) {
+    final lower = name.toLowerCase();
+    if (!lower.endsWith('.mbtiles') && !lower.endsWith('.pmtiles')) {
+      throw ArgumentError(
+        'Filename must end with .mbtiles or .pmtiles (got "$name")',
+      );
     }
   }
 
@@ -107,6 +138,39 @@ class TileDownloader {
     final dot = filename.lastIndexOf('.');
     return dot <= 0 ? filename : filename.substring(0, dot);
   }
+}
+
+/// Pulls the file name out of a `Content-Disposition` header, e.g.
+/// `attachment; filename="coverage-lat+51.38_lon-002.36-z7-14-20260822.pmtiles"`.
+/// Returns `null` when the header is absent or carries no usable name.
+///
+/// Any directory component is stripped — a hostile server must not be
+/// able to steer the write outside `<docs>/tiles/`. Top-level and pure
+/// so the parsing rules can be unit-tested without a socket.
+String? filenameFromContentDisposition(String? header) {
+  if (header == null || header.isEmpty) return null;
+  String? value;
+  // RFC 5987 `filename*=UTF-8''…` wins over the plain form when both
+  // are present, which is what servers that emit both intend.
+  final ext = RegExp(
+    "filename\\*\\s*=\\s*[^']*'[^']*'([^;]+)",
+    caseSensitive: false,
+  ).firstMatch(header);
+  if (ext != null) {
+    value = Uri.decodeComponent(ext.group(1)!.trim());
+  } else {
+    final plain = RegExp(
+      r'filename\s*=\s*(?:"([^"]*)"|([^;]+))',
+      caseSensitive: false,
+    ).firstMatch(header);
+    if (plain != null) {
+      value = (plain.group(1) ?? plain.group(2) ?? '').trim();
+    }
+  }
+  if (value == null) return null;
+  // Strip any path the server tried to sneak in, both separators.
+  final cleaned = value.split('/').last.split(r'\').last.trim();
+  return cleaned.isEmpty ? null : cleaned;
 }
 
 /// Caller-flippable flag to abort an in-flight download.

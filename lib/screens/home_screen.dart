@@ -775,6 +775,11 @@ class _PingTile extends ConsumerWidget {
         return Icons.signal_cellular_off;
       case PingSource.scheduled:
         return Icons.pin_drop;
+      case PingSource.imported:
+        // Home's "Recent" list excludes imports (schema v5,
+        // `PingDao.recent`'s default) — this row realistically never
+        // renders here, but the switch must stay exhaustive.
+        return Icons.file_download_outlined;
     }
   }
 }

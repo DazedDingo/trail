@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
 import '../models/ping.dart';
@@ -17,6 +19,15 @@ class PingDao {
   /// *syntactically* implies the index's, so keep this text and the
   /// index DDL in lock-step. Every fixes-only read composes it.
   static const fixPredicate = 'lat IS NOT NULL AND lon IS NOT NULL';
+
+  /// "This row is not a Timeline import." Timeline import rows (schema
+  /// v5, source = 'import') are map-only data (docs/TIMELINE_IMPORT.md,
+  /// "Exclusions that must ship with it" + commander's decision "imports
+  /// are map-only"): the heartbeat/"last ping" card, the Recent list and
+  /// the photo backfill must never surface or act on one. Not tied to a
+  /// specific index the way [fixPredicate] is — `idx_pings_import` only
+  /// helps a lookup keyed *by* `import_id`, not a `!= 'import'` scan.
+  static const notImportedPredicate = "source != 'import'";
 
   Future<int> insert(Ping p) async {
     final map = p.toMap()..remove('id');
@@ -60,17 +71,19 @@ class PingDao {
   }
 
   /// Most-recent successful fix — used by the "last successful ping" card
-  /// on the home screen. Rejects `no_fix` and null-coord rows.
+  /// on the home screen. Rejects `no_fix`, null-coord rows, AND imported
+  /// rows (schema v5) — an export must never become "the last ping"
+  /// (docs/TIMELINE_IMPORT.md exclusions).
   ///
   /// Leads with [fixPredicate] so the planner walks `idx_pings_ts_fix`
   /// backwards and stops at its first entry — O(1) regardless of how
   /// many no_fix rows a stationary/indoor streak has piled on top of the
   /// last real fix (pre-v4 this scanned `idx_pings_ts_utc` through every
-  /// one of them). The `source` check is evaluated on that one row.
+  /// one of them). The `source` checks are evaluated on that one row.
   Future<Ping?> latestSuccessful() async {
     final rows = await db.query(
       'pings',
-      where: "$fixPredicate AND source != 'no_fix'",
+      where: "$fixPredicate AND source != 'no_fix' AND $notImportedPredicate",
       orderBy: 'ts_utc DESC',
       limit: 1,
     );
@@ -78,17 +91,37 @@ class PingDao {
     return Ping.fromMap(rows.first);
   }
 
-  Future<List<Ping>> recent({int limit = 200}) async {
+  /// Most-recent pings, newest-first. Excludes Timeline imports by
+  /// default (schema v5) — the Home screen's "Recent" list and the
+  /// motion-aware skip heuristic (`_maybeMotionAwareSkip`) must both
+  /// reason about live device fixes only, not a historical export.
+  /// Pass `includeImported: true` for a full-history read (e.g. the
+  /// History screen, which is the one place imports belong).
+  Future<List<Ping>> recent({
+    int limit = 200,
+    bool includeImported = false,
+  }) async {
     final rows = await db.query(
       'pings',
+      where: includeImported ? null : notImportedPredicate,
       orderBy: 'ts_utc DESC',
       limit: limit,
     );
     return rows.map(Ping.fromMap).toList();
   }
 
-  Future<List<Ping>> all() async {
-    final rows = await db.query('pings', orderBy: 'ts_utc ASC');
+  /// Every row, oldest-first. Excludes Timeline imports by default —
+  /// stats/trips/heatmap are live-Trail-data-only per the commander's
+  /// decision ("imported rows are map-only ... stats stay real Trail
+  /// data", docs/TIMELINE_IMPORT.md). Pass `includeImported: true` for
+  /// paths that legitimately want the full table (e.g. a "no range
+  /// picked" export).
+  Future<List<Ping>> allPings({bool includeImported = false}) async {
+    final rows = await db.query(
+      'pings',
+      where: includeImported ? null : notImportedPredicate,
+      orderBy: 'ts_utc ASC',
+    );
     return rows.map(Ping.fromMap).toList();
   }
 
@@ -174,7 +207,7 @@ class PingDao {
   }
 
   /// Every row with `ts_utc < cutoff`, ASCENDING — same order as
-  /// [all] so exports match historical shape.
+  /// [allPings] so exports match historical shape.
   Future<List<Ping>> olderThan(DateTime cutoffUtc) async {
     final rows = await db.query(
       'pings',
@@ -213,5 +246,87 @@ class PingDao {
       );
     });
     return removed > 0;
+  }
+
+  /// `(ts_utc, lat, lon)` for every existing fix in
+  /// `[tsMinUtcMs, tsMaxUtcMs]` (inclusive, epoch ms), oldest-first. The
+  /// import pipeline's dedupe pass (docs/TIMELINE_IMPORT.md: "skip a
+  /// candidate within ±60 s and < 25 m of an existing row") loads this
+  /// once per file and binary-searches it rather than round-tripping
+  /// SQLite per candidate. Index-only: [fixPredicate] + the `ts_utc`
+  /// range are exactly `idx_pings_ts_fix`'s covering columns, so this
+  /// never touches the base table. Deliberately NOT filtered by
+  /// [notImportedPredicate] — a re-import must dedupe against a
+  /// *previous* import's rows too, not just live pings.
+  Future<List<({int tsUtcMs, double lat, double lon})>> existingFixesInRange(
+    int tsMinUtcMs,
+    int tsMaxUtcMs,
+  ) async {
+    final rows = await db.query(
+      'pings',
+      columns: const ['ts_utc', 'lat', 'lon'],
+      where: '$fixPredicate AND ts_utc BETWEEN ? AND ?',
+      whereArgs: [tsMinUtcMs, tsMaxUtcMs],
+      orderBy: 'ts_utc ASC',
+    );
+    return rows
+        .map((r) => (
+              tsUtcMs: r['ts_utc'] as int,
+              lat: (r['lat'] as num).toDouble(),
+              lon: (r['lon'] as num).toDouble(),
+            ))
+        .toList();
+  }
+
+  /// Rows per `Batch.commit` — a single-transaction, single-batch insert
+  /// of a 100k-row import would hold one giant SQLCipher journal open
+  /// for the whole write; chunking keeps each commit's journal bounded
+  /// while the surrounding transaction still makes the whole import
+  /// atomic (a crash mid-way rolls every chunk back, never a partial
+  /// import sitting in the table).
+  static const importBatchChunkSize = 500;
+
+  /// Inserts [rows] as one Timeline import batch, stamping every row's
+  /// `source` to [PingSource.imported] and `import_id` to [importId]
+  /// regardless of whatever source/importId the caller's [Ping] objects
+  /// already carry (the import pipeline builds plain [Ping]s from parsed
+  /// candidates; this is where they become "imported"). Runs inside a
+  /// single transaction, `Batch`-committed in chunks of
+  /// [importBatchChunkSize]. Returns the number of rows inserted.
+  Future<int> insertImportedBatch(
+    List<Ping> rows, {
+    required int importId,
+  }) async {
+    if (rows.isEmpty) return 0;
+    await db.transaction((txn) async {
+      for (var start = 0; start < rows.length; start += importBatchChunkSize) {
+        final end = math.min(start + importBatchChunkSize, rows.length);
+        final batch = txn.batch();
+        for (final p in rows.sublist(start, end)) {
+          final map = p.toMap()..remove('id');
+          map['source'] = PingSource.imported.dbValue;
+          map['import_id'] = importId;
+          batch.insert('pings', map);
+        }
+        await batch.commit(noResult: true);
+      }
+    });
+    return rows.length;
+  }
+
+  /// Deletes every row belonging to one import batch. Used by "Undo last
+  /// import". Returns the deleted row count.
+  Future<int> deleteByImportId(int id) async {
+    return db.delete('pings', where: 'import_id = ?', whereArgs: [id]);
+  }
+
+  /// Row count for one import batch — the preview/undo confirmation's
+  /// "this will remove N pings" figure.
+  Future<int> countByImportId(int id) async {
+    final r = await db.rawQuery(
+      'SELECT COUNT(*) AS c FROM pings WHERE import_id = ?',
+      [id],
+    );
+    return (r.first['c'] as int?) ?? 0;
   }
 }

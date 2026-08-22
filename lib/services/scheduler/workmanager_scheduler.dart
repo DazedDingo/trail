@@ -18,6 +18,7 @@ import '../../models/ping.dart';
 import '../../models/ping_photo.dart';
 import '../auto_photo_service.dart';
 import '../cell_photo_picker.dart';
+import '../coverage/coverage_service.dart';
 import '../how_is_it_service.dart';
 import '../location_service.dart';
 import '../notification_service.dart';
@@ -351,6 +352,18 @@ Future<bool> _handleScheduled({Database? db}) async {
         debugPrint('[scheduler] Skipping auto-photo fetch — '
             'network=${snapshot.networkState}, charging=$isCharging.');
       }
+    }
+
+    // Map detail (Phase C, docs/TIMELINE_IMPORT.md §3). Prefs-only
+    // bookkeeping: if no installed archive renders this place at street
+    // zoom, queue it for the next app open to fetch on Wi-Fi. No
+    // network and no extra DB work happen here — the worker must stay
+    // cheap, and the coverage server is the user's own box, which is
+    // not reachable from a 4 h background tick on mobile data anyway.
+    if (snapshot.source != PingSource.noFix &&
+        snapshot.lat != null &&
+        snapshot.lon != null) {
+      await CoverageService.noteFixInWorker(snapshot.lat!, snapshot.lon!);
     }
 
     final userCadence = await CadenceStore.get();

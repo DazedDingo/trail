@@ -39,6 +39,14 @@ class PhotoBackfillProgress {
 /// A ping is eligible when it has real coords AND no `wikimedia` photos
 /// yet. User-supplied photos don't block an eligible status — a manual
 /// shot doesn't replace what the auto-fetcher would have found.
+///
+/// Timeline-imported rows (schema v5, `PingSource.imported`) are never
+/// eligible: their coordinates must not leave the device via the
+/// Wikimedia lookup (CLAUDE.md gotcha 21, docs/TIMELINE_IMPORT.md
+/// exclusions). Belt-and-braces with the DB-level default in
+/// `PingDao.allPings()`, which already excludes imports before this
+/// function ever sees them — this check holds even if a future caller
+/// passes `includeImported: true`.
 List<Ping> selectEligibleForBackfill(
   List<Ping> pings,
   Set<int> pingIdsWithWikimedia,
@@ -48,6 +56,7 @@ List<Ping> selectEligibleForBackfill(
     if (p.id == null) continue;
     if (p.lat == null || p.lon == null) continue;
     if (p.source == PingSource.noFix) continue;
+    if (p.source == PingSource.imported) continue;
     if (pingIdsWithWikimedia.contains(p.id!)) continue;
     out.add(p);
   }
@@ -80,7 +89,7 @@ class PhotoBackfillService {
     final areaDao = AreaPhotoDao(db);
     final salt = await PhotoShufflePrefs.getSalt();
 
-    final all = await pingDao.all();
+    final all = await pingDao.allPings();
     final wikimediaIds = await _idsWithWikimediaPhotos(db);
     final eligible = selectEligibleForBackfill(all, wikimediaIds);
     final total = eligible.length;

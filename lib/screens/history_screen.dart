@@ -11,7 +11,7 @@ class HistoryScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final recent = ref.watch(recentPingsProvider);
+    final recent = ref.watch(historyPingsProvider);
     return Scaffold(
       appBar: AppBar(
         title: const Text('History'),
@@ -36,7 +36,10 @@ class HistoryScreen extends ConsumerWidget {
                     'are hold-to-panic fires. "boot" rows mark device '
                     'reboots. "no_fix" rows mean the worker tried but '
                     'GPS didn\'t respond in 2 minutes — the gap is still '
-                    'visible so silent failures can\'t hide.',
+                    'visible so silent failures can\'t hide. "import" '
+                    'rows came from a Google Maps Timeline import — they '
+                    'show on the map but never count as your last ping '
+                    'or in stats.',
               ),
             ],
           ),

@@ -1,0 +1,86 @@
+{
+  "exportInfo": "trail fixture { [ \" not a section",
+  "semanticSegments": [
+    {
+      "startTime": "2026-03-01T10:00:00.000+01:00",
+      "endTime": "2026-03-01T10:20:00.000+01:00",
+      "timelinePath": [
+        { "point": "51.5074°, -0.1278°", "time": "2026-03-01T10:00:00.000+01:00" },
+        { "point": "51.5080°, -0.1270°", "time": "2026-03-01T10:10:00.000+01:00" },
+        { "point": "51.5090°, -0.1260°", "time": "2026-03-01T10:20:00.000+01:00" }
+      ]
+    },
+    {
+      "startTime": "2026-03-01T14:00:00.000+01:00",
+      "endTime": "2026-03-01T14:20:00.000+01:00",
+      "timelinePath": [
+        { "point": "51.5100°, -0.1200°", "time": "2026-03-01T14:00:00.000+01:00" },
+        { "point": "51.5110°, -0.1190°", "time": "2026-03-01T14:10:00.000+01:00" },
+        { "point": "51.5120°, -0.1180°", "time": "2026-03-01T14:20:00.000+01:00" }
+      ]
+    },
+    {
+      "startTime": "2026-03-01T11:00:00.000+01:00",
+      "endTime": "2026-03-01T12:30:00.000+01:00",
+      "visit": {
+        "probability": 0.98,
+        "topCandidate": {
+          "placeId": "ChIJ_fixture-123",
+          "semanticType": "HOME",
+          "probability": 0.91,
+          "placeLocation": { "latLng": "51.5000°, -0.1000°" }
+        }
+      }
+    },
+    {
+      "startTime": "2026-03-01T13:00:00.000+01:00",
+      "endTime": "2026-03-01T13:40:00.000+01:00",
+      "activity": {
+        "start": { "latLng": "51.5000°, -0.1000°" },
+        "end": { "latLng": "51.5200°, -0.0900°" },
+        "distanceMeters": 2345.6,
+        "topCandidate": { "type": "WALKING", "probability": 0.72 }
+      }
+    },
+    {
+      "timelineMemory": {
+        "trip": { "destinations": [ { "identifier": { "placeId": "ChIJ_memory" } } ] },
+        "label": "Weekend {trip} [south] \"quoted\" caf\u00e9 \\ tail: {{{ ]]] \"",
+        "raw": "bad-�-byte"
+      }
+    }
+  ],
+  "rawSignals": [
+    {
+      "position": {
+        "LatLng": "51.5074°, -0.1278°",
+        "accuracyMeters": 20,
+        "altitudeMeters": 35.5,
+        "speedMetersPerSecond": 1.4,
+        "source": "GPS",
+        "timestamp": "2026-03-01T10:05:00.000+01:00"
+      }
+    },
+    {
+      "position": {
+        "LatLng": "51.5075°, -0.1279°",
+        "accuracyMeters": 150,
+        "source": "CELL",
+        "timestamp": "2026-03-01T10:06:00.000+01:00"
+      }
+    },
+    {
+      "wifiScan": {
+        "deliveryTime": "2026-03-01T10:07:00.000+01:00",
+        "devicesRecords": [ { "mac": 123456789, "rawRssi": -50 } ]
+      }
+    }
+  ],
+  "userLocationProfile": {
+    "frequentPlaces": [
+      { "placeLocation": "51.5000°, -0.1000°", "label": "HOME" },
+      { "placeLocation": "51.5300°, -0.0800°", "label": "WORK" }
+    ]
+  },
+  "exportedRecordCount": 9
+}

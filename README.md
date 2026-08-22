@@ -20,7 +20,8 @@ See [`CHANGELOG.md`](CHANGELOG.md) for what's new in each build, or any release 
 
 - **Encrypted GPS log** — SQLCipher database with a Keystore-derived key; optional passphrase mode survives uninstall via Android backup.
 - **Configurable cadence + motion-aware skipping** — pick 30 min / 1 h / 2 h / 4 h; opt-in motion-aware mode skips GPS warm-up when the last two fixes are within 50 m of each other.
-- **Offline vector-tile map** — sideload `.pmtiles` regions or build them on-demand from a curated catalog of UK national parks; a localhost MBTiles server keeps the renderer happy on Android.
+- **Offline vector-tile map** — Protomaps basemap archives (`pmtiles extract` of the daily planet) layered as one active region + any number of coverage packs + a world overview, all served by an in-app loopback server that overzooms the nearest coarser tile where nothing finer is installed; a catalog with the world overview and the UK, on-demand builds, and (with your own extract server) automatic detail packs for new places.
+- **Google Maps Timeline import** — stream a `Timeline.json` export into the encrypted log with preview, thinning presets, duplicate skipping and one-tap undo; imported pins are map-only and never hit the network.
 - **Hold-to-panic** — 600 ms long-press opens a pre-filled SMS to your emergency contacts (or fires it after a 5-second undo if Auto-send SMS is on); persistent foreground service handles continuous-panic mode.
 - **Stats screen** — calendar heatmap, top places, time-of-day chart, automatic trip detection (>10 km from home for ≥6 h).
 - **GPX / CSV export** with optional AES-256 encrypted zip wrapper (open with 7-Zip / Archive Utility / `7z`).

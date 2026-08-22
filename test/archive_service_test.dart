@@ -52,7 +52,8 @@ Future<Database> _openMemDb() async {
       wifi_ssid TEXT,
       source TEXT NOT NULL,
       note TEXT,
-      comment TEXT
+      comment TEXT,
+      import_id INTEGER
     );
   ''');
   await db.execute('CREATE INDEX idx_pings_ts_utc ON pings(ts_utc DESC);');
@@ -62,6 +63,12 @@ Future<Database> _openMemDb() async {
   await db.execute(
     'CREATE INDEX IF NOT EXISTS idx_pings_ts_fix ON pings(ts_utc, lat, lon) '
     'WHERE lat IS NOT NULL AND lon IS NOT NULL;',
+  );
+  // idx_pings_import (schema v5) — mirror of
+  // TrailDatabase._pingsImportIndexSql.
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_pings_import ON pings(import_id) '
+    'WHERE import_id IS NOT NULL;',
   );
   return db;
 }
@@ -186,7 +193,7 @@ void main() {
         writeDir: tmp,
       );
       expect(res.deletedCount, 1);
-      final remaining = await dao.all();
+      final remaining = await dao.allPings(includeImported: true);
       expect(remaining, hasLength(1));
       expect(remaining.single.lat, 9);
     });

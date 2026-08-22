@@ -10,6 +10,7 @@ import 'screens/diagnostics_screen.dart';
 import 'screens/home_location_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/history_screen.dart';
+import 'screens/import_timeline_screen.dart';
 import 'screens/map_screen.dart';
 import 'screens/passphrase_entry_screen.dart';
 import 'screens/regions_screen.dart';
@@ -92,6 +93,10 @@ final _routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/trips', builder: (_, __) => const TripsScreen()),
       GoRoute(path: '/regions', builder: (_, __) => const RegionsScreen()),
       GoRoute(path: '/archive', builder: (_, __) => const ArchiveScreen()),
+      GoRoute(
+        path: '/import-timeline',
+        builder: (_, __) => const ImportTimelineScreen(),
+      ),
       GoRoute(
         path: '/diagnostics',
         builder: (_, __) => const DiagnosticsScreen(),

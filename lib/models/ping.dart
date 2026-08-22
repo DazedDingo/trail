@@ -4,7 +4,18 @@ enum PingSource {
   scheduled,
   panic,
   boot,
-  noFix;
+  noFix,
+  /// Row materialised from a Google Maps Timeline import (0.16.0),
+  /// db value `'import'`. Provenance detail (path/visit/activity/raw)
+  /// lives in [Ping.note] with a `gmaps:` prefix; the batch's bookkeeping
+  /// lives in the `imports` table (schema v5), joined via
+  /// [Ping.importId]. An OLD build reading a new DB sees an unrecognised
+  /// `'import'` string and [fromDb] falls back to [scheduled] — see the
+  /// `default` branch below. That's an acceptable downgrade: an old
+  /// build can't render imports specially anyway, and treating them as
+  /// ordinary scheduled fixes at least keeps them visible rather than
+  /// silently dropped.
+  imported;
 
   String get dbValue {
     switch (this) {
@@ -16,6 +27,8 @@ enum PingSource {
         return 'boot';
       case PingSource.noFix:
         return 'no_fix';
+      case PingSource.imported:
+        return 'import';
     }
   }
 
@@ -27,6 +40,8 @@ enum PingSource {
         return PingSource.boot;
       case 'no_fix':
         return PingSource.noFix;
+      case 'import':
+        return PingSource.imported;
       case 'scheduled':
       default:
         return PingSource.scheduled;
@@ -60,6 +75,11 @@ class Ping {
   /// from [note], which carries system-generated text only (e.g. "no_fix"
   /// reasons). Reads as `null` on every legacy row inserted before v2.
   final String? comment;
+  /// Foreign key into the `imports` table (schema v5, 0.16.0) — `null`
+  /// for every row not produced by a Timeline import. Lets "undo last
+  /// import" / per-import stats target exactly one batch without
+  /// relying on the `note` prefix or a timestamp range.
+  final int? importId;
 
   const Ping({
     this.id,
@@ -77,12 +97,13 @@ class Ping {
     required this.source,
     this.note,
     this.comment,
+    this.importId,
   });
 
   /// Returns a copy with the named fields overridden. Used by the
   /// `attachComment` path so the comment is preserved across re-reads
   /// without re-querying the DB.
-  Ping copyWith({String? comment}) => Ping(
+  Ping copyWith({String? comment, int? importId}) => Ping(
         id: id,
         timestampUtc: timestampUtc,
         lat: lat,
@@ -98,6 +119,7 @@ class Ping {
         source: source,
         note: note,
         comment: comment ?? this.comment,
+        importId: importId ?? this.importId,
       );
 
   Map<String, Object?> toMap() => {
@@ -116,6 +138,7 @@ class Ping {
         'source': source.dbValue,
         'note': note,
         'comment': comment,
+        'import_id': importId,
       };
 
   factory Ping.fromMap(Map<String, Object?> m) => Ping(
@@ -137,5 +160,6 @@ class Ping {
         source: PingSource.fromDb(m['source'] as String? ?? 'scheduled'),
         note: m['note'] as String?,
         comment: m['comment'] as String?,
+        importId: (m['import_id'] as num?)?.toInt(),
       );
 }

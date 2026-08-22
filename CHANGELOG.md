@@ -4,6 +4,15 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.16.0+99] — 2026-08-22
+
+### Added
+- **Import your Google Maps Timeline.** *Settings → History → Import Google Timeline*: export `Timeline.json` from your phone (Settings → Location → Location services → Timeline → Export Timeline data), pick it in Trail, and the file is read in a streaming pass that never loads the whole thing into memory — a 200 MB export is fine on a 4 GB phone. Path breadcrumbs, visit start/end points, activity endpoints and the raw GPS signals (accuracy ≤ 100 m) all become pins. You get a preview first — rows after thinning, duplicates skipped, date range, how many elements of each kind were read or skipped — then choose a thinning preset (**Normal** 15 min / 250 m is the default, Coarse 60 min / 1 km, or Full with a warning above 50 000 rows) and import with a progress bar and cancel. **Undo** any import later from *Settings → History → Timeline imports*; a byte-identical file is refused with a pointer to the earlier import.
+- **Imported pins are map-only and never touch the network.** They show on the map and in History with an *imported* marker, but they are excluded from the "last ping" card, the heartbeat, Recent pings, the stats heatmap / clock / top places / trips (those stay live Trail data), and from the Wikimedia photo lookup and backfill — imported coordinates never leave the phone. Exports and archives include them, tagged `import`.
+- **Duplicates against your own pings are skipped.** A Timeline point within 60 s and 25 m of a Trail fix is dropped; Trail's own fix always wins. Within the file, raw GPS points beat path breadcrumbs in the same minute, and visit start/end points are always kept.
+- **Map detail downloads itself for new places.** Once you enter your own tile server in *Settings → Offline map → Map detail server* (URL + token; "Test connection" shows the planet date), every background ping that lands somewhere no installed archive covers in detail is noted, and the next time you open the app on Wi-Fi Trail fetches a small z7–14 pack (~2–8 MB for a town) around it from your server and installs it as a *Coverage* archive — no tapping. Bigger backlogs (over 20 MB) wait for a tap so nothing large downloads unnoticed; *Wi-Fi only* is on by default. After a Timeline import you're offered the same for every place in the import ("Download map detail for N places, ≈ X MB?"), and *Fetch map detail for my pins now* covers the last year of fixes on demand. Nothing ever goes to Protomaps from the phone; the area around a new pin is sent only to your server.
+- Database schema v5 (one-time, additive): an `import_id` column on pings and an `imports` table for undo. Your data is untouched.
+
 ## [0.15.1+98] — 2026-08-22
 
 ### Added

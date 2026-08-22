@@ -111,7 +111,10 @@ class _ExportDialogState extends State<ExportDialog> {
       // already-clipped list.
       final List<Ping> rows;
       if (range == null) {
-        rows = await dao.all();
+        // "No range" = export everything, including Timeline imports —
+        // same category as `byDateRange` (export/archive INCLUDES
+        // imports unchanged, docs/TIMELINE_IMPORT.md).
+        rows = await dao.allPings(includeImported: true);
       } else {
         final b = exportRangeUtcBounds(range);
         rows = await dao.byDateRange(

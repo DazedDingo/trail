@@ -44,7 +44,16 @@ class TrailDatabase {
   // alone, and `latestSuccessful` stops scanning every no_fix row of a
   // stationary streak. Index-only — no row data changes. `ANALYZE` runs
   // once after the step so the planner has row estimates for it.
-  static const _schemaVersion = 4;
+  // v5 (0.16.0): Google Maps Timeline import bookkeeping. Adds
+  // `pings.import_id` (nullable FK, no `REFERENCES`/cascade — imports can
+  // be deleted independently of the pings table's own FK-off convention,
+  // see `PingPhotoDao`'s comment on the same tradeoff) plus a new
+  // `imports` table (one row per completed import: hash for re-import
+  // dedupe, thinning preset, row count, ts range for the "undo last
+  // import" flow) and a partial index on `pings.import_id` so
+  // `deleteByImportId`/`countByImportId` don't scan the whole table.
+  // Additive — existing rows get `import_id = NULL`.
+  static const _schemaVersion = 5;
 
   /// Cached handle for the UI isolate. Kept as a `Future` (not a resolved
   /// `Database`) so parallel first-callers all await the same open — avoids
@@ -246,13 +255,15 @@ class TrailDatabase {
         wifi_ssid TEXT,
         source TEXT NOT NULL,
         note TEXT,
-        comment TEXT
+        comment TEXT,
+        import_id INTEGER
       );
     ''');
     await db.execute(
       'CREATE INDEX idx_pings_ts_utc ON pings(ts_utc DESC);',
     );
     await db.execute(_pingsTsFixIndexSql);
+    await db.execute(_pingsImportIndexSql);
     await db.execute('''
       CREATE TABLE emergency_contacts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -264,6 +275,7 @@ class TrailDatabase {
     await db.execute(_pingPhotosIndexSql);
     await db.execute(_areaPhotosCreateSql);
     await db.execute(_areaPhotosIndexSql);
+    await db.execute(_importsCreateSql);
   }
 
   static Future<void> _onUpgrade(
@@ -304,6 +316,24 @@ class TrailDatabase {
         await txn.execute(_pingsTsFixIndexSql);
       });
       await db.execute('ANALYZE;');
+    }
+    if (oldVersion < 5) {
+      // v4 → v5: Timeline import bookkeeping. SQLite's `ALTER TABLE ADD
+      // COLUMN` has no `IF NOT EXISTS` form (unlike `CREATE TABLE` /
+      // `CREATE INDEX`), so the column-existence check below is what
+      // makes a retried migration a no-op instead of a "duplicate
+      // column name" error; the new table and its index still lean on
+      // `IF NOT EXISTS` like `idx_pings_ts_fix` (v4). Additive —
+      // existing rows get `import_id = NULL`.
+      await db.transaction((txn) async {
+        final cols = await txn.rawQuery('PRAGMA table_info(pings)');
+        final hasImportId = cols.any((c) => c['name'] == 'import_id');
+        if (!hasImportId) {
+          await txn.execute('ALTER TABLE pings ADD COLUMN import_id INTEGER;');
+        }
+        await txn.execute(_importsCreateSql);
+        await txn.execute(_pingsImportIndexSql);
+      });
     }
   }
 
@@ -383,4 +413,38 @@ class TrailDatabase {
 
   static const _areaPhotosIndexSql =
       'CREATE INDEX idx_area_photos_cell ON area_photos(cell_lat, cell_lon);';
+
+  // ─── imports schema (v5) ───────────────────────────────────────────
+  //
+  // One row per completed Timeline import batch. `file_hash` (sha256 of
+  // the first 1 MiB + ':' + the file's byte length, computed by the
+  // import service — this table just stores + uniquely constrains it)
+  // is how a byte-identical re-import is refused outright. `preset` is
+  // the thinning preset name (`normal` / `coarse` / `full`) the user
+  // picked. `ts_min_utc` / `ts_max_utc` bound the imported rows' time
+  // range for the preview + "undo last import" summary; both are
+  // nullable because a batch could in principle contain zero fix rows
+  // (shouldn't happen in practice — every kept candidate has a
+  // timestamp — but the columns don't assume it).
+  static const _importsCreateSql = '''
+    CREATE TABLE IF NOT EXISTS imports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      imported_at_utc INTEGER NOT NULL,
+      file_name TEXT,
+      file_hash TEXT NOT NULL UNIQUE,
+      preset TEXT NOT NULL,
+      row_count INTEGER NOT NULL,
+      ts_min_utc INTEGER,
+      ts_max_utc INTEGER
+    );
+  ''';
+
+  // Partial index — only rows belonging to an import are worth indexing;
+  // the vast majority of `pings` rows have `import_id IS NULL` and would
+  // otherwise bloat the index for zero benefit. Serves
+  // `PingDao.deleteByImportId` / `PingDao.countByImportId` (`EXPLAIN
+  // QUERY PLAN` pinned in `database_migration_test.dart`).
+  static const _pingsImportIndexSql =
+      'CREATE INDEX IF NOT EXISTS idx_pings_import ON pings(import_id) '
+      'WHERE import_id IS NOT NULL;';
 }

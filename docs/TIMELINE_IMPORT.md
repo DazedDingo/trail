@@ -1,6 +1,6 @@
 # Google Maps Timeline import — feasibility + plan
 
-**Date:** 2026-08-22 · **Status:** plan only (researched, not built). Sources were checked on that date; Google publishes no schema, so re-verify the format before implementing. Map-coverage design (§ Commander's considerations 3) completed with measured sizing the same day.
+**Date:** 2026-08-22 · **Status:** built the same day — Android `Timeline.json` import with preview/thinning/dedupe/undo shipped in **0.16.0+99** (iOS dialect and legacy Takeout deferred; see CLAUDE.md gotchas 34–36); map coverage Phases A/B/C shipped in 0.15.0 / 0.15.1 / 0.16.0. Sources were checked on that date; Google publishes no schema, so re-verify the format before implementing. Map-coverage design (§ Commander's considerations 3) completed with measured sizing the same day.
 
 ## Verdict
 

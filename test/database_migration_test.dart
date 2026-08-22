@@ -6,7 +6,6 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:sqlite3/open.dart';
 import 'package:trail/db/database.dart';
 import 'package:trail/db/ping_dao.dart';
-import 'package:trail/models/ping.dart';
 
 /// Schema-migration coverage for [TrailDatabase]. Runs the PRODUCTION
 /// `_onCreate` / `_onUpgrade` DDL (via the `@visibleForTesting` hooks)
@@ -115,6 +114,16 @@ Future<void> _createV3(Database db) async {
       'CREATE INDEX idx_area_photos_cell ON area_photos(cell_lat, cell_lon);');
 }
 
+/// What a 0.14.1 install has on disk: schema v4 (v3 + `idx_pings_ts_fix`).
+/// No `import_id` column, no `imports` table — the v5 starting point.
+Future<void> _createV4(Database db) async {
+  await _createV3(db);
+  await db.execute(
+    'CREATE INDEX IF NOT EXISTS idx_pings_ts_fix ON pings(ts_utc, lat, lon) '
+    'WHERE lat IS NOT NULL AND lon IS NOT NULL;',
+  );
+}
+
 Future<List<String>> _names(Database db, String type) async {
   final rows = await db.rawQuery(
     "SELECT name FROM sqlite_master WHERE type = ? AND name NOT LIKE 'sqlite_%'",
@@ -150,16 +159,34 @@ const _fixesRangeSql = 'SELECT * FROM pings WHERE ${PingDao.fixPredicate} '
 const _fixesAllSql =
     'SELECT * FROM pings WHERE ${PingDao.fixPredicate} ORDER BY ts_utc ASC';
 
-/// `PingDao.latestSuccessful()`.
+/// `PingDao.latestSuccessful()` — schema v5 adds the import exclusion.
 const _latestSuccessfulSql = 'SELECT * FROM pings WHERE ${PingDao.fixPredicate} '
-    "AND source != 'no_fix' ORDER BY ts_utc DESC LIMIT 1";
+    "AND source != 'no_fix' AND ${PingDao.notImportedPredicate} "
+    'ORDER BY ts_utc DESC LIMIT 1';
 
-Ping _p(DateTime t, {double? lat, double? lon, PingSource? source}) => Ping(
-      timestampUtc: t,
-      lat: lat,
-      lon: lon,
-      source: source ?? (lat == null ? PingSource.noFix : PingSource.scheduled),
-    );
+/// `PingDao.deleteByImportId` / `PingDao.countByImportId` (schema v5) —
+/// both key on `import_id`, which `idx_pings_import` covers.
+const _byImportIdSql = 'SELECT * FROM pings WHERE import_id = ?';
+
+/// Seeds a row via a raw `db.insert` rather than `PingDao.insert` —
+/// `Ping.toMap()` unconditionally emits `import_id` (schema v5), which
+/// doesn't exist yet on a hand-rolled pre-v5 table (`_createV1` /
+/// `_createV3` / `_createV4`). Used to seed "what a pre-migration
+/// install has on disk" without depending on the current column set.
+Future<void> _rawInsertPing(
+  Database db, {
+  required DateTime t,
+  double? lat,
+  double? lon,
+  String source = 'scheduled',
+}) async {
+  await db.insert('pings', {
+    'ts_utc': t.millisecondsSinceEpoch,
+    'lat': lat,
+    'lon': lon,
+    'source': source,
+  });
+}
 
 void main() {
   late Database db;
@@ -172,16 +199,22 @@ void main() {
     await db.close();
   });
 
-  test('schema version is 4', () {
-    expect(TrailDatabase.schemaVersionForTest, 4);
+  test('schema version is 5', () {
+    expect(TrailDatabase.schemaVersionForTest, 5);
   });
 
   group('fresh install (onCreate)', () {
-    test('creates every table and the v4 partial index', () async {
+    test('creates every table and the v4/v5 indexes', () async {
       await TrailDatabase.createSchemaForTest(db);
       expect(
         await _names(db, 'table'),
-        containsAll(['pings', 'emergency_contacts', 'ping_photos', 'area_photos']),
+        containsAll([
+          'pings',
+          'emergency_contacts',
+          'ping_photos',
+          'area_photos',
+          'imports',
+        ]),
       );
       expect(
         await _names(db, 'index'),
@@ -190,11 +223,13 @@ void main() {
           'idx_pings_ts_fix',
           'idx_ping_photos_ping_id',
           'idx_area_photos_cell',
+          'idx_pings_import',
         ]),
       );
       final sql = await _indexSql(db, 'idx_pings_ts_fix');
       expect(sql, contains('ON pings(ts_utc, lat, lon)'));
       expect(sql, contains('WHERE lat IS NOT NULL AND lon IS NOT NULL'));
+      expect(await _columns(db, 'pings'), contains('import_id'));
     });
 
     test('the index WHERE text equals PingDao.fixPredicate (implication is '
@@ -203,17 +238,32 @@ void main() {
       final sql = await _indexSql(db, 'idx_pings_ts_fix');
       expect(sql, contains('WHERE ${PingDao.fixPredicate}'));
     });
+
+    test('imports.file_hash is UNIQUE (refuses byte-identical re-imports)',
+        () async {
+      await TrailDatabase.createSchemaForTest(db);
+      final rows = await db.rawQuery(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'imports'",
+      );
+      expect(rows.single['sql'], contains('UNIQUE'));
+    });
+
+    test('idx_pings_import is partial (import_id IS NOT NULL)', () async {
+      await TrailDatabase.createSchemaForTest(db);
+      final sql = await _indexSql(db, 'idx_pings_import');
+      expect(sql, contains('ON pings(import_id)'));
+      expect(sql, contains('WHERE import_id IS NOT NULL'));
+    });
   });
 
   group('v3 → v4', () {
     setUp(() async {
       await _createV3(db);
-      final dao = PingDao(db);
-      await dao.insert(_p(DateTime.utc(2026, 1, 1, 8), lat: 51.5, lon: -0.1));
-      await dao.insert(_p(DateTime.utc(2026, 1, 1, 12))); // no_fix
-      await dao.insert(_p(DateTime.utc(2026, 1, 1, 16), lat: 51.6, lon: -0.2));
-      await dao.insert(_p(DateTime.utc(2026, 1, 1, 20))); // no_fix
-      await dao.insert(_p(DateTime.utc(2026, 1, 2, 8), lat: 51.7, lon: -0.3));
+      await _rawInsertPing(db, t: DateTime.utc(2026, 1, 1, 8), lat: 51.5, lon: -0.1);
+      await _rawInsertPing(db, t: DateTime.utc(2026, 1, 1, 12), source: 'no_fix');
+      await _rawInsertPing(db, t: DateTime.utc(2026, 1, 1, 16), lat: 51.6, lon: -0.2);
+      await _rawInsertPing(db, t: DateTime.utc(2026, 1, 1, 20), source: 'no_fix');
+      await _rawInsertPing(db, t: DateTime.utc(2026, 1, 2, 8), lat: 51.7, lon: -0.3);
     });
 
     test('adds idx_pings_ts_fix and keeps every row', () async {
@@ -278,7 +328,55 @@ void main() {
     });
   });
 
-  group('v1 → v4 (full chain)', () {
+  group('v4 → v5', () {
+    setUp(() async {
+      await _createV4(db);
+      await _rawInsertPing(db, t: DateTime.utc(2026, 4, 1, 8), lat: 51.5, lon: -0.1);
+      await _rawInsertPing(db, t: DateTime.utc(2026, 4, 1, 9), lat: 51.6, lon: -0.2);
+    });
+
+    test('adds import_id column, the imports table and idx_pings_import',
+        () async {
+      expect(await _columns(db, 'pings'), isNot(contains('import_id')));
+      await TrailDatabase.upgradeSchemaForTest(db, from: 4);
+      expect(await _columns(db, 'pings'), contains('import_id'));
+      expect(await _names(db, 'table'), contains('imports'));
+      expect(await _names(db, 'index'), contains('idx_pings_import'));
+      // Additive — existing rows get NULL import_id and survive.
+      expect(await PingDao(db).count(), 2);
+      final rows = await db.query('pings');
+      expect(rows.every((r) => r['import_id'] == null), isTrue);
+    });
+
+    test('is idempotent — re-running the step is a no-op', () async {
+      await TrailDatabase.upgradeSchemaForTest(db, from: 4);
+      await TrailDatabase.upgradeSchemaForTest(db, from: 4);
+      final tableDupes = await db.rawQuery(
+        "SELECT COUNT(*) AS c FROM sqlite_master WHERE name = 'imports'",
+      );
+      expect(tableDupes.first['c'], 1);
+      final indexDupes = await db.rawQuery(
+        "SELECT COUNT(*) AS c FROM sqlite_master WHERE name = 'idx_pings_import'",
+      );
+      expect(indexDupes.first['c'], 1);
+      // No "duplicate column name" thrown by the second ALTER TABLE.
+      expect(await _columns(db, 'pings'), contains('import_id'));
+    });
+
+    test('query plans for import lookups use idx_pings_import', () async {
+      await TrailDatabase.upgradeSchemaForTest(db, from: 4);
+      expect(await _plan(db, _byImportIdSql, [1]), contains('idx_pings_import'));
+    });
+
+    test('latestSuccessful still walks idx_pings_ts_fix after the upgrade '
+        '(new predicate term, same index)', () async {
+      await TrailDatabase.upgradeSchemaForTest(db, from: 4);
+      expect(await _plan(db, _latestSuccessfulSql), contains('idx_pings_ts_fix'));
+      expect((await PingDao(db).latestSuccessful())!.lat, 51.6);
+    });
+  });
+
+  group('v1 → v5 (full chain)', () {
     test('lands on the same shape as a fresh install', () async {
       await _createV1(db);
       await db.insert('pings', {
@@ -300,10 +398,12 @@ void main() {
       } finally {
         await fresh.close();
       }
-      // Legacy row survived with a NULL comment and is a fix.
+      // Legacy row survived with a NULL comment, a NULL import_id, and is
+      // a fix.
       final row = (await PingDao(db).fixesByDateRange()).single;
       expect(row.lat, 1.0);
       expect(row.comment, isNull);
+      expect(row.importId, isNull);
     });
   });
 }

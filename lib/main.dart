@@ -7,6 +7,7 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 import 'app.dart';
 import 'providers/backup_provider.dart';
 import 'providers/onboarding_provider.dart';
+import 'services/coverage/coverage_service.dart';
 import 'services/failed_photo_uris.dart';
 import 'services/memory_pressure.dart';
 import 'services/notification_service.dart';
@@ -33,6 +34,11 @@ void main() async {
   // caches; both rebuild on demand.
   configureImageCache();
   WidgetsBinding.instance.addObserver(MemoryPressureObserver());
+  // Map-detail catch-up on every foreground (Phase C,
+  // docs/TIMELINE_IMPORT.md §3). The observer only ever calls into
+  // CoverageService, which gates on the user's toggles, the network
+  // label and its own 10-minute throttle before it does anything.
+  WidgetsBinding.instance.addObserver(_coverageResume);
   // The two router gates, concurrently. `computeNeedsUnlock` detects the
   // post-restore case: auto-backup has put the encrypted DB + salt back
   // in place, but the Keystore-bound secure storage is empty (Android
@@ -75,6 +81,10 @@ void main() async {
 ///     `isFailed` is sync and treats an unloaded denylist as "nothing
 ///     failed"; `register` awaits the preload so an early failure merges
 ///     into — never clobbers — the persisted set.
+///   - [CoverageResumeObserver.run] drains the pending map-detail queue
+///     the background worker built up (Phase C). Reads the network
+///     label, then no-ops unless the feature is on, a server is
+///     configured, and the connection is one the user allowed.
 ///   - [MapLibreMap.preWarm] builds the native renderer's shared
 ///     resources (maplibre_gl 0.27.0) before any map is mounted, so the
 ///     first `/map` visit doesn't pay for it. Fire-and-forget by design;
@@ -84,12 +94,17 @@ void main() async {
 /// take down an app that has already painted.
 void _initDeferredServices() {
   unawaited(_guarded('workmanager', WorkmanagerScheduler.initialize));
+  unawaited(_guarded('map detail', _coverageResume.run));
   unawaited(_guarded('notifications', NotificationService.initialize));
   unawaited(_guarded('failed-photo denylist', FailedPhotoUris.preload));
   unawaited(MapLibreMap.preWarm().catchError((Object e) {
     debugPrint('preWarm failed: $e');
   }));
 }
+
+/// One instance, used both as the resume observer and as the cold-start
+/// post-frame call — sharing it means the service's throttle sees both.
+final _coverageResume = CoverageResumeObserver();
 
 Future<void> _guarded(String label, Future<void> Function() init) async {
   try {
