@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import '../services/secure_storage.dart';
 
 import '../services/passphrase_service.dart';
 
@@ -34,9 +34,7 @@ import '../services/passphrase_service.dart';
 ///     the key, and history is recovered.
 class KeystoreKey {
   static const _storageKey = 'trail_db_passphrase_v1';
-  static final _secure = const FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
-  );
+  static const _secure = secureStorage;
 
   /// Returns the stored key, or `null` if none is stored. Never generates.
   /// Use this when the caller needs to decide between "proceed" and

@@ -4,6 +4,21 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.14.1+96] — 2026-08-22
+
+### Fixed
+- **Photos you took with the camera or picked from the gallery now actually show up** in the pin gallery and the slideshow. They were being loaded as if they were bundled app assets, so every one of them fell straight into the "broken image" path — and each failure also re-wrote the whole broken-photo list to disk. Wrongly-remembered user photos are forgotten automatically on first launch; a genuinely missing one is now only remembered until the next app start. Decodes are also bounded to the tile size (a 12 MP shot no longer costs ~48 MB of RAM to show as a thumbnail).
+- **Slideshows over very long ranges no longer die with "too many SQL variables".** Photo lookups for the visible pins are fetched in batches of 900 instead of one giant query (SQLCipher caps a statement at 32 766 parameters).
+- **The map and stats update immediately after archiving, deleting a pin, a panic ping, "Ping now" or pull-to-refresh.** Previously a cached date range could keep showing stale pins until restart.
+- **The "last successful ping" card no longer slows down after long indoor / no-signal streaks** — it used to walk every "no fix" row of the streak before finding the last real fix.
+
+### Changed
+- **Faster cold start.** The two checks the app genuinely needs before drawing its first screen (onboarding done? backup passphrase needed?) now run in parallel, and WorkManager registration, notification-channel setup and the broken-photo list are loaded right after the first frame instead of before it.
+- **Map loads come from a dedicated fixes-only index** (one-time schema v4 upgrade on first launch — index only, your data is untouched). "No fix" rows are skipped at the database level instead of being decoded and thrown away, and date ranges you've moved away from are released from memory instead of being kept for the life of the app.
+- **Place names under pins are cached properly.** The reverse-geocoding cache was keyed on raw coordinates (GPS jitter defeated it), never evicted, and the Stats screen fired 30 lookups at once — Android's geocoder answers that with "Service not Available". The key is now rounded to ~11 m, results live in a bounded in-memory cache, repeated pings at the same spot share one lookup, and Top Places asks the geocoder 4 at a time.
+- **Memory caps right-sized.** Image cache 250 MB / 5 000 entries → 120 MB / 1 000 entries (the 100-frame slideshow warm-up and a month of thumbnails still fit), map-tile cache 50 MB → 16 MB, and both are dropped when Android signals memory pressure — far less chance of the app being killed in the background and relaunching cold.
+- **Date-range export reads only the range you asked for** instead of your whole history.
+
 ## [0.14.0+95] — 2026-08-22
 
 ### Fixed

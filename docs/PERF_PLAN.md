@@ -1,6 +1,6 @@
 # Trail performance plan — map pin loading + app-wide improvements
 
-**Date:** 2026-08-22 · **Baseline:** 0.13.10+94 (`adaa942`) · **Status:** M1–M3 shipped in **0.14.0+95** (commits `b228935`, `115eed3`, `903a38e`, 2026-08-22; see "Implementation notes" under §2). M4, M5 and the §3 list are still pending.
+**Date:** 2026-08-22 · **Baseline:** 0.13.10+94 (`adaa942`) · **Status:** M1–M3 shipped in **0.14.0+95**; M4 + §3 #2, #3, #4, #5, #9 shipped in **0.14.1+96** (see the 0.14.1 notes under §2). M5, 0.14.2 and 0.15.0 items pending. Original: M1–M3 shipped in **0.14.0+95** (commits `b228935`, `115eed3`, `903a38e`, 2026-08-22; see "Implementation notes" under §2). M4, M5 and the §3 list are still pending.
 All `file:line` references are against that commit.
 
 ---
@@ -166,6 +166,18 @@ Latest on pub.dev is 0.27.0. Relevant: large GeoJSON payloads encoded off the UI
 - **Review finding (fixed before release):** the sketch above filters on `['get','ts']` with epoch-ms literals. That is wrong on Android — `Expression.Converter.convertToValue` narrows every numeric literal to float32 (`getAsFloat()`), so a ~1.76e12 ms bound is off by up to ±65 s (ulp 131 072 ms), hiding the head pin on ~50 % of slider positions and collapsing interpolate stops for windows < 131 s. Shipped design: every feature carries an ordinal `i`; the window is `['<=', ['get','i'], n-1]` with `n = visibleCount(...)`, head/prev/age-ramp are keyed on `i`, and a unit test asserts all emitted literals are float32-exact. Also from review: `dragEnabled: false` (otherwise Android applies `withSynchronousUpdate(true)` to every GeoJSON source and `editGeoJsonSource` parses on the render thread), and an upload whose `editGeoJsonSource` returns `false` now retries on the next trigger. Reviewer confirmed: `setLayerProperties` re-sends every paint prop the layer relies on (nulls reset to default natively, `visibility` null is ignored); tap coordinates are device px on both sides (pad × dpr is right); `properties.id` arrives as int; sources are always added before the first edit; generation guards hold after every await.
 - Device-only verification (cannot run in `flutter_test`): the `case`/`interpolate` pin style renders; the head pin is present at every slider position incl. playback at 16×; tap ~20 dp off a pin opens it; `editGeoJsonSource` returns true after every style load; pins restored after returning from picture mode; multi-year upload doesn't freeze the map.
 
+### Implementation notes (0.14.1+96) — M4 + quick wins
+
+- Schema v4: `idx_pings_ts_fix` partial covering index + `ANALYZE` in the upgrade step; `PingDao.fixesByDateRange` (fixes-only, index-only walk) backs `pingsByRangeProvider`, which is now `autoDispose` (no `keepAlive` — see CLAUDE.md gotcha 29). `latestSuccessful` now O(1) via the same index.
+- **Projection decision: kept `SELECT *` / `List<Ping>`.** The detail sheet reads accuracy/altitude/speed/battery/network/cell/wifi/note/comment straight off the snapshot; a 5-column read would force a per-tap `byId` fetch and a panel change for ~20–40 ms per 10k rows that no longer sits next to a Θ(N²) upload. Revisit only if 30-min-cadence users see a hitch on "All time".
+- `allPingsProvider` stays full-table (stats/trips/export need no-fix gaps) — a different query, not a duplicate. Every `pings` write now invalidates the range family (archive, delete, panic, Ping now, pull-to-refresh).
+- Export clips at SQL via `exportRangeUtcBounds`; `filterPingsByRange` remains the gate (gotcha 13).
+- Geocoding: 4-dp `GeocodeKey`, `autoDispose` + `keepAlive` on success, 512-entry LRU + in-flight dedupe, stats burst capped at 4.
+- Startup: only the two router gates are awaited; the rest is post-frame (gotcha 30). `secureStorage` shared — hygiene only (flutter_secure_storage 9.2.4 re-inits natively per call).
+- Photos: `Image.file` + `cacheWidth` (320 px tiles; slideshow = viewport physical width clamped to [320, 1080]); `file://` denylist entries are session-only and persisted ones are purged once.
+- Memory: image cache 120 MB / 1 000 entries (the 100-frame warm-up ≤ 72 MB even all-portrait), tile LRU 16 MB, both cleared on `didHaveMemoryPressure`.
+- `byPingIds` chunked at 900 with id dedupe.
+
 ### Expected outcome
 
 | Scenario | Today | After M1–M4 |
@@ -216,7 +228,7 @@ Checked and clean: `PingPhotoDao.byPingIds` is a real batch; photo inserts use `
 | Release | Contents | Why this grouping |
 |---|---|---|
 | **0.14.0** | M1 + M2 + M3 (+ dead `trail_map.dart` loop removed, CLAUDE.md gotchas 12/22 rewritten) | The reported bug, fixed properly, in one coherent map-panel change |
-| 0.14.1 | M4 (schema v4, light map read, autoDispose) + §3 #2, #3, #4, #5, #9 | Cheap, independent, mostly S-effort wins; schema bump warrants its own release |
+| **0.14.1 ✔ shipped** | M4 (schema v4, fixes-only map read, autoDispose) + §3 #2, #3, #4, #5, #9 | Cheap, independent, mostly S-effort wins; schema bump warrants its own release |
 | 0.14.2 | §3 #6, #7, #8, #13, #14, #15, #17, #19 | Screen-by-screen polish |
 | 0.15.0 | M5 (`maplibre_gl` 0.27.0) + §3 #20 (R8, split-per-abi) + #12 | Dependency + build-config changes get their own version so a regression is easy to bisect |
 | opportunistic | #10, #11, #16, #21, #22 | — |
