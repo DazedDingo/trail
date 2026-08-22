@@ -15,7 +15,17 @@ import '../../models/ping.dart';
 ///   `List<Ping>` ─buildPinSnapshot─▶ [PinSnapshot] (chrono + [PinColumns]
 ///   + id→Ping) ─Isolate.run(buildPinsGeoJson)─▶ GeoJSON text
 ///   ─editGeoJsonSource─▶ native source. Slider ticks then only touch
-///   [tsFilter] / [buildPinStyle] — constant cost regardless of N.
+///   [windowFilter] / [buildPinStyle] — constant cost regardless of N.
+///
+/// **Why the window is an ordinal, not a timestamp.** Every point carries
+/// `i` = its chronological index (0..N-1) and the layer filter is
+/// `['<=', ['get','i'], n-1]`. maplibre-android's expression converter
+/// (`Expression.Converter.convertToValue`, android-sdk-opengl 13.0.2
+/// Expression.java ~4893-4905) narrows EVERY numeric literal with
+/// `JsonPrimitive.getAsFloat()`, so an epoch-ms literal (~1.76e12, float32
+/// ulp 131 072) lands up to ±65.5 s off and a `ts`-based window would
+/// hide the head pin on about half of all slider positions. Row indices
+/// (and rowids on the tap path) stay well under 2^24 and are exact.
 
 /// Literal empty FeatureCollection as text — the initial payload for
 /// `editGeoJsonSource` and the "nothing to show" upload.
@@ -35,9 +45,12 @@ const Map<String, dynamic> emptyFeatureCollectionMap = <String, dynamic>{
 /// whole thing can be handed to an isolate as ~32 bytes/fix of raw
 /// buffer rather than N boxed objects.
 class PinColumns {
-  /// `Ping.id` per fix. Rows without a rowid (shouldn't happen from the
-  /// DAO, but the model allows it) get a unique negative placeholder so
-  /// they still render and still map back via [PinSnapshot.byId].
+  /// `Ping.id` per fix — the tap path's key (see [PinSnapshot.byId]).
+  /// Rows without a rowid (shouldn't happen from the DAO, but the model
+  /// allows it) get a unique negative placeholder so they still render
+  /// and still map back. Never used inside a style expression: a rowid
+  /// is exact in float32 only below 2^24 (16.7 M) and the ordinal `i`
+  /// does the job with no such ceiling.
   final Int64List ids;
 
   /// `timestampUtc.millisecondsSinceEpoch` per fix, ascending.
@@ -146,12 +159,15 @@ PinSnapshot buildPinSnapshot(List<Ping> pings) {
 }
 
 /// One Point Feature per fix, shaped exactly like
-/// `{"type":"Feature","id":ID,"geometry":{"type":"Point","coordinates":[LON,LAT]},"properties":{"id":ID,"ts":TS_MS}}`.
+/// `{"type":"Feature","id":ID,"geometry":{"type":"Point","coordinates":[LON,LAT]},"properties":{"id":ID,"ts":TS_MS,"i":INDEX}}`
+/// where `INDEX` is the fix's 0-based chronological position.
 ///
 /// Nothing else goes in `properties` — the annotation API used to stamp
 /// seven style keys per point, which is most of why its payload was so
-/// fat. Styling is done with data-driven expressions on `id`/`ts`.
-/// Designed to run under `Isolate.run`.
+/// fat. The window filter and head/previous/age styling are data-driven
+/// expressions on `i` (float32-exact, see the library doc); `id` serves
+/// the tap path; `ts` is informational. Designed to run under
+/// `Isolate.run`.
 String buildPinsGeoJson(PinColumns c) {
   final n = c.length;
   if (n == 0) return emptyFeatureCollection;
@@ -172,6 +188,8 @@ String buildPinsGeoJson(PinColumns c) {
       ..write(id)
       ..write(',"ts":')
       ..write(c.tsMs[i])
+      ..write(',"i":')
+      ..write(i)
       ..write('}}');
   }
   sb.write(']}');
@@ -179,9 +197,10 @@ String buildPinsGeoJson(PinColumns c) {
 }
 
 /// One two-point LineString Feature per consecutive pair. Each segment
-/// carries `ts` of its LATER endpoint so the same [tsFilter] that hides
-/// future pins also hides the segment leading to them. Empty collection
-/// for fewer than two fixes. Designed to run under `Isolate.run`.
+/// carries `i` (and `ts`) of its LATER endpoint so the same
+/// [windowFilter] that hides future pins also hides the segment leading
+/// to them. Empty collection for fewer than two fixes. Designed to run
+/// under `Isolate.run`.
 String buildSegmentsGeoJson(PinColumns c) {
   final n = c.length;
   if (n < 2) return emptyFeatureCollection;
@@ -200,32 +219,35 @@ String buildSegmentsGeoJson(PinColumns c) {
       ..write(c.lats[i])
       ..write(']]},"properties":{"ts":')
       ..write(c.tsMs[i])
+      ..write(',"i":')
+      ..write(i)
       ..write('}}');
   }
   sb.write(']}');
   return sb.toString();
 }
 
-/// MapLibre filter expression selecting features whose `ts` property is
-/// inside `[t0Ms, t1Ms]` inclusive. Applied to the pins, path and
-/// heatmap layers on every slider tick instead of re-uploading data.
-List<Object> tsFilter(int t0Ms, int t1Ms) => [
-      'all',
-      [
-        '>=',
-        ['get', 'ts'],
-        t0Ms,
-      ],
-      [
-        '<=',
-        ['get', 'ts'],
-        t1Ms,
-      ],
+/// MapLibre filter expression showing exactly the first [visibleN]
+/// features in chronological order: `['<=', ['get','i'], visibleN - 1]`.
+/// `visibleN == 0` yields `-1` and hides everything. Applied to the
+/// pins, path and heatmap layers on every slider tick instead of
+/// re-uploading data.
+///
+/// [visibleN] comes straight from [visibleCount], so the map and the
+/// "$n / $total fixes shown" label are the same number by construction
+/// and duplicate timestamps at the cursor are handled identically. The
+/// literal is a small integer — exact after maplibre-android's float32
+/// narrowing (an epoch-ms bound would not be; see the library doc).
+List<Object> windowFilter(int visibleN) => [
+      '<=',
+      ['get', 'i'],
+      visibleN - 1,
     ];
 
 /// Number of entries in the ascending [tsMs] that are `<= sliderMaxMs`
-/// — i.e. how many pins the current time window shows. Binary search
-/// (upper bound); duplicates and boundary values are counted correctly.
+/// — i.e. how many pins the current time window shows, and literally the
+/// input to [windowFilter]. Binary search (upper bound); duplicates and
+/// boundary values are counted correctly.
 int visibleCount(Int64List tsMs, int sliderMaxMs) {
   var lo = 0;
   var hi = tsMs.length;
@@ -297,14 +319,16 @@ DateTime effectiveSliderMax(DateTime? selected, List<Ping> chrono) {
 }
 
 /// Data-driven paint expressions for the pins circle layer at one slider
-/// position. Head pin (the cursor) is larger + red, the previous pin is
-/// amber, everything else ramps from [dimHex] (oldest visible) to
-/// [baseHex] (newest visible) by `ts`. One `setLayerProperties` per tick
-/// applies the whole thing; nothing per-feature ever crosses the channel.
+/// position, keyed on the ordinal `i` (see [windowFilter] for why not
+/// `ts`). Head pin (`i == n-1`, the cursor) is larger + red, the previous
+/// pin (`i == n-2`) is amber, everything else ramps from [dimHex]
+/// (`i == 0`, oldest) to [baseHex] (`i == n-1`, newest visible). One
+/// `setLayerProperties` per tick applies the whole thing; nothing
+/// per-feature ever crosses the channel.
 ///
-/// The ramp is only emitted when `t1Ms > t0Ms` — MapLibre's
-/// `interpolate` requires strictly ascending stops, and a single visible
-/// pin (or duplicate timestamps at both ends) would violate that.
+/// The ramp is only emitted when `n-1 > 0` — MapLibre's `interpolate`
+/// requires strictly ascending stops, and a single visible pin would
+/// collapse both stops onto 0.
 class PinStyle {
   final Object radius;
   final Object color;
@@ -339,25 +363,23 @@ const String kHeadPinHex = '#FF1744';
 const String kPrevPinHex = '#FFB300';
 
 PinStyle buildPinStyle({
-  required int? headId,
-  required int? prevId,
-  required int t0Ms,
-  required int t1Ms,
+  required int visibleN,
   required String baseHex,
   required String dimHex,
 }) {
-  final Object base = t1Ms > t0Ms
+  final headIdx = visibleN - 1;
+  final Object base = headIdx > 0
       ? [
           'interpolate',
           ['linear'],
-          ['get', 'ts'],
-          t0Ms,
+          ['get', 'i'],
+          0,
           dimHex,
-          t1Ms,
+          headIdx,
           baseHex,
         ]
       : baseHex;
-  if (headId == null) {
+  if (visibleN < 1) {
     return PinStyle(
       radius: kPinRadius,
       color: base,
@@ -367,10 +389,10 @@ PinStyle buildPinStyle({
   }
   final isHead = [
     '==',
-    ['get', 'id'],
-    headId,
+    ['get', 'i'],
+    headIdx,
   ];
-  if (prevId == null) {
+  if (visibleN < 2) {
     return PinStyle(
       radius: ['case', isHead, kHeadPinRadius, kPinRadius],
       color: ['case', isHead, kHeadPinHex, base],
@@ -380,8 +402,8 @@ PinStyle buildPinStyle({
   }
   final isPrev = [
     '==',
-    ['get', 'id'],
-    prevId,
+    ['get', 'i'],
+    headIdx - 1,
   ];
   return PinStyle(
     radius: ['case', isHead, kHeadPinRadius, kPinRadius],

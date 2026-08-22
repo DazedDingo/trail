@@ -110,7 +110,7 @@ void main() {
           {'type': 'FeatureCollection', 'features': []});
     });
 
-    test('one Feature per fix with [lon, lat] order and id/ts properties',
+    test('one Feature per fix with [lon, lat] order and id/ts/i properties',
         () {
       final c = PinColumns(
         ids: Int64List.fromList([7, 8]),
@@ -131,19 +131,20 @@ void main() {
         'type': 'Point',
         'coordinates': [-0.125, 51.5],
       });
-      expect(f0['properties'], {'id': 7, 'ts': 1000});
+      expect(f0['properties'], {'id': 7, 'ts': 1000, 'i': 0});
 
       final f1 = features[1] as Map<String, dynamic>;
       expect(f1['id'], 8);
       expect((f1['geometry'] as Map)['coordinates'], [1.0, 52.25]);
-      expect(f1['properties'], {'id': 8, 'ts': 2000});
+      expect(f1['properties'], {'id': 8, 'ts': 2000, 'i': 1});
     });
 
-    test('properties carry nothing but id and ts', () {
+    test('properties carry nothing but id, ts and i', () {
       final json = buildPinsGeoJson(_cols([1, 2, 3]));
       final features = (jsonDecode(json) as Map)['features'] as List;
       for (final f in features) {
-        expect(((f as Map)['properties'] as Map).keys, unorderedEquals(['id', 'ts']));
+        expect(((f as Map)['properties'] as Map).keys,
+            unorderedEquals(['id', 'ts', 'i']));
       }
     });
 
@@ -164,6 +165,7 @@ void main() {
         expect(coords[1], c.lats[i]);
         expect((f['properties'] as Map)['ts'], c.tsMs[i]);
         expect((f['properties'] as Map)['id'], c.ids[i]);
+        expect((f['properties'] as Map)['i'], i);
         expect(f['id'], c.ids[i]);
       }
     });
@@ -214,7 +216,8 @@ void main() {
       ]);
     });
 
-    test('each segment carries the ts of its LATER endpoint', () {
+    test('each segment carries the ts AND the index i of its LATER endpoint',
+        () {
       final c = _cols([100, 200, 300, 400]);
       final features =
           (jsonDecode(buildSegmentsGeoJson(c)) as Map)['features'] as List;
@@ -222,6 +225,17 @@ void main() {
         features.map((f) => ((f as Map)['properties'] as Map)['ts']),
         [200, 300, 400],
       );
+      expect(
+        features.map((f) => ((f as Map)['properties'] as Map)['i']),
+        [1, 2, 3],
+      );
+      // windowFilter(n) keeps segments with i <= n-1: at n = 3 (fixes
+      // 0..2 visible) the segments into fix 1 and fix 2 show, the one
+      // into fix 3 does not.
+      final visibleAtN3 = features
+          .where((f) => ((f as Map)['properties'] as Map)['i'] <= 2)
+          .length;
+      expect(visibleAtN3, 2);
       // So the same `<= sliderMax` filter hides the segment INTO a future
       // pin while keeping the one into the head.
       final visibleAt300 = features
@@ -231,29 +245,94 @@ void main() {
     });
   });
 
-  group('tsFilter', () {
-    test('literal expression shape', () {
-      expect(tsFilter(10, 20), [
-        'all',
-        [
-          '>=',
-          ['get', 'ts'],
-          10,
-        ],
-        [
-          '<=',
-          ['get', 'ts'],
-          20,
-        ],
+  group('ordinal i (the float32-safe window key)', () {
+    test('buildPinsGeoJson stamps i = 0..N-1 in chrono order', () {
+      final snap = buildPinSnapshot([
+        for (var h = 0; h < 12; h++) _fix(id: 1000 + h * 7, ts: _t(h)),
+      ]);
+      final features =
+          (jsonDecode(buildPinsGeoJson(snap.cols)) as Map)['features'] as List;
+      expect(
+        features.map((f) => ((f as Map)['properties'] as Map)['i']),
+        [for (var i = 0; i < 12; i++) i],
+      );
+      // i indexes `chrono`, so feature i resolves to chrono[i].
+      for (var i = 0; i < 12; i++) {
+        final f = features[i] as Map;
+        expect((f['properties'] as Map)['id'], snap.chrono[i].id);
+      }
+    });
+
+    test('i survives null-coordinate exclusion (dense, no holes)', () {
+      final snap = buildPinSnapshot([
+        _fix(id: 1, ts: _t(0)),
+        _fix(id: 2, ts: _t(1), lat: null),
+        _fix(id: 3, ts: _t(2)),
+        Ping(id: 4, timestampUtc: _t(3), source: PingSource.noFix),
+        _fix(id: 5, ts: _t(4)),
+      ]);
+      final features =
+          (jsonDecode(buildPinsGeoJson(snap.cols)) as Map)['features'] as List;
+      expect(
+        features.map((f) => ((f as Map)['properties'] as Map)['i']),
+        [0, 1, 2],
+      );
+      expect(
+        features.map((f) => ((f as Map)['properties'] as Map)['id']),
+        [1, 3, 5],
+      );
+    });
+
+    test('segments carry the later endpoint i, 1..N-1', () {
+      final c = _cols([for (var i = 0; i < 6; i++) i * 10]);
+      final features =
+          (jsonDecode(buildSegmentsGeoJson(c)) as Map)['features'] as List;
+      expect(
+        features.map((f) => ((f as Map)['properties'] as Map)['i']),
+        [1, 2, 3, 4, 5],
+      );
+    });
+  });
+
+  group('windowFilter', () {
+    test('n = 0 hides everything (no feature has i <= -1)', () {
+      expect(windowFilter(0), [
+        '<=',
+        ['get', 'i'],
+        -1,
+      ]);
+    });
+
+    test('n = 1 shows only the first fix', () {
+      expect(windowFilter(1), [
+        '<=',
+        ['get', 'i'],
+        0,
+      ]);
+    });
+
+    test('literal shape for a multi-year range', () {
+      expect(windowFilter(7200), [
+        '<=',
+        ['get', 'i'],
+        7199,
       ]);
     });
 
     test('jsonEncodes to what the platform channel sends', () {
-      expect(
-        jsonEncode(tsFilter(1700000000000, 1700003600000)),
-        '["all",[">=",["get","ts"],1700000000000],'
-        '["<=",["get","ts"],1700003600000]]',
-      );
+      expect(jsonEncode(windowFilter(7200)), '["<=",["get","i"],7199]');
+    });
+
+    test('visibleCount is the filter input, so duplicates at the cursor '
+        'are all shown and the HUD count equals the map', () {
+      final ts = Int64List.fromList([10, 20, 20, 20, 30]);
+      final n = visibleCount(ts, 20);
+      expect(n, 4);
+      expect(windowFilter(n), [
+        '<=',
+        ['get', 'i'],
+        3,
+      ]);
     });
   });
 
@@ -356,93 +435,170 @@ void main() {
   });
 
   group('buildPinStyle', () {
-    test('no head ⇒ plain literals + ramp', () {
-      final s = buildPinStyle(
-        headId: null,
-        prevId: null,
-        t0Ms: 0,
-        t1Ms: 100,
-        baseHex: '#00ff00',
-        dimHex: '#003300',
-      );
+    const base = '#00ff00';
+    const dim = '#003300';
+    PinStyle style(int n) =>
+        buildPinStyle(visibleN: n, baseHex: base, dimHex: dim);
+
+    test('n = 0 ⇒ plain literals, constant colour', () {
+      final s = style(0);
       expect(s.radius, kPinRadius);
       expect(s.strokeWidth, 0.5);
       expect(s.strokeOpacity, 0.6);
       expect(s.strokeColor, '#FFFFFF');
-      expect(s.color, [
-        'interpolate',
-        ['linear'],
-        ['get', 'ts'],
+      expect(s.color, base);
+    });
+
+    test('n = 1 ⇒ head at i == 0, constant colour (ramp needs n-1 > 0, '
+        'interpolate stops must be strictly ascending)', () {
+      final s = style(1);
+      final isHead = [
+        '==',
+        ['get', 'i'],
         0,
-        '#003300',
-        100,
-        '#00ff00',
-      ]);
-    });
-
-    test('ramp is replaced by a constant when t1 <= t0 (interpolate stops '
-        'must be strictly ascending)', () {
-      for (final t1 in [0, -1]) {
-        final s = buildPinStyle(
-          headId: 1,
-          prevId: null,
-          t0Ms: 0,
-          t1Ms: t1,
-          baseHex: '#00ff00',
-          dimHex: '#003300',
-        );
-        expect(s.color, ['case', ['==', ['get', 'id'], 1], kHeadPinHex, '#00ff00']);
-      }
-    });
-
-    test('head only ⇒ two-way case on id', () {
-      final s = buildPinStyle(
-        headId: 42,
-        prevId: null,
-        t0Ms: 0,
-        t1Ms: 10,
-        baseHex: '#00ff00',
-        dimHex: '#003300',
-      );
-      final isHead = ['==', ['get', 'id'], 42];
+      ];
       expect(s.radius, ['case', isHead, kHeadPinRadius, kPinRadius]);
+      expect(s.color, ['case', isHead, kHeadPinHex, base]);
       expect(s.strokeWidth, ['case', isHead, 1, 0.5]);
       expect(s.strokeOpacity, ['case', isHead, 0.95, 0.6]);
-      expect((s.color as List).sublist(0, 3), ['case', isHead, kHeadPinHex]);
-      expect((s.color as List)[3], isA<List>()); // the ramp
     });
 
-    test('head + previous ⇒ three-way case on id', () {
-      final s = buildPinStyle(
-        headId: 42,
-        prevId: 41,
-        t0Ms: 0,
-        t1Ms: 10,
-        baseHex: '#00ff00',
-        dimHex: '#003300',
-      );
-      final isHead = ['==', ['get', 'id'], 42];
-      final isPrev = ['==', ['get', 'id'], 41];
+    test('n = 2 ⇒ head i == 1, previous i == 0, ramp over 0..1', () {
+      final s = style(2);
+      final isHead = [
+        '==',
+        ['get', 'i'],
+        1,
+      ];
+      final isPrev = [
+        '==',
+        ['get', 'i'],
+        0,
+      ];
       expect(s.radius, ['case', isHead, kHeadPinRadius, kPinRadius]);
       expect(s.strokeWidth, ['case', isHead, 1, isPrev, 1, 0.5]);
       expect(s.strokeOpacity, ['case', isHead, 0.95, isPrev, 0.95, 0.6]);
+      expect(s.color, [
+        'case',
+        isHead,
+        kHeadPinHex,
+        isPrev,
+        kPrevPinHex,
+        [
+          'interpolate',
+          ['linear'],
+          ['get', 'i'],
+          0,
+          dim,
+          1,
+          base,
+        ],
+      ]);
+    });
+
+    test('n = 7200 ⇒ head 7199, previous 7198, ramp 0..7199', () {
+      final s = style(7200);
       final color = s.color as List;
-      expect(color.sublist(0, 5), ['case', isHead, kHeadPinHex, isPrev, kPrevPinHex]);
-      expect(color[5], isA<List>());
+      expect(color[0], 'case');
+      expect(color[1], [
+        '==',
+        ['get', 'i'],
+        7199,
+      ]);
+      expect(color[3], [
+        '==',
+        ['get', 'i'],
+        7198,
+      ]);
+      expect(color[5], [
+        'interpolate',
+        ['linear'],
+        ['get', 'i'],
+        0,
+        dim,
+        7199,
+        base,
+      ]);
+      expect((s.radius as List)[1], color[1]);
+    });
+
+    test('never keys on ts or id — only i is float32-safe at any N', () {
+      for (final n in [0, 1, 2, 7200]) {
+        final s = style(n);
+        for (final e in [s.radius, s.color, s.strokeWidth, s.strokeOpacity]) {
+          final json = jsonEncode(e);
+          expect(json, isNot(contains('"ts"')), reason: 'n=$n: $json');
+          expect(json, isNot(contains('"id"')), reason: 'n=$n: $json');
+        }
+      }
     });
 
     test('every expression jsonEncodes (what setLayerProperties ships)', () {
-      final s = buildPinStyle(
-        headId: 2,
-        prevId: 1,
-        t0Ms: 1700000000000,
-        t1Ms: 1700003600000,
-        baseHex: '#00ff00',
-        dimHex: '#003300',
-      );
+      final s = style(52600);
       for (final e in [s.radius, s.color, s.strokeWidth, s.strokeOpacity]) {
         expect(() => jsonEncode(e), returnsNormally);
       }
+    });
+  });
+
+  group('float32 safety', () {
+    // maplibre-android's Expression.Converter.convertToValue narrows
+    // every JSON number with JsonPrimitive.getAsFloat() (android-sdk-
+    // opengl 13.0.2, Expression.java ~4893-4905) before it reaches the
+    // renderer, so anything we compare or interpolate on must survive a
+    // double → float32 → double round trip unchanged.
+    bool exact(num v) => v == Float32List.fromList([v.toDouble()])[0];
+    double narrowed(num v) => Float32List.fromList([v.toDouble()])[0];
+
+    Iterable<num> literals(Object? e) sync* {
+      if (e is num) {
+        yield e;
+      } else if (e is List) {
+        for (final x in e) {
+          yield* literals(x);
+        }
+      }
+    }
+
+    test('every integer literal emitted by windowFilter / buildPinStyle is '
+        'float32-exact for realistic and extreme n', () {
+      for (final n in [0, 1, 2, 7200, 52600, (1 << 24) - 1]) {
+        final s = buildPinStyle(visibleN: n, baseHex: '#00ff00', dimHex: '#003300');
+        final all = [
+          ...literals(windowFilter(n)),
+          ...literals(s.radius),
+          ...literals(s.color),
+          ...literals(s.strokeWidth),
+          ...literals(s.strokeOpacity),
+        ];
+        expect(all, isNotEmpty);
+        for (final v in all) {
+          if (v is int) {
+            // Indices, comparison operands, interpolate stops: must be
+            // bit-exact or the head/previous match and the window edge
+            // land on the wrong pin.
+            expect(exact(v), isTrue,
+                reason: 'n=$n: integer literal $v is not float32-exact');
+          } else {
+            // Opacities / widths (0.5, 0.6, 0.95): a sub-1e-6 wobble is
+            // invisible; the renderer stores them as float anyway.
+            expect((narrowed(v) - v).abs(), lessThan(1e-6),
+                reason: 'n=$n: literal $v narrows badly');
+          }
+        }
+      }
+    });
+
+    test('an epoch-ms literal is NOT float32-exact — why the window is an '
+        'ordinal, not a ts bound', () {
+      final ms = DateTime.utc(2025, 10, 1, 12, 34, 56, 789)
+          .millisecondsSinceEpoch; // ~1.76e12, float32 ulp = 131 072
+      expect(exact(ms), isFalse);
+      expect((narrowed(ms) - ms).abs(), greaterThan(1000),
+          reason: 'the error is seconds, not milliseconds');
+      // And even seconds-relative does not help over multi-year ranges.
+      const threeYearsSeconds = 3 * 365 * 24 * 3600; // ~9.5e7 > 2^24
+      expect(threeYearsSeconds, greaterThan(1 << 24));
     });
   });
 

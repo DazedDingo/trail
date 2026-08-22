@@ -39,11 +39,15 @@ import 'slideshow_view.dart';
 /// Every fix in the selected range is uploaded once as a GeoJSON source
 /// (`trail-pins-src`, one Point feature with `id` + `ts` properties) plus
 /// a companion segments source (`trail-segs-src`, one two-point
-/// LineString per consecutive pair tagged with the later `ts`). Native
-/// circle / line / heatmap style layers draw them. The time slider never
-/// re-uploads: it calls `setFilter` with a `ts` window and one
-/// `setLayerProperties` carrying data-driven head/previous styling, so a
-/// tick costs the same whether the range holds 100 or 100 000 fixes.
+/// LineString per consecutive pair tagged with the later endpoint's
+/// index). Native circle / line / heatmap style layers draw them. The
+/// time slider never re-uploads: it calls `setFilter` with an ORDINAL
+/// window — `['<=', ['get','i'], n-1]`, `n` = `visibleCount` — and one
+/// `setLayerProperties` carrying data-driven head/previous styling keyed
+/// on the same `i`, so a tick costs the same whether the range holds 100
+/// or 100 000 fixes. Not a `ts` window: maplibre-android narrows every
+/// expression literal to float32 (`JsonPrimitive.getAsFloat()`), which
+/// puts an epoch-ms bound up to ±65 s off — see pin_geojson.dart.
 /// The GeoJSON text is built in `Isolate.run` so the UI isolate never
 /// JSON-encodes the collection. See `services/map/pin_geojson.dart`.
 class FullMapPanel extends ConsumerStatefulWidget {
@@ -112,6 +116,11 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   /// means "show everything"; see `effectiveSliderMax`.
   final ValueNotifier<DateTime?> _sliderMaxN = ValueNotifier<DateTime?>(null);
   DateTime? get _sliderMax => _sliderMaxN.value;
+
+  /// Last `_syncTimeWindow` failure message, so a persistent fault (e.g.
+  /// a layer missing from the style) logs once rather than ~30×/s at 16×
+  /// playback. Cleared on the next successful sync.
+  String? _lastSyncError;
 
   /// Coalesces [_scheduleSync] calls to at most one platform sync per
   /// frame. A 120 Hz slider drag otherwise fires setFilter faster than
@@ -510,7 +519,13 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
             styleString: styleJson,
             initialCameraPosition: CameraPosition(target: initial, zoom: 13),
             minMaxZoomPreference: const MinMaxZoomPreference(2, 18),
-            dragEnabled: true,
+            // No draggable annotations anywhere in the panel. With
+            // `dragEnabled: true` the Android plugin creates every
+            // GeoJSON source with `GeoJsonOptions().withSynchronousUpdate(
+            // true)` (MapLibreMapController.java:447), which would make
+            // each editGeoJsonSource parse + tile the whole collection
+            // synchronously on the render thread.
+            dragEnabled: false,
             compassEnabled: false,
             rotateGesturesEnabled: false,
             tiltGesturesEnabled: false,
@@ -631,9 +646,11 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     final filter = _currentFilter();
     final primaryHex = scheme.primary.toHexStringRGB();
 
-    // Each step is individually guarded: if a source/layer already exists
-    // (a second onStyleLoaded for the same style) the add throws, and we
-    // still want the remaining pieces installed.
+    // Each step is individually guarded so a failure in one leaves the
+    // rest installed. On Android a duplicate addGeoJsonSource returns
+    // silently (MapLibreMapController.java:436-438: source already in
+    // style ⇒ no-op); a duplicate layer add (a second onStyleLoaded for
+    // the same style) does throw.
     Future<void> step(String what, Future<void> Function() f) async {
       try {
         await f();
@@ -722,6 +739,12 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
       } else {
         // Typed-data columns cross the isolate boundary as a buffer copy;
         // the result strings come back via Isolate.exit (no copy).
+        //
+        // The lambda must capture ONLY `cols`. Referencing `c`, `this`
+        // or any other instance member would drag the controller (and
+        // its platform channel) into the message, Isolate.run would throw
+        // ArgumentError("Invalid argument: is a …"), and the catch below
+        // would swallow it as "Pin upload failed" — pins never render.
         final both = await Isolate.run(() => _buildBothGeoJson(cols));
         pins = both[0];
         segs = both[1];
@@ -731,11 +754,19 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
       if (gen != _uploadGen || !mounted || !identical(c, _controller)) return;
       final okSegs = await c.editGeoJsonSource(_segsSrc, segs);
       if (!okPins || !okSegs) {
+        // Java answers false (no exception reaches Dart) when the style
+        // is null or the source is missing — e.g. addGeoJsonSource was
+        // skipped because style.isFullyLoaded() was false at the time.
+        // Forget the identity so the next trigger (toggle, range change,
+        // style load) retries instead of believing the data is up.
         developer.log(
           'editGeoJsonSource returned false (pins=$okPins segs=$okSegs, '
-          'fixes=${cols.length}) — source missing from style?',
+          'fixes=${cols.length}) — source missing from style? Will retry '
+          'on the next trigger.',
           name: 'trail-map',
         );
+        if (gen == _uploadGen) _uploadedListIdentity = null;
+        return;
       }
       if (gen != _uploadGen || !mounted) return;
       await _syncTimeWindow();
@@ -755,12 +786,22 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   // Time window: the only thing a slider tick touches.
   // ---------------------------------------------------------------------
 
-  /// Current `ts` window for the layer filters, or null with no data.
-  List<Object>? _currentFilter() {
+  /// How many fixes the cursor currently shows — the one number the
+  /// filter, the head/previous styling, the HUD and the camera fit all
+  /// derive from. 0 with no data.
+  int _visibleN() {
     final snap = _snap;
-    if (snap.isEmpty) return null;
-    final t1 = effectiveSliderMax(_sliderMax, snap.chrono).millisecondsSinceEpoch;
-    return tsFilter(snap.cols.tsMs[0], t1);
+    if (snap.isEmpty) return 0;
+    return visibleCount(
+      snap.cols.tsMs,
+      effectiveSliderMax(_sliderMax, snap.chrono).millisecondsSinceEpoch,
+    );
+  }
+
+  /// Current ordinal window for the layer filters, or null with no data.
+  List<Object>? _currentFilter() {
+    if (_snap.isEmpty) return null;
+    return windowFilter(_visibleN());
   }
 
   /// Move the cursor. No `setState`: the notifier rebuilds the slider /
@@ -795,16 +836,10 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     final snap = _snap;
     if (snap.isEmpty) return;
     final scheme = Theme.of(context).colorScheme;
-    final cols = snap.cols;
-    final t0 = cols.tsMs[0];
-    final t1 = effectiveSliderMax(_sliderMax, snap.chrono).millisecondsSinceEpoch;
-    final n = visibleCount(cols.tsMs, t1);
-    final filter = tsFilter(t0, t1);
+    final n = _visibleN();
+    final filter = windowFilter(n);
     final style = buildPinStyle(
-      headId: n >= 1 ? cols.ids[n - 1] : null,
-      prevId: n >= 2 ? cols.ids[n - 2] : null,
-      t0Ms: t0,
-      t1Ms: t1,
+      visibleN: n,
       baseHex: scheme.primary.toHexStringRGB(),
       dimHex: _dimPinHex(scheme),
     );
@@ -826,12 +861,13 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
           ),
         ),
       ]);
+      _lastSyncError = null;
     } catch (e, st) {
-      developer.log(
-        'Time-window sync failed: $e',
-        name: 'trail-map',
-        stackTrace: st,
-      );
+      final msg = 'Time-window sync failed: $e';
+      if (msg != _lastSyncError) {
+        _lastSyncError = msg;
+        developer.log(msg, name: 'trail-map', stackTrace: st);
+      }
     }
   }
 
