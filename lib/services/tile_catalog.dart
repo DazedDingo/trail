@@ -1,6 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
+import 'tiles/tile_schema.dart';
+
 /// Curated MBTiles regions the user can install with one tap.
 ///
 /// The catalog JSON lives at [_catalogUrl] (currently
@@ -9,18 +13,23 @@ import 'dart:io';
 ///
 /// ```json
 /// {
-///   "version": 1,
+///   "version": 2,
 ///   "regions": [
 ///     {
 ///       "id": "uk-z13",
 ///       "name": "Great Britain (z13)",
 ///       "description": "All of GB at zoom 13...",
-///       "url": "https://github.com/.../releases/download/.../gb-z13.mbtiles",
-///       "sizeBytes": 573161472
+///       "url": "https://github.com/.../releases/download/.../gb-z13.pmtiles",
+///       "sizeBytes": 573161472,
+///       "schema": "protomaps"
 ///     }
 ///   ]
 /// }
 /// ```
+///
+/// `schema` (v2, 0.16.0) is `openmaptiles` or `protomaps` and says which
+/// bundled style draws the archive; it defaults to `openmaptiles`
+/// because every v1 entry was built with planetiler's OMT profile.
 class TileCatalog {
   static const _catalogUrl =
       'https://raw.githubusercontent.com/DazedDingo/trail/main/'
@@ -50,7 +59,7 @@ class TileCatalog {
       if (regions is! List) return const [];
       return regions
           .whereType<Map<String, dynamic>>()
-          .map(TilesetEntry._fromJson)
+          .map(TilesetEntry.fromJson)
           .whereType<TilesetEntry>()
           .toList(growable: false);
     } catch (_) {
@@ -68,15 +77,37 @@ class TilesetEntry {
   final Uri url;
   final int sizeBytes;
 
+  /// Tile schema the archive holds. Absent in v1 catalogs, which were
+  /// all OpenMapTiles.
+  final TileSchema schema;
+
   const TilesetEntry({
     required this.id,
     required this.name,
     required this.description,
     required this.url,
     required this.sizeBytes,
+    this.schema = TileSchema.openmaptiles,
   });
 
-  static TilesetEntry? _fromJson(Map<String, dynamic> j) {
+  /// Name the download lands under in `<docs>/tiles/`: the URL's last
+  /// path segment, so `.pmtiles` stays `.pmtiles`. (It used to be
+  /// `<id>.mbtiles`, which mislabelled every PMTiles entry and made
+  /// `TileArchive.open` pick the wrong reader.) Falls back to the id
+  /// when the URL has no usable segment.
+  String get filename {
+    final segments = url.pathSegments;
+    final last = segments.isEmpty ? '' : segments.last;
+    final lower = last.toLowerCase();
+    if (lower.endsWith('.pmtiles') || lower.endsWith('.mbtiles')) return last;
+    return '$id.mbtiles';
+  }
+
+  /// One catalog row, or `null` when it is missing a required field.
+  /// Public for unit tests; [TileCatalog.fetch] is the only production
+  /// caller.
+  @visibleForTesting
+  static TilesetEntry? fromJson(Map<String, dynamic> j) {
     final id = j['id'];
     final name = j['name'];
     final description = j['description'];
@@ -96,6 +127,15 @@ class TilesetEntry {
       description: description,
       url: url,
       sizeBytes: sizeBytes is int ? sizeBytes : 0,
+      schema: _schemaFromJson(j['schema']),
     );
   }
+
+  /// v1 catalogs have no `schema` key and were all OpenMapTiles; an
+  /// unrecognised value reads the same way rather than dropping the
+  /// entry — a mislabelled row still downloads and installs fine.
+  static TileSchema _schemaFromJson(Object? raw) => switch (raw) {
+        'protomaps' => TileSchema.protomaps,
+        _ => TileSchema.openmaptiles,
+      };
 }

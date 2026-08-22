@@ -1,7 +1,7 @@
 name: trail
 description: "Trail — personal-safety GPS logger. Offline, encrypted, 4h-cadence background pings."
 publish_to: 'none'
-version: 0.15.0+97
+version: 0.15.1+98
 
 environment:
   sdk: ^3.5.0
@@ -119,15 +119,22 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  # Bundled OSM Liberty style (~1.2 MB) — style.json with asset:// URLs,
-  # OSM Liberty sprites, Roboto glyph PBFs (0-255 / 256-511 / 1024-1279
-  # ranges, enough for English + extended Latin labels in the UK). The
-  # `openmaptiles` source URL inside style.json is a placeholder rewritten
-  # at runtime to point at the active region's `.pmtiles` file under
-  # `<docs>/tiles/`. See docs/TILES.md.
+  # Two bundled basemap styles, one per tile schema (the app picks by the
+  # served archives' `vector_layers` — lib/services/tiles/tile_schema.dart):
+  # OSM Liberty `style.json` for OpenMapTiles archives (Roboto glyphs, OSM
+  # Liberty sprites) and `protomaps-dark.json` for Protomaps-basemap
+  # archives (Noto Sans glyphs, Protomaps v4 dark sprites; regenerate with
+  # tools/style/gen_protomaps_style.mjs). Both ship placeholders instead of
+  # URLs — the source, glyph and sprite URLs are rewritten at runtime to the
+  # loopback tile server. See docs/TILES.md.
   assets:
     - assets/maptiles/style.json
+    - assets/maptiles/protomaps-dark.json
     - assets/maptiles/sprites/
     - assets/maptiles/glyphs/Roboto Regular/
     - assets/maptiles/glyphs/Roboto Medium/
     - assets/maptiles/glyphs/Roboto Condensed Italic/
+    - assets/maptiles/glyphs/Noto Sans Regular/
+    - assets/maptiles/glyphs/Noto Sans Medium/
+    - assets/maptiles/glyphs/Noto Sans Italic/
+    - assets/maptiles/glyphs/Noto Sans Devanagari Regular v1/

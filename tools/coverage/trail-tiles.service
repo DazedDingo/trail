@@ -1,0 +1,26 @@
+# Trail tile extract service (tools/coverage/server.py).
+#
+# Install as a systemd *user* unit (no root needed):
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp tools/coverage/trail-tiles.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now trail-tiles
+#   loginctl enable-linger ubuntu     # keep it running with no login session
+#
+# The bearer token lives in ~/.config/trail-tiles/token (0600); create it with
+#   python3 tools/coverage/server.py --init-token
+
+[Unit]
+Description=Trail tile extract service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/ubuntu/projects/trail/tools/coverage/server.py --port 8766
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

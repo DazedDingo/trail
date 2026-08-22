@@ -1,3 +1,24 @@
+# Builds a small on-demand tile extract for the in-app Regions
+# library, triggered by Settings → Offline map → Regions → "Build
+# custom region" (see `GithubApi.dispatchRegionBuild` in
+# lib/services/github_api.dart).
+#
+# Why `pmtiles extract` against the Protomaps planet, not
+# planetiler/OpenMapTiles:
+# Protomaps' default vector schema ("Protomaps basemap") has been the
+# published schema since Protomaps.js 0.15.1, and the bundled OSM
+# Liberty style this app ships only renders correctly against the
+# OpenMapTiles schema that planetiler/OMT builds produce — a
+# Protomaps-schema archive "installs" fine in the app but renders as
+# little more than water/landuse against that style, and vice versa
+# (docs/TILES.md, gotcha 31). Rather than juggling two incompatible
+# schemas, this workflow follows the path Protomaps itself sanctions
+# for integrators: `pmtiles extract` a bounded region out of their
+# daily-refreshed global planet build (build.protomaps.com) into a
+# small, self-contained .pmtiles file. Hotlinking that planet file
+# directly as a live tile source is explicitly not the supported use
+# — extracting a region you then own and serve locally is.
+
 name: build-region
 
 on:
@@ -17,9 +38,14 @@ on:
         default: "13"
         type: choice
         options: ["10", "11", "12", "13", "14"]
+      minzoom:
+        description: "Min zoom level"
+        required: false
+        default: "0"
+        type: string
       area:
-        description: "Geofabrik area to pull OSM data from"
-        required: true
+        description: "Unused — kept only so older app builds that still send this input don't fail the dispatch. Protomaps extracts aren't split by Geofabrik area."
+        required: false
         default: "great-britain"
         type: choice
         options:
@@ -33,7 +59,8 @@ on:
         default: ""
 
 # Single in-flight build at a time so two concurrent dispatches don't
-# wedge planetiler's working directory.
+# race the same planet-build resolution or clobber each other's
+# release-asset upload.
 concurrency:
   group: build-region
   cancel-in-progress: false
@@ -47,20 +74,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Java 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
       - name: Validate inputs
         run: |
+          set -euo pipefail
           NAME="${{ inputs.name }}"
           BBOX="${{ inputs.bbox }}"
-          if ! [[ "$NAME" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]; then
-            echo "::error::Name must be 1-64 chars, [a-z0-9._-]; got '$NAME'"
+          MAXZOOM="${{ inputs.maxzoom }}"
+          MINZOOM="${{ inputs.minzoom }}"
+
+          if ! [[ "$NAME" =~ ^[a-z0-9-]+$ ]]; then
+            echo "::error::name must match ^[a-z0-9-]+\$; got '$NAME'"
             exit 1
           fi
+
           IFS=',' read -ra B <<< "$BBOX"
           if [ "${#B[@]}" -ne 4 ]; then
             echo "::error::bbox must be 4 comma-separated numbers; got '$BBOX'"
@@ -73,31 +99,62 @@ jobs:
             fi
           done
 
-      - name: Download planetiler
-        run: |
-          curl -sL -o planetiler.jar \
-            https://github.com/onthegomap/planetiler/releases/latest/download/planetiler.jar
-          ls -lh planetiler.jar
+          if ! [[ "$MAXZOOM" =~ ^[0-9]+$ ]] || [ "$MAXZOOM" -lt 0 ] || [ "$MAXZOOM" -gt 15 ]; then
+            echo "::error::maxzoom must be an integer 0-15; got '$MAXZOOM'"
+            exit 1
+          fi
+          if ! [[ "$MINZOOM" =~ ^[0-9]+$ ]] || [ "$MINZOOM" -lt 0 ] || [ "$MINZOOM" -gt 15 ]; then
+            echo "::error::minzoom must be an integer 0-15; got '$MINZOOM'"
+            exit 1
+          fi
+          if [ "$MINZOOM" -gt "$MAXZOOM" ]; then
+            echo "::error::minzoom ($MINZOOM) must be <= maxzoom ($MAXZOOM)"
+            exit 1
+          fi
 
-      - name: Build MBTiles
+      - name: Download go-pmtiles
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          gh release download v1.31.2 -R protomaps/go-pmtiles -p '*Linux_x86_64*'
+          ASSET=$(ls *Linux_x86_64*)
+          tar -xzf "$ASSET"
+          chmod +x pmtiles
+          ./pmtiles version
+
+      - name: Resolve latest planet build
+        run: |
+          set -euo pipefail
+          PLANET=""
+          for d in "$(date -u +%Y-%m-%d)" "$(date -u -d '1 day ago' +%Y-%m-%d)" "$(date -u -d '2 days ago' +%Y-%m-%d)"; do
+            URL="https://build.protomaps.com/$d.pmtiles"
+            if curl -sI "$URL" | head -1 | grep -q 200; then
+              PLANET="$URL"
+              break
+            fi
+          done
+          if [ -z "$PLANET" ]; then
+            echo "::error::No Protomaps planet build found for today, yesterday, or the day before"
+            exit 1
+          fi
+          echo "Using planet: $PLANET"
+          echo "PLANET=$PLANET" >> "$GITHUB_ENV"
+
+      - name: Extract region
+        run: |
+          set -euo pipefail
           mkdir -p out
-          # -Xmx6g leaves ~1GB headroom on GitHub's 7GB ubuntu-latest
-          # runners; the rest stays free for OS + buffers. Larger areas
-          # may need to drop maxzoom to fit.
-          java -Xmx6g -jar planetiler.jar \
-            --area='${{ inputs.area }}' \
-            --bounds='${{ inputs.bbox }}' \
-            --output='out/${{ inputs.name }}.mbtiles' \
-            --maxzoom='${{ inputs.maxzoom }}' \
-            --download \
-            --force
-          ls -lh out/
+          ./pmtiles extract "$PLANET" "out/${{ inputs.name }}.pmtiles" \
+            --bbox="${{ inputs.bbox }}" \
+            --minzoom="${{ inputs.minzoom }}" \
+            --maxzoom="${{ inputs.maxzoom }}"
+          ./pmtiles show "out/${{ inputs.name }}.pmtiles"
 
       - name: Verify output is under the GitHub Release 2 GB cap
         run: |
-          SIZE=$(stat -c%s 'out/${{ inputs.name }}.mbtiles')
-          echo "MBTiles size: $SIZE bytes ($(($SIZE / 1024 / 1024)) MB)"
+          SIZE=$(stat -c%s 'out/${{ inputs.name }}.pmtiles')
+          echo "PMTiles size: $SIZE bytes ($(($SIZE / 1024 / 1024)) MB)"
           if [ "$SIZE" -gt $((2 * 1024 * 1024 * 1024)) ]; then
             echo "::error::Output exceeds GitHub's 2 GB per-asset limit. Lower the maxzoom or shrink the bbox."
             exit 1
@@ -109,13 +166,13 @@ jobs:
         run: |
           gh release view tilesets-v1 >/dev/null 2>&1 || gh release create tilesets-v1 \
             --title "Tilesets v1" \
-            --notes "Curated MBTiles regions for the in-app catalog. Files here are referenced by docs/tilesets.json."
+            --notes "Curated PMTiles regions for the in-app catalog. Files here are referenced by docs/tilesets.json."
 
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload tilesets-v1 'out/${{ inputs.name }}.mbtiles' --clobber
+          gh release upload tilesets-v1 'out/${{ inputs.name }}.pmtiles' --clobber
 
       - name: Update catalog (docs/tilesets.json)
         env:
@@ -125,14 +182,14 @@ jobs:
           NAME='${{ inputs.name }}'
           DESC='${{ inputs.description }}'
           BBOX='${{ inputs.bbox }}'
+          MINZOOM='${{ inputs.minzoom }}'
           MAXZOOM='${{ inputs.maxzoom }}'
-          AREA='${{ inputs.area }}'
-          ASSET_URL="https://github.com/${{ github.repository }}/releases/download/tilesets-v1/${NAME}.mbtiles"
-          SIZE=$(stat -c%s "out/${NAME}.mbtiles")
+          ASSET_URL="https://github.com/${{ github.repository }}/releases/download/tilesets-v1/${NAME}.pmtiles"
+          SIZE=$(stat -c%s "out/${NAME}.pmtiles")
 
           # Default description if the user left it empty.
           if [ -z "$DESC" ]; then
-            DESC="$AREA · bbox $BBOX · zoom 0–$MAXZOOM"
+            DESC="bbox $BBOX · zoom $MINZOOM–$MAXZOOM"
           fi
 
           # Atomic replace-or-append on the regions array — tag entries
@@ -150,8 +207,9 @@ jobs:
               'url': '${ASSET_URL}',
               'sizeBytes': ${SIZE},
               'bbox': '${BBOX}',
+              'minzoom': int('${MINZOOM}'),
               'maxzoom': int('${MAXZOOM}'),
-              'area': '${AREA}',
+              'schema': 'protomaps',
           }
           data['regions'] = [r for r in data['regions'] if r.get('id') != new['id']]
           data['regions'].append(new)
@@ -166,5 +224,5 @@ jobs:
             echo "tilesets.json already up to date"
             exit 0
           fi
-          git commit -m "catalog: add/update '${NAME}' (${BBOX}, z0-${MAXZOOM})"
+          git commit -m "catalog: add/update '${NAME}' (${BBOX}, z${MINZOOM}-${MAXZOOM})"
           git push origin HEAD:main

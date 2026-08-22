@@ -1,12 +1,20 @@
-# Building offline `.pmtiles` for Trail
+# Offline map archives for Trail
 
 Trail's map viewer reads `.pmtiles` (single-file vector tile archives,
 [Protomaps spec](https://docs.protomaps.com/pmtiles/)) and `.mbtiles`
-(SQLite) from the app's documents directory. Build one on your PC, push
-it to the phone, install via **Settings → Offline map → Regions →
-Install**, and give it a role. The viewer renders a placeholder until
-at least one archive is installed; the app is offline-only and there is
-no online tile fallback.
+(SQLite) from the app's documents directory. Since **0.15.1** the
+archives Trail ships and builds are **Protomaps basemap** extracts of the
+daily planet build, rendered with the bundled Protomaps *dark* style;
+archives in the older **OpenMapTiles** schema (planetiler builds, the
+pre-0.15.1 catalog) still render — the app keeps OSM Liberty as a second
+style and picks the style from the schema of the served archives.
+
+Get an archive onto the phone one of four ways — **Settings → Offline
+map → Regions → Add region**: pick a file, paste a URL, browse the
+catalog (`docs/tilesets.json` → the `tilesets-v1` release), or build one
+on demand (GitHub Actions, needs a PAT) — then give it a role. The viewer
+renders a placeholder until at least one archive is installed; the app is
+offline-only and there is no online tile fallback.
 
 ## Roles and how tiles are served (0.15.0+)
 
@@ -46,77 +54,61 @@ UK-wide is ~500 MB at z13 (paths/tracks/service roads visible) vs
 geometry on the phone and rasterises with the GPU — modern hardware
 handles this trivially, and we get to restyle without rebaking.
 
-## Pipeline (one tool: planetiler)
+## Pipeline (one tool: `pmtiles extract`)
 
-`planetiler` produces PMTiles directly from an OSM `.pbf` extract. No
-secondary rasterisation step.
+Everything comes out of the Protomaps daily planet build
+(`https://build.protomaps.com/YYYYMMDD.pmtiles`, ~137 GB, z0–15, basemap
+schema v4.x). `pmtiles extract` pulls just the tiles for a bbox/zoom range
+over HTTP range requests — seconds for a town, ~20 s for the UK at z13 —
+and that is the sanctioned use (hotlinking the build as a live tile
+source is not allowed; Trail never does).
 
-### 1. Install Java 21 and download the planetiler jar
+| Extract | Flags | Size | Time (VPS) |
+|---|---|---|---|
+| World overview | `--maxzoom=6` | 45 MB | 4 s |
+| UK region | `--bbox=-8.7,49.8,1.9,60.9 --maxzoom=13` | 738 MB | 21 s |
+| UK at z14 | same, `--maxzoom=14` | 1.5 GB | — |
+| Town coverage pack (Bath) | `--bbox=… --minzoom=7 --maxzoom=14` | 2.7 MB | 5 s |
+| Lisbon | z7–14 | 7.7 MB | — |
+| London metro | z7–14 | 60 MB | — |
 
-Java 17 is too old; planetiler is compiled for Java 21+.
+Three ways to run it:
 
-```bash
-sudo apt install openjdk-21-jre-headless          # or sdkman / brew
-mkdir -p ~/tools
-curl -sL -o ~/tools/planetiler.jar \
-  https://github.com/onthegomap/planetiler/releases/latest/download/planetiler.jar
-```
+1. **VPS job — `tools/coverage/extract.py`** (stdlib Python, README in
+   that folder). `planet` resolves the newest build; `overview`, `region
+   --preset uk`, and `coverage --export trail.csv` (clusters your ping
+   history into visit bboxes, dry-run sizes first) produce files named so
+   the app auto-tags their role; `publish` uploads to a release.
+   Coverage packs outline where you have been — publish those only to a
+   private repo and install them from the phone's browser download; the
+   overview and regions are plain OSM and live on the public
+   `tilesets-v1` release.
+2. **GitHub Actions — `build-region.yml`** (the in-app "build on
+   demand" flow): name + bbox + min/max zoom → extract → `tilesets-v1`
+   asset + catalog entry.
+3. **By hand:** `pmtiles extract https://build.protomaps.com/$(date -u
+   +%Y%m%d).pmtiles out.pmtiles --bbox=W,S,E,N --maxzoom=13` (go-pmtiles
+   CLI; the VPS has v1.31.2 at `~/tools/pmtiles`).
 
-### 2. Grab a Geofabrik extract
+Zoom guidance for the basemap schema: z13 shows tracks and service
+roads; z14 adds footways and individual buildings. Regions: z13 UK-wide;
+coverage packs: z7–14 (z7–9 is cheap and keeps the transition from the
+z6 overview crisp — without it those zooms are drawn from overzoomed z6
+tiles, present but coarse).
 
-```bash
-mkdir -p ~/maps/build && cd ~/maps/build
-curl -sLO https://download.geofabrik.de/europe/great-britain-latest.osm.pbf
-```
+### Legacy: planetiler / OpenMapTiles
 
-For region-only builds (Lake District, Snowdonia, Highlands etc.), grab
-a smaller sub-extract from Geofabrik or use a `.poly` file with
-`--polygon`.
-
-### 3. Run planetiler
-
-```bash
-java -Xmx8g -jar ~/tools/planetiler.jar \
-  --osm-path=great-britain-latest.osm.pbf \
-  --output=gb-z13.pmtiles \
-  --maxzoom=13 \
-  --force --download
-```
-
-Reasonable zoom caps:
-
-| `--maxzoom` | Visible at top zoom            | UK-wide PMTiles size |
-|-------------|--------------------------------|----------------------|
-| `12`        | major roads, no paths          | ~300 MB              |
-| `13`        | tracks, service roads          | ~500 MB              |
-| `14`        | individual paths, footways     | ~1.5 GB              |
-
-For a *trail* app you want at least z13. The OpenMapTiles schema only
-emits `path`/`footway` features at z14+, so z14 is necessary if you
-want every hiking trail rendered — but UK-wide z14 is probably too big
-to ship per-file. Region-only z14 builds (Lake District, Snowdonia)
-land in the 50–150 MB range and are the recommended workflow.
-
-Planetiler writes ~6 GB of intermediate state to `data/tmp/` while
-processing; clean up afterwards if disk is tight.
-
-### 4. Sideload to the phone
-
-Get the file onto the device's storage (SAF-accessible location). USB
-transfer, ADB push, or any cloud-sync tool that lands the file
-somewhere the file picker can reach.
-
-In the app: **Settings → Offline map → Regions → Install**. The picker
-filters for `.pmtiles`. The file is copied into
-`<appDocumentsDir>/tiles/` so the original is no longer needed and SAF
-URI expiry can't break the viewer.
+Before 0.15.1 regions were built with planetiler from Geofabrik extracts
+(OpenMapTiles schema, OSM Liberty style). Those files still work — the
+app auto-selects the matching style — but don't mix schemas in one
+served set: only the chosen schema's archives draw fully. To rebuild one:
+`java -Xmx8g -jar planetiler.jar --osm-path=great-britain-latest.osm.pbf
+--output=gb-z13.pmtiles --maxzoom=13 --force --download` (Java 21).
 
 ## Style
 
-The app ships **OSM Liberty** (`assets/maptiles/style.json`) bundled
-with its sprites and Roboto Regular/Medium/Condensed Italic glyph
-PBFs (Latin + extended Latin ranges). The bundled style has no remote
-dependencies — fully offline once a region is installed.
+The bundled styles have no remote dependencies — fully offline once an
+archive is installed.
 
 The style's `openmaptiles` source URL is a placeholder string
 (`pmtiles://__TRAIL_ACTIVE_REGION__`) rewritten at runtime by
@@ -125,13 +117,14 @@ active region. If you ever swap the bundled style for a different one
 (positron, osm-bright, custom), keep that placeholder convention or
 the runtime substitution won't work.
 
-Use the **OpenMapTiles** schema (planetiler's default) — anything else
-won't match the layer names in `style.json`. In particular the Protomaps
-daily planet builds are the *Protomaps basemap* schema (`roads`,
-`places`, `earth`, …): they install and serve fine, but OSM Liberty
-only draws their `water`/`landuse` layers. See `docs/TIMELINE_IMPORT.md`
-§ 3 "Corrections" for the pending choice between staying on
-OpenMapTiles and switching the bundled style.
+Two styles are bundled and chosen automatically from the served
+archives' `vector_layers`: `assets/maptiles/protomaps-dark.json`
+(Protomaps basemap schema — `roads`, `places`, `earth`, …; generated by
+`tools/style/gen_protomaps_style.mjs` from `@protomaps/basemaps`, Noto
+Sans glyphs + the v4 dark sprite) and `assets/maptiles/style.json` (OSM
+Liberty, OpenMapTiles schema, Roboto glyphs, `osm-liberty` sprite). Both
+use the same placeholders. If you regenerate the Protomaps style, keep the
+`__TRAIL_*` placeholders and the `protomaps` source name.
 
 ## Backup behaviour
 

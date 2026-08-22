@@ -4,6 +4,15 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.15.1+98] — 2026-08-22
+
+### Added
+- **A new map style and a new map pipeline.** Trail now bundles the Protomaps *dark* basemap style (Noto Sans labels, 2.5 MB of fonts and icons) next to the old OSM Liberty style, and picks the right one automatically from the archives you have installed. New archives come from the Protomaps daily planet build via `pmtiles extract` — the world overview is 45 MB and extracts in 4 s, the whole UK at z13 is 738 MB in 21 s, a town-sized detail pack is ~3 MB in 5 s. The old planetiler builds keep working with the old style.
+- **Three ready-made archives in the in-app catalog** (*Settings → Offline map → Regions → Add region → Browse catalog*): **World overview z0–6** (45 MB — install it as *World overview* so every pin on Earth has a map under it), **United Kingdom z0–13** (738 MB — install as your active *Region*; it replaces the old OpenMapTiles UK file, which will then draw with the old style until you delete it), and a **Bath sample pack** (2.7 MB, role *Coverage*). The catalog now shows each archive's schema, and downloads keep the file's own name.
+- **"Build on demand" is 20× faster.** The GitHub Actions region builder now runs `pmtiles extract` instead of planetiler — seconds instead of many minutes, no Java — and writes `.pmtiles` in the new schema. Older app builds can still trigger it.
+- The regions screen shows each archive's schema next to its zoom range and warns when archives of two schemas are installed at once (only the chosen schema draws fully).
+- VPS tooling (`tools/coverage/`): a Python script that turns a Trail export into town-sized coverage packs (cluster → pad → merge → extract), plus a small token-protected extract service the upcoming auto-coverage feature talks to.
+
 ## [0.15.0+97] — 2026-08-22
 
 ### Added

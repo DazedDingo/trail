@@ -17,7 +17,7 @@
       "scheme": "xyz"
     }
   },
-  "sprite": "__TRAIL_SPRITE__",
+  "sprite": "__TRAIL_SPRITES__/osm-liberty",
   "glyphs": "__TRAIL_GLYPHS__/{fontstack}/{range}.pbf",
   "layers": [
     {

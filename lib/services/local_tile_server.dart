@@ -12,6 +12,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart' show DatabaseFactory;
 
 import 'tiles/mvt_overzoom.dart';
 import 'tiles/tile_archive.dart';
+import 'tiles/tile_schema.dart';
 
 /// Byte budget for the in-process tile LRU. 16 MB (0.14.1, down from
 /// 50 MB) still holds a few hundred z13–z14 vector tiles (20–100 KB
@@ -94,6 +95,21 @@ class LocalTileServer {
   /// Paths of the archives actually open, in priority order. Excludes
   /// any path from the last [start] call that failed to open.
   List<String> get servedPaths => _servedPaths;
+
+  /// The tile schema of the open archive at [path], or `null` when that
+  /// path isn't being served.
+  TileSchema? schemaFor(String path) {
+    for (final archive in _archives) {
+      if (archive.path == path) return archive.schema;
+    }
+    return null;
+  }
+
+  /// Every open archive's schema, keyed by path. Feeds
+  /// [pickStyleSchema] — which style the map is built with.
+  Map<String, TileSchema> get servedSchemas => {
+        for (final archive in _archives) archive.path: archive.schema,
+      };
 
   /// Lowest zoom any served archive claims, or `null` when stopped.
   int? get servedMinZoom => _archives.isEmpty
@@ -226,6 +242,7 @@ class LocalTileServer {
         maxZoom: archive.maxZoom,
         bounds: archive.bounds,
         format: archive.format,
+        schema: archive.schema,
         sizeBytes: await File(path).length(),
       );
     } finally {
@@ -567,6 +584,7 @@ class ServedArchiveSummary {
     required this.maxZoom,
     required this.bounds,
     required this.format,
+    required this.schema,
     required this.sizeBytes,
   });
 
@@ -579,6 +597,10 @@ class ServedArchiveSummary {
 
   /// `pbf`, `png`, … as the archive declares it; `null` if unknown.
   final String? format;
+
+  /// Which vector-tile schema the archive holds — i.e. which bundled
+  /// style can draw it. See `tiles/tile_schema.dart`.
+  final TileSchema schema;
 
   /// Size of the archive file on disk.
   final int sizeBytes;

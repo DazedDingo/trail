@@ -9,6 +9,7 @@ import 'package:trail/providers/mbtiles_provider.dart';
 import 'package:trail/providers/tile_server_provider.dart';
 import 'package:trail/services/local_tile_server.dart';
 import 'package:trail/services/mbtiles_service.dart';
+import 'package:trail/services/tiles/tile_schema.dart';
 
 /// Isolate-side sqlite3 loader (gotcha 8) — top-level so it survives the
 /// `Isolate.spawn` inside `sqflite_common_ffi`'s factory.
@@ -89,13 +90,57 @@ void main() {
       _archive(kWorld, TileRole.overview),
     ]);
 
-    final port = await container.read(tileServerProvider.future);
+    final state = await container.read(tileServerProvider.future);
 
-    expect(port, isNotNull);
-    expect(port, server.port);
+    expect(state, isNotNull);
+    expect(state!.port, server.port);
     // Priority order is preserved end-to-end: the coverage pack is
     // asked for a tile before the world overview.
     expect(server.servedPaths, [kQuadrant, kWorld]);
+    expect(state.servedPaths, [kQuadrant, kWorld]);
+  });
+
+  test('carries the zoom union the style has to be re-ranged to',
+      () async {
+    // mini_b is z1–3, mini is z0–2: one style source, one range, so it
+    // has to be the union or MapLibre never asks for the z3 tiles.
+    final container = containerWith([
+      _archive(kQuadrant, TileRole.coverage),
+      _archive(kWorld, TileRole.overview),
+    ]);
+
+    final state = await container.read(tileServerProvider.future);
+
+    expect(state!.minZoom, 0);
+    expect(state.maxZoom, 3);
+  });
+
+  test('fixtures declare no schema marker, so the style defaults to '
+      'Protomaps', () async {
+    // Both fixtures carry a single `water` vector layer — recognisable
+    // as neither schema. `pickStyleSchema` then falls back to the new
+    // default rather than guessing (the per-branch cases live in
+    // test/tile_schema_test.dart, which needs no fixtures).
+    final container = containerWith([
+      _archive(kQuadrant, TileRole.coverage),
+      _archive(kWorld, TileRole.overview),
+    ]);
+
+    final state = await container.read(tileServerProvider.future);
+
+    expect(server.servedSchemas,
+        {kQuadrant: TileSchema.unknown, kWorld: TileSchema.unknown});
+    expect(state!.schema, TileSchema.protomaps);
+    // One schema (even an unrecognised one) is not a mixed library.
+    expect(state.mixedSchemas, isFalse);
+  });
+
+  test('schemaFor answers only for archives that are open', () async {
+    final container = containerWith([_archive(kWorld, TileRole.overview)]);
+    await container.read(tileServerProvider.future);
+
+    expect(server.schemaFor(kWorld), TileSchema.unknown);
+    expect(server.schemaFor(kQuadrant), isNull);
   });
 
   test('an empty archive list stops the server and returns null', () async {
@@ -104,9 +149,9 @@ void main() {
     expect(server.port, isNotNull);
 
     final container = containerWith(const []);
-    final port = await container.read(tileServerProvider.future);
+    final state = await container.read(tileServerProvider.future);
 
-    expect(port, isNull);
+    expect(state, isNull);
     expect(server.port, isNull);
     expect(server.servedPaths, isEmpty);
   });
@@ -122,9 +167,9 @@ void main() {
       ),
     ]);
 
-    final port = await container.read(tileServerProvider.future);
+    final state = await container.read(tileServerProvider.future);
 
-    expect(port, isNull);
+    expect(state, isNull);
     expect(server.port, isNull);
     expect(server.servedPaths, isEmpty);
   });
@@ -167,6 +212,7 @@ void main() {
     // A fresh port is the ONLY cache invalidation available to us —
     // tiles are served `immutable` and MapLibre keys its cache on URL.
     expect(second, isNotNull);
+    expect(second!.port, isNot(first!.port));
     expect(second, isNot(first));
     expect(server.servedPaths, [kQuadrant, kWorld]);
   });
@@ -185,7 +231,11 @@ void main() {
     container.invalidate(servedArchivesProvider);
     final second = await container.read(tileServerProvider.future);
 
+    // Value equality, not identity: the panel keys its platform view on
+    // this, and an unchanged archive set must not remount the map.
+    expect(second!.port, first!.port);
     expect(second, first);
+    expect(second.hashCode, first.hashCode);
   });
 
   test('returns null when no archive in the list can be opened', () async {
@@ -205,7 +255,57 @@ void main() {
       _archive(kWorld, TileRole.overview),
     ]);
 
-    expect(await container.read(tileServerProvider.future), isNotNull);
+    final state = await container.read(tileServerProvider.future);
+    expect(state, isNotNull);
     expect(server.servedPaths, [kWorld]);
+    // The path that never opened is not claimed as served, and its
+    // (absent) schema doesn't make the library look mixed.
+    expect(state!.servedPaths, [kWorld]);
+    expect(state.mixedSchemas, isFalse);
+  });
+
+  group('TileServerState', () {
+    TileServerState state({
+      int port = 1,
+      List<String> paths = const ['/a'],
+      TileSchema schema = TileSchema.protomaps,
+      bool mixed = false,
+      int? maxZoom = 14,
+    }) =>
+        TileServerState(
+          port: port,
+          servedPaths: paths,
+          minZoom: 0,
+          maxZoom: maxZoom,
+          schema: schema,
+          mixedSchemas: mixed,
+        );
+
+    test('equal on port + paths + schema', () {
+      expect(state(), state());
+      expect(state().hashCode, state().hashCode);
+    });
+
+    test('a different port, path list or schema is a different state', () {
+      expect(state(port: 2), isNot(state()));
+      expect(state(paths: const ['/a', '/b']), isNot(state()));
+      expect(state(paths: const ['/b']), isNot(state()));
+      expect(state(schema: TileSchema.openmaptiles), isNot(state()));
+    });
+
+    test('the derived + advisory fields stay out of the identity', () {
+      // Both follow from the archive set, which is already in the key;
+      // including them would remount the map for nothing.
+      expect(state(mixed: true), state());
+      expect(state(maxZoom: null), state());
+    });
+
+    test('the served path list is unmodifiable', () {
+      final paths = ['/a'];
+      final s = state(paths: paths);
+      paths.add('/b');
+      expect(s.servedPaths, ['/a']);
+      expect(() => s.servedPaths.add('/c'), throwsUnsupportedError);
+    });
   });
 }

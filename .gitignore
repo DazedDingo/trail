@@ -55,3 +55,6 @@ Thumbs.db
 # (a few KB each; regenerate with test/fixtures/make_fixtures.py).
 !test/fixtures/*.mbtiles
 google-services.json
+
+# Python tool caches (tools/coverage tests)
+__pycache__/

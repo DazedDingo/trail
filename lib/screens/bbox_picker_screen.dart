@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../providers/tile_server_provider.dart';
-import '../services/local_tile_server.dart';
 import '../services/trail_style.dart';
 
 /// Modal map picker for the "Custom area" build flow. Pops with a
@@ -37,17 +36,19 @@ class _BboxPickerScreenState extends ConsumerState<BboxPickerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final tileServerPort = ref.watch(tileServerProvider).valueOrNull;
+    final tileServer = ref.watch(tileServerProvider).valueOrNull;
+    final tileServerPort = tileServer?.port;
 
     if (tileServerPort != _tileServerPort || !_styleRequested) {
       _tileServerPort = tileServerPort;
       _styleRequested = true;
-      _styleFuture = tileServerPort == null
+      _styleFuture = tileServer == null
           ? Future<String?>.value(null)
           : TrailStyle.loadForServer(
-              port: tileServerPort,
-              minZoom: LocalTileServer.instance.servedMinZoom,
-              maxZoom: LocalTileServer.instance.servedMaxZoom,
+              port: tileServer.port,
+              schema: tileServer.schema,
+              minZoom: tileServer.minZoom,
+              maxZoom: tileServer.maxZoom,
             );
     }
 

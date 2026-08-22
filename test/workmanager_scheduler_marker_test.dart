@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:trail/services/scheduler/workmanager_scheduler.dart';
 import 'package:workmanager/workmanager.dart';
@@ -17,24 +18,23 @@ import 'package:workmanager/workmanager.dart';
 /// pattern — extend without overriding the constructor, which mints a
 /// valid verification token automatically) so the call succeeds and the
 /// marker write is genuinely exercised end to end.
-class _FakeWorkmanagerPlatform extends WorkmanagerPlatform {
+class _FakeWorkmanagerPlatform
+    with MockPlatformInterfaceMixin
+    implements WorkmanagerPlatform {
   Duration? lastFrequency;
 
+  // `noSuchMethod` instead of a hand-written override: the platform
+  // interface grows optional named parameters between minor versions
+  // (0.9.x added `foregroundServiceConfig`), and pubspec.lock is not
+  // committed, so an explicit signature is a compile error waiting to
+  // happen on CI / a fresh worktree. Every call succeeds; only
+  // `registerPeriodicTask`'s `frequency` is recorded.
   @override
-  Future<void> registerPeriodicTask(
-    String uniqueName,
-    String taskName, {
-    Duration? frequency,
-    Duration? flexInterval,
-    Map<String, dynamic>? inputData,
-    Duration? initialDelay,
-    Constraints? constraints,
-    ExistingPeriodicWorkPolicy? existingWorkPolicy,
-    BackoffPolicy? backoffPolicy,
-    Duration? backoffPolicyDelay,
-    String? tag,
-  }) async {
-    lastFrequency = frequency;
+  dynamic noSuchMethod(Invocation invocation) {
+    if (invocation.memberName == #registerPeriodicTask) {
+      lastFrequency = invocation.namedArguments[#frequency] as Duration?;
+    }
+    return Future<void>.value();
   }
 }
 

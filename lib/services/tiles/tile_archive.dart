@@ -7,6 +7,8 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:pmtiles/pmtiles.dart' as pmt;
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
+import 'tile_schema.dart';
+
 /// A read-only offline tile archive — one sideloaded `.mbtiles` or
 /// `.pmtiles` region file.
 ///
@@ -48,6 +50,11 @@ abstract class TileArchive {
   /// Tile format as the archive declares it (`pbf`, `png`, …), or
   /// `null` when unknown.
   String? get format;
+
+  /// Which vector-tile schema this archive holds, read off
+  /// [vectorLayers]. The map style is chosen from this — see
+  /// `tile_schema.dart`.
+  TileSchema get schema => detectTileSchema(vectorLayers);
 
   /// Cheap pre-check, no I/O: is `(z, x, y)` inside this archive's
   /// zoom range *and* its bounds? A `false` here saves a SQLite query

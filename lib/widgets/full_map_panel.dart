@@ -16,9 +16,9 @@ import '../providers/map_settings_provider.dart';
 import '../providers/mbtiles_provider.dart';
 import '../providers/pings_provider.dart';
 import '../providers/tile_server_provider.dart';
-import '../services/local_tile_server.dart';
 import '../services/map/pin_geojson.dart';
 import '../services/mbtiles_service.dart';
+import '../services/tiles/tile_schema.dart';
 import '../services/trail_style.dart';
 import 'inline_date_filter_panel.dart';
 import 'ping_photos_gallery.dart';
@@ -101,6 +101,14 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   /// different port means a different tile URL, and MapLibre only picks
   /// that up on a fresh platform view.
   List<String> _servedPaths = const [];
+
+  /// Zoom union + schema of the served archives when [_styleFuture] was
+  /// built. The schema picks which bundled style is loaded, and it is
+  /// part of the `_MapHost` key for the same reason the port is — a
+  /// different style is a different map.
+  int? _styleMinZoom;
+  int? _styleMaxZoom;
+  TileSchema _styleSchema = TileSchema.protomaps;
 
   /// True once `onStyleLoadedCallback` has run for the live controller
   /// AND the pin/segment sources + layers are installed on it. Every
@@ -224,7 +232,8 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     final sentinelActive = served
         .any((r) => r.path == TilesService.diagnosticRemoteSentinel);
     final tileServerAsync = ref.watch(tileServerProvider);
-    final tileServerPort = tileServerAsync.valueOrNull;
+    final tileServer = tileServerAsync.valueOrNull;
+    final tileServerPort = tileServer?.port;
     final liveDotState = ref.watch(liveLocationDotEnabledProvider);
     final liveDotOn = liveDotState.asData?.value ?? true;
 
@@ -238,7 +247,10 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
         _styleFuture == null) {
       _tileServerPort = tileServerPort;
       _sentinelActive = sentinelActive;
-      _servedPaths = List<String>.of(LocalTileServer.instance.servedPaths);
+      _servedPaths = List<String>.of(tileServer?.servedPaths ?? const []);
+      _styleMinZoom = tileServer?.minZoom;
+      _styleMaxZoom = tileServer?.maxZoom;
+      _styleSchema = tileServer?.schema ?? TileSchema.protomaps;
       _styleFuture = _buildStyleFuture();
       _initialFitDone = false;
       // A new style means a new map; whatever controller we hold is
@@ -334,8 +346,9 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     if (port == null) return Future<String?>.value(null);
     return TrailStyle.loadForServer(
       port: port,
-      minZoom: LocalTileServer.instance.servedMinZoom,
-      maxZoom: LocalTileServer.instance.servedMaxZoom,
+      schema: _styleSchema,
+      minZoom: _styleMinZoom,
+      maxZoom: _styleMaxZoom,
     );
   }
 
@@ -557,7 +570,8 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
           // the served archive set (which always means a fresh port)
           // legitimately needs a fresh map; a date-range / data change
           // must not.
-          key: ValueKey('${_servedPaths.join('|')}|$_tileServerPort'),
+          key: ValueKey('${_servedPaths.join('|')}|$_tileServerPort'
+              '|${_styleSchema.name}'),
           onMount: () => ++_mapEpoch,
           onUnmount: _onMapUnmounted,
           child: MapLibreMap(

@@ -4,11 +4,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../providers/mbtiles_provider.dart';
+import '../providers/tile_server_provider.dart';
 import '../services/github_api.dart';
 import '../services/local_tile_server.dart';
 import '../services/mbtiles_service.dart';
 import '../services/region_presets.dart';
 import '../services/tile_catalog.dart';
+import '../services/tiles/tile_schema.dart';
 import '../services/tile_downloader.dart';
 import '../widgets/help_button.dart';
 import 'bbox_picker_screen.dart';
@@ -46,6 +48,7 @@ class _RegionsScreenState extends ConsumerState<RegionsScreen> {
   Widget build(BuildContext context) {
     final regions = ref.watch(installedRegionsProvider);
     final active = ref.watch(activeRegionProvider);
+    final tileServer = ref.watch(tileServerProvider).valueOrNull;
 
     return Scaffold(
       appBar: AppBar(
@@ -140,29 +143,41 @@ class _RegionsScreenState extends ConsumerState<RegionsScreen> {
         icon: const Icon(Icons.add),
         label: const Text('Add region'),
       ),
-      body: regions.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (err, _) => Center(child: Text('Error: $err')),
-        data: (list) {
-          if (list.isEmpty) return const _EmptyState();
-          final activeRegion = active.valueOrNull;
-          return ListView.separated(
-            padding: const EdgeInsets.all(16),
-            itemCount: list.length + 1,
-            separatorBuilder: (_, __) => const SizedBox(height: 8),
-            itemBuilder: (context, i) {
-              if (i == 0) return _Header(activeRegion: activeRegion);
-              final r = list[i - 1];
-              final isActive = activeRegion?.path == r.path;
-              return _RegionTile(
-                region: r,
-                isActive: isActive,
-                probe: _probe,
-                onFileChanged: _forgetProbe,
-              );
-            },
-          );
-        },
+      body: Column(
+        children: [
+          // Only one style can be live at a time, so a library holding
+          // both schemas draws fully in one of them and mostly-blank in
+          // the other. Say which, rather than leaving the user to guess
+          // why half their archives look empty.
+          if (tileServer != null && tileServer.mixedSchemas)
+            _MixedSchemaNote(chosen: tileServer.schema),
+          Expanded(
+            child: regions.when(
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (err, _) => Center(child: Text('Error: $err')),
+              data: (list) {
+                if (list.isEmpty) return const _EmptyState();
+                final activeRegion = active.valueOrNull;
+                return ListView.separated(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: list.length + 1,
+                  separatorBuilder: (_, __) => const SizedBox(height: 8),
+                  itemBuilder: (context, i) {
+                    if (i == 0) return _Header(activeRegion: activeRegion);
+                    final r = list[i - 1];
+                    final isActive = activeRegion?.path == r.path;
+                    return _RegionTile(
+                      region: r,
+                      isActive: isActive,
+                      probe: _probe,
+                      onFileChanged: _forgetProbe,
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -268,6 +283,36 @@ extension _RegionsScreenInstall on RegionsScreen {
   }
 }
 
+/// One-line warning that the served library mixes tile schemas.
+class _MixedSchemaNote extends StatelessWidget {
+  final TileSchema chosen;
+  const _MixedSchemaNote({required this.chosen});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.warning_amber_outlined,
+              size: 18, color: Colors.amber),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Archives of two map schemas are installed — only '
+              '${chosen.label} ones draw fully.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Colors.amber,
+                  ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _Header extends StatelessWidget {
   final TilesRegion? activeRegion;
   const _Header({required this.activeRegion});
@@ -369,7 +414,8 @@ class _RegionTile extends ConsumerWidget {
                 } else {
                   final s = snap.data!;
                   detail = 'z${s.minZoom}–${s.maxZoom}'
-                      '${s.format == null ? '' : ' · ${s.format}'}';
+                      '${s.format == null ? '' : ' · ${s.format}'}'
+                      '${s.schema == TileSchema.unknown ? '' : ' · ${s.schema.label}'}';
                 }
                 return Text(
                   detail,
@@ -673,7 +719,9 @@ extension _RegionsScreenAddFlows on RegionsScreen {
                         leading: const Icon(Icons.map_outlined),
                         title: Text(e.name),
                         subtitle: Text(
-                          '${e.description}\n${_formatBytes(e.sizeBytes)}',
+                          '${e.description}\n'
+                          '${_formatBytes(e.sizeBytes)} · '
+                          '${e.schema.label}',
                           maxLines: 3,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -692,7 +740,7 @@ extension _RegionsScreenAddFlows on RegionsScreen {
       context: context,
       ref: ref,
       url: picked.url,
-      filename: '${picked.id}.mbtiles',
+      filename: picked.filename,
     );
   }
 
