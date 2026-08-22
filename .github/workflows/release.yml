@@ -3,6 +3,17 @@ name: release
 on:
   push:
     branches: [main]
+    # Docs / CI / test-only pushes must NOT rebuild + re-publish the current
+    # version: the tag already exists and action-gh-release would overwrite
+    # the shipped APK with a rebuild on whatever Flutter stable is current.
+    # (Hit on 2026-08-22 by a docs-only push; run cancelled by hand.)
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'test/**'
+      - 'integration_test/**'
+      - '.github/**'
+      - 'LICENSE'
 
 env:
   # The SHA-1 the APK MUST be signed with — matches the committed keystore
