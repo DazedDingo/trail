@@ -53,11 +53,40 @@ class WorkmanagerScheduler {
   static const defaultCadence = SchedulerPolicy.defaultCadence;
   static const retryDelay = SchedulerPolicy.retryDelay;
 
-  /// Registers the top-level [_callbackDispatcher] with the native plugin.
-  /// Safe to call on every app launch — the plugin de-dupes.
-  static Future<void> initialize() async {
-    await Workmanager().initialize(_callbackDispatcher);
+  /// Registers the top-level [_callbackDispatcher] with the native
+  /// plugin. Memoised per isolate: the first call does the channel
+  /// round-trip, concurrent and later callers share that future, and a
+  /// failure resets the memo so the next call retries. Every enqueue /
+  /// cancel path awaits this, so no caller has to sequence it — `main()`
+  /// kicks it off after the first frame, and the lock screen's
+  /// `enqueuePeriodic` (which can run in that same post-frame phase)
+  /// simply waits on the shared future instead of racing it.
+  ///
+  /// Safe in the background isolate as well: natively `initialize` only
+  /// persists the callback handle (the same value every time), so the
+  /// one extra call per worker spawn is a single cheap channel hop.
+  static Future<void> initialize() => _initFuture ??= _initializeOnce();
+
+  static Future<void>? _initFuture;
+
+  static Future<void> _initializeOnce() async {
+    try {
+      await nativeInitialize();
+    } catch (_) {
+      _initFuture = null;
+      rethrow;
+    }
   }
+
+  /// The native registration call. Replaceable so tests can verify the
+  /// memoisation + gating without a platform implementation.
+  @visibleForTesting
+  static Future<void> Function() nativeInitialize =
+      () => Workmanager().initialize(_callbackDispatcher);
+
+  /// Drops the memoised init so a test can start from a cold isolate.
+  @visibleForTesting
+  static void resetInitializationForTest() => _initFuture = null;
 
   /// Enqueue / replace the baseline periodic worker at the given
   /// [frequency]. When `null` the user's chosen cadence (default 4h)
@@ -67,6 +96,7 @@ class WorkmanagerScheduler {
   static Future<void> enqueuePeriodic({
     Duration? frequency,
   }) async {
+    await initialize();
     final effective = frequency ?? (await CadenceStore.get()).value;
     await Workmanager().registerPeriodicTask(
       periodicTaskName,
@@ -90,6 +120,7 @@ class WorkmanagerScheduler {
   static Future<void> enqueueRetry({
     Duration delay = retryDelay,
   }) async {
+    await initialize();
     await Workmanager().registerOneOffTask(
       '${retryTaskName}_${DateTime.now().millisecondsSinceEpoch}',
       retryTaskName,
@@ -102,6 +133,7 @@ class WorkmanagerScheduler {
   /// Enqueue a one-shot boot-time ping. Called from the native BootReceiver
   /// via its own worker path (see `BootReceiver.kt`).
   static Future<void> enqueueBoot() async {
+    await initialize();
     await Workmanager().registerOneOffTask(
       '${bootTaskName}_${DateTime.now().millisecondsSinceEpoch}',
       bootTaskName,
@@ -111,6 +143,7 @@ class WorkmanagerScheduler {
   }
 
   static Future<void> cancelAll() async {
+    await initialize();
     await Workmanager().cancelAll();
   }
 

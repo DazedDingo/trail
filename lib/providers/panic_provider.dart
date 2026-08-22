@@ -1,8 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../services/panic/panic_service.dart';
+import '../services/secure_storage.dart';
 
 /// User-configurable continuous-panic duration. Stored in secure storage so
 /// it survives app restart but is still behind Keystore alongside the DB
@@ -22,15 +22,11 @@ final panicDurationProvider =
 );
 
 class PanicDurationNotifier extends AsyncNotifier<PanicDuration> {
-  static const _storage = FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
-  );
-
   @override
   Future<PanicDuration> build() async {
     PanicDuration resolved;
     try {
-      final raw = await _storage.read(key: _durationKey);
+      final raw = await secureStorage.read(key: _durationKey);
       resolved = _parse(raw) ?? PanicDuration.min30;
     } catch (_) {
       // Secure storage is flaky in test environments — fall back to the
@@ -47,7 +43,7 @@ class PanicDurationNotifier extends AsyncNotifier<PanicDuration> {
   Future<void> set(PanicDuration d) async {
     state = AsyncData(d);
     try {
-      await _storage.write(key: _durationKey, value: d.name);
+      await secureStorage.write(key: _durationKey, value: d.name);
     } catch (_) {
       // Write failure is non-fatal — the in-memory state is still correct
       // and the user can retry on next panic. No point crashing here.
@@ -73,15 +69,11 @@ final panicAutoSendProvider =
 );
 
 class PanicAutoSendNotifier extends AsyncNotifier<bool> {
-  static const _storage = FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
-  );
-
   @override
   Future<bool> build() async {
     bool persisted;
     try {
-      final raw = await _storage.read(key: _autoSendKey);
+      final raw = await secureStorage.read(key: _autoSendKey);
       persisted = raw == 'true';
     } catch (_) {
       // Transient secure-storage read failure — default to the safer off
@@ -103,7 +95,7 @@ class PanicAutoSendNotifier extends AsyncNotifier<bool> {
       final status = await Permission.sms.status;
       if (!status.isGranted) {
         try {
-          await _storage.write(key: _autoSendKey, value: 'false');
+          await secureStorage.write(key: _autoSendKey, value: 'false');
         } catch (_) {
           // Best-effort clear; fall through to returning false anyway.
         }
@@ -119,7 +111,10 @@ class PanicAutoSendNotifier extends AsyncNotifier<bool> {
   Future<void> set(bool enabled) async {
     state = AsyncData(enabled);
     try {
-      await _storage.write(key: _autoSendKey, value: enabled ? 'true' : 'false');
+      await secureStorage.write(
+        key: _autoSendKey,
+        value: enabled ? 'true' : 'false',
+      );
     } catch (_) {
       // In-memory state is still correct; user can retry from the
       // Settings toggle. Never crash here.

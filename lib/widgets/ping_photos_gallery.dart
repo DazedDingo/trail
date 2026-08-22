@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,6 +11,14 @@ import '../models/ping_photo.dart';
 import '../providers/photos_provider.dart';
 import '../services/failed_photo_uris.dart';
 import '../services/online_photo_service.dart';
+import '../services/photo_uri.dart';
+
+/// Decode width for every gallery tile, user photos included. A tile is
+/// 132 dp, so 320 px still oversamples crisply at 2.4× DPR — and it
+/// matches the Wikimedia thumbs' `memCacheWidth`, so both kinds of tile
+/// cost the same ~400 KB decoded instead of a 12 MP user shot landing
+/// in the image cache at ~48 MB.
+const int _kTileDecodeWidth = 320;
 
 /// Horizontal photo carousel for a single ping (schema v2). Renders:
 ///   - online auto-fetched photos (CC-BY-SA Wikimedia) with attribution
@@ -262,22 +272,31 @@ class _PhotoTile extends StatelessWidget {
   }
 
   Widget _buildImage(BuildContext context, String uri, ColorScheme scheme) {
-    if (uri.startsWith('file://')) {
-      final path = uri.replaceFirst('file://', '');
-      return Image.asset(path,
-          fit: BoxFit.cover, errorBuilder: (_, __, ___) {
-        WidgetsBinding.instance.addPostFrameCallback((_) async {
-          await FailedPhotoUris.register(uri);
-          onError();
-        });
-        return _placeholder(scheme);
-      });
+    final localPath = localPathForUri(uri);
+    if (localPath != null) {
+      // `Image.file`, not `Image.asset` — the latter looked the path up
+      // in the bundle manifest and failed every user photo into the
+      // denylist (0.14.0 and earlier). A genuine failure here (file
+      // purged from the picker cache) is remembered for the session
+      // only — see `FailedPhotoUris.register`.
+      return Image.file(
+        File(localPath),
+        fit: BoxFit.cover,
+        cacheWidth: _kTileDecodeWidth,
+        errorBuilder: (_, __, ___) {
+          WidgetsBinding.instance.addPostFrameCallback((_) async {
+            await FailedPhotoUris.register(uri);
+            onError();
+          });
+          return _placeholder(scheme);
+        },
+      );
     }
     if (uri.startsWith('http')) {
       return CachedNetworkImage(
         imageUrl: uri,
         fit: BoxFit.cover,
-        memCacheWidth: 320,
+        memCacheWidth: _kTileDecodeWidth,
         placeholder: (_, __) => Container(color: scheme.surface),
         errorWidget: (_, __, ___) {
           WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -361,7 +380,8 @@ class _AddPhotoTile extends StatelessWidget {
 String renderableGalleryUriFor(PingPhoto photo) {
   final thumb = photo.thumbUri;
   if (thumb != null) {
-    final shrunk = shrinkWikimediaThumbUrl(thumb, targetWidth: 320);
+    final shrunk =
+        shrinkWikimediaThumbUrl(thumb, targetWidth: _kTileDecodeWidth);
     if (!FailedPhotoUris.isFailed(shrunk)) return shrunk;
   }
   return photo.uri;

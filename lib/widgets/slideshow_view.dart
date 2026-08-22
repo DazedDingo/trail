@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
@@ -11,11 +12,19 @@ import '../models/ping.dart';
 import '../models/ping_photo.dart';
 import '../services/failed_photo_uris.dart';
 import '../services/online_photo_service.dart';
+import '../services/photo_uri.dart';
 
 /// Tighter than the Wikimedia thumb-URL default (320 today, 512 for
 /// pre-0.13.4 cached rows) means every frame stays under ~80 KB and
 /// decodes in single-digit ms even on a Pixel 5.
 const int _kSlideshowThumbWidth = 320;
+
+/// Upper bound on the decode width for the user's own (`file://`)
+/// photos in the slideshow. They fill the screen, so they decode at the
+/// viewport's physical width rather than the 320 px Wikimedia thumbs —
+/// but never wider than 1080 px: a 1080 × 1440 RGBA frame is ~6 MB,
+/// versus ~48 MB for an unbounded 12 MP shot. See [slideshowDecodeWidth].
+const int _kMaxLocalDecodeWidth = 1080;
 
 /// Number of upcoming frames to push into the image cache eagerly
 /// **during playback** (rolling lookahead). Wikimedia's CDN
@@ -275,7 +284,7 @@ class _SlidePage extends StatelessWidget {
       fit: StackFit.expand,
       children: [
         Container(color: scheme.surface),
-        _buildImage(uri, scheme),
+        _buildImage(context, uri, scheme),
         Positioned(
           left: 0,
           right: 0,
@@ -334,11 +343,22 @@ class _SlidePage extends StatelessWidget {
     );
   }
 
-  Widget _buildImage(String uri, ColorScheme scheme) {
-    if (uri.startsWith('file://')) {
-      return Image.asset(
-        uri.replaceFirst('file://', ''),
+  Widget _buildImage(BuildContext context, String uri, ColorScheme scheme) {
+    final localPath = localPathForUri(uri);
+    if (localPath != null) {
+      // The user's own camera / gallery photo. `Image.file` — NOT
+      // `Image.asset`, which resolved the path against the bundle
+      // manifest and so failed *every* user photo straight into the
+      // denylist (0.14.0 and earlier). `cacheWidth` bounds the decode
+      // to the viewport; without it a 12 MP shot decodes to ~48 MB for
+      // one frame.
+      return Image.file(
+        File(localPath),
         fit: BoxFit.cover,
+        cacheWidth: slideshowDecodeWidth(
+          MediaQuery.sizeOf(context).width,
+          MediaQuery.devicePixelRatioOf(context),
+        ),
         errorBuilder: (_, __, ___) {
           WidgetsBinding.instance.addPostFrameCallback(
               (_) => onImageError(uri));
@@ -461,6 +481,15 @@ class _DelayedLoadingHintState extends State<_DelayedLoadingHint> {
 }
 
 // ─── Pure helpers (exported for tests) ─────────────────────────────────
+
+/// Decode width for a full-screen `file://` photo: the viewport's
+/// physical width, clamped to `[_kSlideshowThumbWidth,
+/// _kMaxLocalDecodeWidth]`. Pure so it's unit-testable without a
+/// `MediaQuery`.
+int slideshowDecodeWidth(double logicalWidth, double devicePixelRatio) {
+  final px = (logicalWidth * devicePixelRatio).round();
+  return px.clamp(_kSlideshowThumbWidth, _kMaxLocalDecodeWidth);
+}
 
 /// Returns the latest ping in [visibleFixes] at-or-before [sliderMax],
 /// or null if every fix is after the slider. Mirrors the same logic
