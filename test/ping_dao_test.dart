@@ -899,4 +899,137 @@ void main() {
       expect(detail, contains('idx_pings_import'));
     });
   });
+
+  group('PingDao.tsRange (year chips)', () {
+    test('empty table → (null, null)', () async {
+      final r = await dao.tsRange();
+      expect(r.minUtcMs, isNull);
+      expect(r.maxUtcMs, isNull);
+    });
+
+    test('returns the oldest and newest fix timestamps', () async {
+      await dao.insert(_p(DateTime.utc(2024, 3, 4, 5), lat: 51, lon: -0.1));
+      await dao.insert(_p(DateTime.utc(2026, 8, 22, 9), lat: 52, lon: -0.2));
+      await dao.insert(_p(DateTime.utc(2025, 1, 1), lat: 53, lon: -0.3));
+      final r = await dao.tsRange();
+      expect(r.minUtcMs, DateTime.utc(2024, 3, 4, 5).millisecondsSinceEpoch);
+      expect(r.maxUtcMs, DateTime.utc(2026, 8, 22, 9).millisecondsSinceEpoch);
+    });
+
+    test('ignores coordinate-less rows at both ends', () async {
+      // no_fix rows bracket the only real fix — neither may set a bound.
+      await dao.insert(_p(DateTime.utc(2019, 1, 1), source: PingSource.noFix));
+      await dao.insert(_p(DateTime.utc(2026, 1, 1), lat: 51, lon: -0.1));
+      await dao.insert(_p(DateTime.utc(2030, 1, 1), source: PingSource.noFix));
+      final r = await dao.tsRange();
+      expect(r.minUtcMs, DateTime.utc(2026, 1, 1).millisecondsSinceEpoch);
+      expect(r.maxUtcMs, DateTime.utc(2026, 1, 1).millisecondsSinceEpoch);
+    });
+
+    test('a table of only no-fix rows still reads as empty', () async {
+      await dao.insert(_p(DateTime.utc(2026, 1, 1), source: PingSource.noFix));
+      final r = await dao.tsRange();
+      expect(r.minUtcMs, isNull);
+      expect(r.maxUtcMs, isNull);
+    });
+
+    test('includes imported rows — the chips exist for them', () async {
+      await dao.insertImportedBatch(
+        [
+          Ping(
+            timestampUtc: DateTime.utc(2015, 6, 1),
+            lat: 51,
+            lon: -0.1,
+            source: PingSource.scheduled,
+          ),
+        ],
+        importId: 1,
+      );
+      final r = await dao.tsRange();
+      expect(r.minUtcMs, DateTime.utc(2015, 6, 1).millisecondsSinceEpoch);
+    });
+  });
+
+  group('PingDao.fixesByImportId (per-import map detail)', () {
+    Future<void> seedImport(int id, int rows, DateTime start) =>
+        dao.insertImportedBatch(
+          [
+            for (var i = 0; i < rows; i++)
+              Ping(
+                timestampUtc: start.add(Duration(minutes: i)),
+                lat: 51.0 + i * 0.01,
+                lon: -0.1,
+                source: PingSource.scheduled,
+              ),
+          ],
+          importId: id,
+        );
+
+    test('returns only that import\'s fixes, oldest-first', () async {
+      await seedImport(1, 3, DateTime.utc(2015, 6, 1));
+      await seedImport(2, 2, DateTime.utc(2019, 6, 1));
+      await dao.insert(_p(DateTime.utc(2026, 1, 1), lat: 60, lon: 10));
+
+      final rows = await dao.fixesByImportId(1);
+      expect(rows, hasLength(3));
+      expect(
+        rows.first.tsUtcMs,
+        DateTime.utc(2015, 6, 1).millisecondsSinceEpoch,
+      );
+      expect(
+        rows.last.tsUtcMs,
+        DateTime.utc(2015, 6, 1, 0, 2).millisecondsSinceEpoch,
+      );
+      expect(rows.map((r) => r.lat), everyElement(lessThan(52)));
+      final ts = rows.map((r) => r.tsUtcMs).toList();
+      final sorted = [...ts]..sort();
+      expect(ts, sorted);
+    });
+
+    test('unknown import id → empty', () async {
+      await seedImport(1, 2, DateTime.utc(2015, 6, 1));
+      expect(await dao.fixesByImportId(999), isEmpty);
+    });
+
+    test('drops coordinate-less rows belonging to the import', () async {
+      await seedImport(1, 2, DateTime.utc(2015, 6, 1));
+      // A no-coord row stamped with the same import_id (a Timeline
+      // element that mapped to a time but no place).
+      await db.insert('pings', {
+        'ts_utc': DateTime.utc(2015, 6, 2).millisecondsSinceEpoch,
+        'source': 'import',
+        'import_id': 1,
+      });
+      expect(await dao.countByImportId(1), 3);
+      expect(await dao.fixesByImportId(1), hasLength(2));
+    });
+
+    test('stride-samples down to at most `limit`, keeping both ends of '
+        'the batch', () async {
+      await seedImport(1, 10, DateTime.utc(2015, 6, 1));
+      final rows = await dao.fixesByImportId(1, limit: 3);
+      // ceil(10 / 3) == 4 → indices 0, 4, 8.
+      expect(rows, hasLength(3));
+      expect(
+        rows.first.tsUtcMs,
+        DateTime.utc(2015, 6, 1).millisecondsSinceEpoch,
+      );
+      expect(
+        rows.last.tsUtcMs,
+        DateTime.utc(2015, 6, 1, 0, 8).millisecondsSinceEpoch,
+        reason: 'an even stride must reach the far end of the import, not '
+            'stop after the first N rows',
+      );
+    });
+
+    test('a batch at or under the limit is returned whole', () async {
+      await seedImport(1, 4, DateTime.utc(2015, 6, 1));
+      expect(await dao.fixesByImportId(1, limit: 4), hasLength(4));
+    });
+
+    test('limit <= 0 disables the cap', () async {
+      await seedImport(1, 5, DateTime.utc(2015, 6, 1));
+      expect(await dao.fixesByImportId(1, limit: 0), hasLength(5));
+    });
+  });
 }

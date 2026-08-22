@@ -3,19 +3,20 @@ import 'dart:async';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
+import '../db/database.dart';
 import '../db/import_dao.dart';
+import '../db/ping_dao.dart';
 import '../providers/backup_provider.dart';
 import '../providers/import_provider.dart';
 import '../providers/mbtiles_provider.dart';
+import '../services/coverage/coverage_flow.dart';
 import '../services/coverage/coverage_planner.dart';
-import '../services/coverage/coverage_prefs.dart';
-import '../services/coverage/coverage_service.dart';
 import '../services/import/import_thinning.dart';
 import '../services/import/timeline_import_service.dart';
 import '../services/import/timeline_models.dart';
-import '../services/tile_downloader.dart';
 import '../widgets/help_button.dart';
 
 /// Google Maps Timeline import (docs/TIMELINE_IMPORT.md, 0.16.0).
@@ -57,6 +58,10 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
   bool _coverageBusy = false;
   String? _coverageNote;
 
+  /// The note on the card is "you never set a server up" — render the
+  /// route out of it.
+  bool _coverageNeedsServer = false;
+
   @override
   void dispose() {
     // The picker copies the SAF selection into the app cache
@@ -92,6 +97,7 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
       _result = null;
       _error = null;
       _coverageNote = null;
+      _coverageNeedsServer = false;
     });
     await _runPreview();
   }
@@ -230,118 +236,41 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
 
   /// Offers high-zoom map detail for the places the import just added
   /// (docs/TIMELINE_IMPORT.md §3 Phase C). Opt-in, one confirm dialog
-  /// with the server's byte-exact dry-run size; skipped silently when no
-  /// map-detail server is configured.
+  /// with the server's byte-exact dry-run size.
+  ///
+  /// A missing server URL used to return here silently, so a user who
+  /// had never set one up saw NOTHING after importing years of Timeline
+  /// data — and, with the import older than the Settings button's
+  /// 365-day window, had no way to ask for it later either. It is now an
+  /// explicit note with a route into Settings, and the imports sheet
+  /// carries a per-import "Map detail" action for the second half.
   Future<void> _offerCoverage(ImportResult result) async {
     if (result.sampledPoints.isEmpty) return;
-    // No server configured = the feature is off for this user; say
-    // nothing rather than reporting a failure they didn't ask for.
-    final serverUrl = await CoveragePrefs.readServerUrl();
-    if (serverUrl == null || serverUrl.isEmpty || !mounted) return;
     setState(() {
       _coverageBusy = true;
       _coverageNote = null;
+      _coverageNeedsServer = false;
     });
-    try {
-      final points = <GeoPoint>[
-        for (final p in result.sampledPoints) GeoPoint(p.lat, p.lon),
-      ];
-      await CoverageService.instance.refreshExtents();
-      final plan = await CoverageService.instance.planForPoints(points);
-      if (!mounted) return;
-      setState(() => _coverageBusy = false);
-      if (plan.isEmpty) {
-        setState(() => _coverageNote =
-            'Every imported place is already covered in map detail.');
-        return;
-      }
-      final ok = await showDialog<bool>(
-            context: context,
-            builder: (c) => AlertDialog(
-              title: const Text('Download map detail?'),
-              content: Text(
-                'The import covers ${plan.boxes.length} place'
-                '${plan.boxes.length == 1 ? '' : 's'} with no detailed '
-                'tiles yet (${_formatMb(plan.totalBytes)}).',
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(c, false),
-                  child: const Text('Not now'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.pop(c, true),
-                  child: const Text('Download'),
-                ),
-              ],
-            ),
-          ) ??
-          false;
-      if (!ok || !mounted) return;
-      await _runCoverage(plan);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _coverageBusy = false;
-        _coverageNote = 'Map detail unavailable: $e';
-      });
-    }
-  }
-
-  Future<void> _runCoverage(CoveragePlan plan) async {
-    final cancelToken = TileDownloadCancelToken();
-    final progress = ValueNotifier<String>('Starting…');
-    setState(() => _coverageBusy = true);
-    unawaited(showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (c) => AlertDialog(
-        title: const Text('Downloading map detail'),
-        content: ValueListenableBuilder<String>(
-          valueListenable: progress,
-          builder: (_, text, __) => Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const LinearProgressIndicator(),
-              const SizedBox(height: 12),
-              Text(text),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              cancelToken.isCancelled = true;
-              Navigator.pop(c);
-            },
-            child: const Text('Cancel'),
-          ),
-        ],
-      ),
-    ));
-    final run = await CoverageService.instance.fetchPlan(
-      plan,
-      cancelToken: cancelToken,
-      onProgress: (i, count, received, total) {
-        progress.value = 'Area ${i + 1} of $count · ${_formatMb(received)}'
-            '${total == null ? '' : ' / ${_formatMb(total)}'}';
-      },
+    final points = <GeoPoint>[
+      for (final p in result.sampledPoints) GeoPoint(p.lat, p.lon),
+    ];
+    final flow = await runCoverageFlow(
+      context,
+      points: points,
+      serverMissingNote: coverageServerNotSetNote(points.length),
+      alreadyCoveredNote:
+          'Every imported place is already covered in map detail.',
+      declinedNote: 'Not downloaded. You can fetch it later from Settings '
+          '→ History → Timeline imports → Map detail.',
       onInstalled: () {
         if (mounted) invalidateTileProviders(ref);
       },
     );
-    if (mounted && Navigator.of(context).canPop()) Navigator.of(context).pop();
-    progress.dispose();
     if (!mounted) return;
     setState(() {
       _coverageBusy = false;
-      _coverageNote = run.cancelled
-          ? 'Cancelled after ${run.downloaded} area(s).'
-          : run.error != null
-              ? 'Map detail failed: ${run.error}'
-              : 'Installed ${run.downloaded} map-detail pack'
-                  '${run.downloaded == 1 ? '' : 's'} '
-                  '(${_formatMb(run.bytes)}).';
+      _coverageNeedsServer = flow.status == CoverageFlowStatus.noServer;
+      _coverageNote = flow.message;
     });
   }
 
@@ -669,16 +598,34 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
 
   Widget _coverageCard() {
     return Card(
-      child: ListTile(
-        leading: _coverageBusy
-            ? const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : const Icon(Icons.map_outlined),
-        title: const Text('Map detail'),
-        subtitle: Text(_coverageNote ?? 'Checking which places need tiles…'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ListTile(
+            leading: _coverageBusy
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.map_outlined),
+            title: const Text('Map detail'),
+            subtitle:
+                Text(_coverageNote ?? 'Checking which places need tiles…'),
+          ),
+          if (_coverageNeedsServer)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: OutlinedButton.icon(
+                  onPressed: () => context.push('/settings'),
+                  icon: const Icon(Icons.settings_outlined),
+                  label: const Text('Open Settings'),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -744,16 +691,28 @@ Future<void> showTimelineImportsSheet(BuildContext context) {
   );
 }
 
-class _TimelineImportsSheet extends ConsumerWidget {
+class _TimelineImportsSheet extends ConsumerStatefulWidget {
   const _TimelineImportsSheet();
 
+  @override
+  ConsumerState<_TimelineImportsSheet> createState() =>
+      _TimelineImportsSheetState();
+}
+
+class _TimelineImportsSheetState extends ConsumerState<_TimelineImportsSheet> {
   static final _dateFmt = DateFormat('d MMM yyyy HH:mm');
 
-  Future<void> _undo(
-    BuildContext context,
-    WidgetRef ref,
-    ImportRecord record,
-  ) async {
+  /// `imports.id` of the row currently planning/downloading map detail —
+  /// one at a time, and the row shows a spinner while it works.
+  int? _busyId;
+
+  void _snack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _undo(ImportRecord record) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
@@ -778,18 +737,90 @@ class _TimelineImportsSheet extends ConsumerWidget {
     if (confirmed != true || record.id == null) return;
     final service = await ref.read(timelineImportServiceProvider.future);
     final removed = await service.undo(record.id!);
+    if (!mounted) return;
     invalidateAfterImport(ref);
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Removed $removed imported ping'
-            '${removed == 1 ? '' : 's'}.'),
+    _snack('Removed $removed imported ping${removed == 1 ? '' : 's'}.');
+  }
+
+  /// Per-import recovery for the map-detail offer: re-plans coverage for
+  /// the places THIS import added, whenever the user wants.
+  ///
+  /// The Settings button ("Fetch map detail for my pins now") only looks
+  /// at the last 365 days, so a Timeline export of 2015–2019 was
+  /// unreachable from there — and if no server was configured at import
+  /// time, the offer never appeared at all. This is the way back.
+  Future<void> _mapDetail(ImportRecord record) async {
+    final id = record.id;
+    if (id == null || _busyId != null) return;
+    setState(() => _busyId = id);
+    try {
+      final db = await TrailDatabase.shared();
+      final dao = PingDao(db);
+      if (await dao.countByImportId(id) == 0) {
+        _snack('That import has no pings left.');
+        return;
+      }
+      final fixes = await dao.fixesByImportId(id);
+      final points = <GeoPoint>[
+        for (final f in fixes) GeoPoint(f.lat, f.lon),
+      ];
+      if (points.isEmpty) {
+        _snack('That import has no coordinates to cover.');
+        return;
+      }
+      if (!mounted) return;
+      final flow = await runCoverageFlow(
+        context,
+        points: points,
+        serverMissingNote: coverageServerNotSetNote(points.length),
+        alreadyCoveredNote:
+            'Every place in that import is already covered in map detail.',
+        declinedNote: '',
+        onInstalled: () {
+          if (mounted) invalidateTileProviders(ref);
+        },
+      );
+      if (!mounted) return;
+      if (flow.status == CoverageFlowStatus.noServer) {
+        await _serverMissingDialog(flow.message);
+      } else if (flow.message.isNotEmpty) {
+        _snack(flow.message);
+      }
+    } catch (e) {
+      _snack('Map detail failed: $e');
+    } finally {
+      if (mounted) setState(() => _busyId = null);
+    }
+  }
+
+  Future<void> _serverMissingDialog(String note) async {
+    final open = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Map detail'),
+        content: Text(note),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('Open Settings'),
+          ),
+        ],
       ),
     );
+    if (open != true || !mounted) return;
+    // Grab the router BEFORE popping: reading an inherited widget off a
+    // context that is on its way out is how this crashes.
+    final router = GoRouter.of(context);
+    Navigator.of(context).pop(); // close the sheet first
+    router.push('/settings');
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final history = ref.watch(importHistoryProvider);
     return SafeArea(
       child: Padding(
@@ -827,10 +858,36 @@ class _TimelineImportsSheet extends ConsumerWidget {
                       '${record.fileName ?? 'Timeline.json'} · '
                       '${_dateFmt.format(record.importedAtUtc.toLocal())}',
                     ),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.undo),
-                      tooltip: 'Undo import',
-                      onPressed: () => _undo(context, ref, record),
+                    trailing: Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        if (_busyId == record.id)
+                          const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 12),
+                            child: SizedBox(
+                              width: 20,
+                              height: 20,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          )
+                        else
+                          IconButton(
+                            icon: const Icon(
+                              Icons.download_for_offline_outlined,
+                            ),
+                            tooltip: 'Map detail…',
+                            onPressed: _busyId != null
+                                ? null
+                                : () => _mapDetail(record),
+                          ),
+                        IconButton(
+                          icon: const Icon(Icons.undo),
+                          tooltip: 'Undo import',
+                          onPressed:
+                              _busyId != null ? null : () => _undo(record),
+                        ),
+                      ],
                     ),
                   ),
               ],
@@ -841,6 +898,3 @@ class _TimelineImportsSheet extends ConsumerWidget {
     );
   }
 }
-
-String _formatMb(int bytes) =>
-    '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';

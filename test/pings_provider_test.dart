@@ -175,6 +175,33 @@ void main() {
       );
       sub.close();
     });
+
+    test('pingYearsProvider lists every calendar year with a fix, newest '
+        'first', () async {
+      // The seed is all 2026; a Timeline import's worth of old data
+      // stretches the list back.
+      await PingDao(db).insert(_fix(DateTime(2019, 6, 1, 12), 50.0));
+      container.invalidate(pingYearsProvider);
+      final years = await container.read(pingYearsProvider.future);
+      expect(years, [2026, 2025, 2024, 2023, 2022, 2021, 2020, 2019]);
+    });
+
+    test('pingYearsProvider is empty on a table with no fixes', () async {
+      await db.delete('pings');
+      container.invalidate(pingYearsProvider);
+      expect(await container.read(pingYearsProvider.future), isEmpty);
+    });
+
+    test('pingYearsProvider re-reads after invalidation (the import path)',
+        () async {
+      expect(await container.read(pingYearsProvider.future), [2026]);
+      await PingDao(db).insert(_fix(DateTime(2024, 3, 3, 12), 50.0));
+      container.invalidate(pingYearsProvider);
+      expect(
+        await container.read(pingYearsProvider.future),
+        [2026, 2025, 2024],
+      );
+    });
   });
 
   group('approxLocationProvider', () {

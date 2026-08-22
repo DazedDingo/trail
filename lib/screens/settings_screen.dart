@@ -27,12 +27,11 @@ import '../providers/panic_provider.dart';
 import '../providers/pings_provider.dart';
 import '../providers/scheduler_provider.dart';
 import '../providers/mbtiles_provider.dart';
+import '../services/coverage/coverage_flow.dart';
 import '../services/coverage/coverage_planner.dart';
 import '../services/coverage/coverage_prefs.dart';
-import '../services/coverage/coverage_service.dart';
 import '../services/coverage/tile_server_client.dart';
 import '../services/failed_photo_uris.dart';
-import '../services/tile_downloader.dart';
 import '../services/how_is_it_service.dart';
 import '../services/panic/panic_service.dart';
 import 'photo_backfill_sheet.dart';
@@ -1690,9 +1689,18 @@ class _MapDetailServerGroupState extends ConsumerState<_MapDetailServerGroup> {
 
   /// Reads the last year of fixes (the cheapest existing query —
   /// `fixesByDateRange` walks the partial index `idx_pings_ts_fix` and
-  /// never decodes a coordinate-less row), caps at 5 000 points, plans,
-  /// confirms, downloads, then refreshes the tile providers so the
-  /// loopback restarts with the new packs.
+  /// never decodes a coordinate-less row), caps at 5 000 points, then
+  /// hands the whole plan → confirm → download → note sequence to
+  /// [runCoverageFlow] — the same helper the Timeline import screen and
+  /// the per-import "Map detail…" action use, so the three cannot drift
+  /// (and so this button inherited two fixes: the progress dialog's
+  /// `ValueNotifier` is no longer disposed while the popped route is
+  /// still rebuilding, and a download that finishes before the dialog's
+  /// first build can no longer strand it on screen).
+  ///
+  /// A run older than 365 days is deliberately still out of scope here;
+  /// that is what the per-import action in Settings → History →
+  /// Timeline imports is for.
   Future<void> _fetchNow() async {
     setState(() => _busy = true);
     try {
@@ -1707,92 +1715,28 @@ class _MapDetailServerGroupState extends ConsumerState<_MapDetailServerGroup> {
         _snack('No fixes in the last year to cover.');
         return;
       }
-      await CoverageService.instance.refreshExtents();
-      final plan = await CoverageService.instance.planForPoints(points);
       if (!mounted) return;
-      if (plan.isEmpty) {
-        _snack('Every place you have been is already covered in detail.');
-        return;
-      }
-      final ok = await showDialog<bool>(
-            context: context,
-            builder: (c) => AlertDialog(
-              title: const Text('Download map detail?'),
-              content: Text(
-                '${plan.boxes.length} area'
-                '${plan.boxes.length == 1 ? '' : 's'} · '
-                '${_formatMb(plan.totalBytes)} · planet '
-                '${plan.planetDate ?? 'unknown'}',
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(c, false),
-                  child: const Text('Cancel'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.pop(c, true),
-                  child: const Text('Download'),
-                ),
-              ],
-            ),
-          ) ??
-          false;
-      if (!ok || !mounted) return;
-
-      final cancelToken = TileDownloadCancelToken();
-      final progress = ValueNotifier<String>('Starting…');
-      unawaited(showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (c) => AlertDialog(
-          title: const Text('Downloading map detail'),
-          content: ValueListenableBuilder<String>(
-            valueListenable: progress,
-            builder: (_, text, __) => Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const LinearProgressIndicator(),
-                const SizedBox(height: 12),
-                Text(text),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                cancelToken.isCancelled = true;
-                Navigator.pop(c);
-              },
-              child: const Text('Cancel'),
-            ),
-          ],
-        ),
-      ));
-
-      final result = await CoverageService.instance.fetchPlan(
-        plan,
-        cancelToken: cancelToken,
-        onProgress: (i, count, received, total) {
-          progress.value = 'Area ${i + 1} of $count · '
-              '${_formatMb(received)}${total == null ? '' : ' / ${_formatMb(total)}'}';
-        },
+      final flow = await runCoverageFlow(
+        context,
+        points: points,
+        serverMissingNote:
+            'Map detail server not set — add the Server URL above first.',
+        alreadyCoveredNote:
+            'Every place you have been is already covered in detail.',
+        // Dismissing the confirm dialog is not news in the one screen
+        // that owns this button; an empty note means "say nothing".
+        declinedNote: '',
         onInstalled: () {
           if (mounted) invalidateTileProviders(ref);
         },
       );
-      if (mounted && Navigator.of(context).canPop()) Navigator.of(context).pop();
-      progress.dispose();
-      if (result.cancelled) {
-        _snack('Cancelled after ${result.downloaded} area(s).');
-      } else if (result.error != null) {
-        _snack('Failed: ${result.error}');
-      } else {
-        _snack('Downloaded ${result.downloaded} area'
-            '${result.downloaded == 1 ? '' : 's'} '
-            '(${_formatMb(result.bytes)}).');
+      if (flow.message.isNotEmpty) _snack(flow.message);
+      if (flow.attemptedDownload) {
+        // The pending queue + the notice on this tile were describing
+        // work the user has now been through; clear both.
+        await CoveragePrefs.writeNotice(null);
+        await CoveragePrefs.clearPending();
       }
-      await CoveragePrefs.writeNotice(null);
-      await CoveragePrefs.clearPending();
     } catch (e) {
       _snack('Failed: $e');
     } finally {
@@ -1882,5 +1826,3 @@ class _MapDetailServerGroupState extends ConsumerState<_MapDetailServerGroup> {
 /// O(points × clusters); 5 000 points is a year of 4 h pings several
 /// times over and still plans in milliseconds.
 const int _maxFetchPoints = 5000;
-
-String _formatMb(int bytes) => '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';

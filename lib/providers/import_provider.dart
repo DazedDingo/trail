@@ -50,5 +50,9 @@ void invalidateAfterImport(WidgetRef ref) {
     ..invalidate(lastSuccessfulPingProvider)
     ..invalidate(heartbeatHealthyProvider)
     ..invalidate(pingCountProvider)
+    // The import may have added years the map's chip row has never
+    // shown (that is the case this feature exists for); an undo may
+    // have taken the only fix in one away again.
+    ..invalidate(pingYearsProvider)
     ..invalidate(importHistoryProvider);
 }

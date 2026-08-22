@@ -121,7 +121,11 @@ class _ArchiveScreenState extends ConsumerState<ArchiveScreen> {
         ..invalidate(pingsByRangeProvider)
         ..invalidate(lastSuccessfulPingProvider)
         ..invalidate(heartbeatHealthyProvider)
-        ..invalidate(pingCountProvider);
+        ..invalidate(pingCountProvider)
+        // Archiving is the one path that can REMOVE a whole year, so the
+        // map's year chips have to be re-read (they would otherwise
+        // offer an empty 2019 until the next app start).
+        ..invalidate(pingYearsProvider);
       if (!mounted) return;
       await Share.shareXFiles(
         result.exportedFiles.map(XFile.new).toList(),

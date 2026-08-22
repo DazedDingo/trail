@@ -8,6 +8,10 @@ import '../services/stats/date_range_presets.dart';
 ///
 /// Two interaction modes:
 ///   1. Tap a preset chip → range applied immediately, panel closes.
+///      Since 0.16.1 a second chip row lists the calendar YEARS the
+///      pings table actually covers (newest first) — a Timeline import
+///      can drop a decade of history in, and "2024" is one tap where
+///      the system picker was five.
 ///   2. Tap "Custom range…" → falls through to the system date-range
 ///      picker for granular start/end selection (we use the system
 ///      picker here rather than embedding a CalendarDatePicker because
@@ -24,6 +28,12 @@ class InlineDateFilterPanel extends StatelessWidget {
   final DateTime now;
   final DateTime earliestPing;
   final DateTime latestPing;
+
+  /// Calendar years with at least one fix, newest-first
+  /// (`pingYearsProvider`). Empty = no year row, which is also what a
+  /// still-loading provider renders.
+  final List<int> years;
+
   final ValueChanged<DateTimeRange?> onApply;
   final VoidCallback onClose;
 
@@ -34,6 +44,7 @@ class InlineDateFilterPanel extends StatelessWidget {
     required this.now,
     required this.earliestPing,
     required this.latestPing,
+    this.years = const [],
     required this.onApply,
     required this.onClose,
   });
@@ -52,6 +63,7 @@ class InlineDateFilterPanel extends StatelessWidget {
               now: now,
               earliestPing: earliestPing,
               latestPing: latestPing,
+              years: years,
               onApply: onApply,
               onClose: onClose,
             )
@@ -66,6 +78,7 @@ class _PanelBody extends StatelessWidget {
   final DateTime now;
   final DateTime earliestPing;
   final DateTime latestPing;
+  final List<int> years;
   final ValueChanged<DateTimeRange?> onApply;
   final VoidCallback onClose;
 
@@ -75,9 +88,21 @@ class _PanelBody extends StatelessWidget {
     required this.now,
     required this.earliestPing,
     required this.latestPing,
+    required this.years,
     required this.onApply,
     required this.onClose,
   });
+
+  /// How many year chips fit before the row starts wrapping into a wall
+  /// of numbers. Beyond this the oldest ones collapse into "Older…".
+  static const maxYearChips = 12;
+
+  /// The year row is noise on a fresh install (one year, and it's this
+  /// one — every preset already lands inside it). It earns its space as
+  /// soon as there are two years, or one that isn't the current one
+  /// (which is exactly the "I just imported 2015–2019" case).
+  bool get _showYears =>
+      years.length >= 2 || (years.length == 1 && years.first != now.year);
 
   @override
   Widget build(BuildContext context) {
@@ -152,31 +177,94 @@ class _PanelBody extends StatelessWidget {
                 _ClearChip(onTap: () => onApply(null)),
             ],
           ),
+          if (_showYears) ...[
+            const SizedBox(height: 6),
+            _yearRow(context),
+          ],
         ],
       ),
     );
   }
 
-  Future<DateTimeRange?> _showSystemPicker(BuildContext context) async {
-    final initial = currentRange ??
+  /// Second chip row: one chip per calendar year with data, newest
+  /// first. A year tap is an ordinary custom range
+  /// ([rangeForYear]) pushed through the SAME `onApply` the presets
+  /// use, so the map's explicit-refresh behaviour is untouched.
+  Widget _yearRow(BuildContext context) {
+    final selectedYear = yearOfRange(currentRange);
+    // More years than fit: keep the newest, and fold the tail into one
+    // "Older…" chip that opens the system picker on the newest hidden
+    // year (so the user lands next to what they were reaching for).
+    final overflowing = years.length > maxYearChips;
+    final shown = overflowing ? years.take(maxYearChips - 1) : years;
+    final olderSeedYear = overflowing ? years[maxYearChips - 1] : null;
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: [
+        for (final year in shown)
+          _PresetChip(
+            label: '$year',
+            selected: year == selectedYear,
+            onTap: () => onApply(rangeForYear(year)),
+          ),
+        if (olderSeedYear != null)
+          _CustomRangeChip(
+            label: 'Older…',
+            onTap: () async {
+              final picked = await _showSystemPicker(
+                context,
+                seed: rangeForYear(olderSeedYear),
+              );
+              if (picked != null) onApply(picked);
+            },
+          ),
+      ],
+    );
+  }
+
+  /// Oldest date the system picker will offer. Normally the earliest
+  /// fix in the CURRENT filter, widened to 1 Jan of the oldest year in
+  /// [years] — without that, filtering to "Today" and then reaching for
+  /// "Older…" would be clamped to today and the picker could not travel
+  /// back at all (and would assert on an out-of-range initial range).
+  DateTime get _pickerFirstDate {
+    final base = earliestPing.toLocal().subtract(const Duration(days: 1));
+    if (years.isEmpty) return base;
+    final oldest = DateTime(years.last, 1, 1);
+    return oldest.isBefore(base) ? oldest : base;
+  }
+
+  DateTime get _pickerLastDate {
+    final base = latestPing.toLocal().add(const Duration(days: 1));
+    if (years.isEmpty) return base;
+    final newest = DateTime(years.first, 12, 31);
+    return newest.isAfter(base) ? newest : base;
+  }
+
+  Future<DateTimeRange?> _showSystemPicker(
+    BuildContext context, {
+    DateTimeRange? seed,
+  }) async {
+    final firstDate = _pickerFirstDate;
+    final lastDate = _pickerLastDate;
+    final initial = seed ??
+        currentRange ??
         DateTimeRange(
           start: latestPing
               .toLocal()
               .subtract(const Duration(days: 7)),
           end: latestPing.toLocal(),
         );
+    var start = initial.start.isBefore(firstDate) ? firstDate : initial.start;
+    var end = initial.end.isAfter(lastDate) ? lastDate : initial.end;
+    if (end.isBefore(firstDate)) end = firstDate;
+    if (start.isAfter(end)) start = end;
     return showDateRangePicker(
       context: context,
-      firstDate: earliestPing.toLocal().subtract(const Duration(days: 1)),
-      lastDate: latestPing.toLocal().add(const Duration(days: 1)),
-      initialDateRange: DateTimeRange(
-        start: initial.start.isBefore(earliestPing.toLocal())
-            ? earliestPing.toLocal()
-            : initial.start,
-        end: initial.end.isAfter(latestPing.toLocal())
-            ? latestPing.toLocal()
-            : initial.end,
-      ),
+      firstDate: firstDate,
+      lastDate: lastDate,
+      initialDateRange: DateTimeRange(start: start, end: end),
       helpText: 'Filter trail by date',
       saveText: 'Apply',
     );
@@ -215,14 +303,18 @@ class _PresetChip extends StatelessWidget {
 
 class _CustomRangeChip extends StatelessWidget {
   final VoidCallback onTap;
-  const _CustomRangeChip({required this.onTap});
+
+  /// "Custom range…" on the preset row, "Older…" on the year row — same
+  /// chip, same system picker, only the seed year differs.
+  final String label;
+
+  const _CustomRangeChip({required this.onTap, this.label = 'Custom range…'});
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return ActionChip(
-      label: const Text('Custom range…',
-          style: TextStyle(fontSize: 12)),
+      label: Text(label, style: const TextStyle(fontSize: 12)),
       avatar: Icon(Icons.tune, size: 14, color: scheme.onSurfaceVariant),
       onPressed: onTap,
       visualDensity: VisualDensity.compact,

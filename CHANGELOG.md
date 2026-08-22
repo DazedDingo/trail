@@ -4,6 +4,15 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.16.1+100] — 2026-08-22
+
+### Added
+- **Year chips on the map's date filter.** A second row under Today / Last 7 / Last 30 / All time lists every year you have fixes for (imports included), newest first — tap **2024** and the map shows that calendar year. Appears only once your history spans more than the current year.
+- **Map detail for an earlier import.** *Settings → History → Timeline imports* now has a **Map detail…** action per import that plans and downloads coverage packs for that import's places — the way to catch up if the server wasn't set when you imported, or for history older than the 365 days the "Fetch map detail for my pins now" button scans.
+
+### Changed
+- After an import, the screen now says when map detail could not be offered ("Map detail server not set — N places from this import could get detail") with an **Open Settings** button, instead of staying silent.
+
 ## [0.16.0+99] — 2026-08-22
 
 ### Added

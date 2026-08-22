@@ -236,6 +236,9 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     final tileServerPort = tileServer?.port;
     final liveDotState = ref.watch(liveLocationDotEnabledProvider);
     final liveDotOn = liveDotState.asData?.value ?? true;
+    // Year chips for the filter panel. Two integers out of the index;
+    // an unresolved/failed read just renders the panel without the row.
+    final years = ref.watch(pingYearsProvider).valueOrNull ?? const <int>[];
 
     // A map exists whenever the loopback is up (one or more archives) or
     // the remote-demo diagnostic is on. The port IS the archive-set
@@ -316,6 +319,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
           context,
           liveDotOn,
           liveDotState.isLoading,
+          years: years,
           loading: pingsAsync.isLoading,
           error: pingsAsync.error,
         );
@@ -325,6 +329,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
         context,
         liveDotOn,
         liveDotState.isLoading,
+        years: years,
         loading: pingsAsync.isLoading,
         error: pingsAsync.error,
       );
@@ -421,6 +426,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     BuildContext context,
     bool liveDotOn,
     bool liveDotLoading, {
+    required List<int> years,
     required bool loading,
     required Object? error,
   }) {
@@ -474,6 +480,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
           earliestPing:
               hasFixes ? first : now.subtract(const Duration(days: 365)),
           latestPing: last,
+          years: years,
           onApply: _applyDateFilter,
           onClose: () {
             if (mounted) setState(() => _calendarOpen = false);
@@ -2065,6 +2072,8 @@ class _DeletePingButtonState extends ConsumerState<_DeletePingButton> {
       ref.invalidate(lastSuccessfulPingProvider);
       ref.invalidate(heartbeatHealthyProvider);
       ref.invalidate(pingCountProvider);
+      // That pin may have been the last fix in its year — drop the chip.
+      ref.invalidate(pingYearsProvider);
       if (mounted) Navigator.of(context).pop(); // close the detail sheet
     } catch (e) {
       if (!mounted) return;

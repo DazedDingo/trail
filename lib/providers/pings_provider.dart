@@ -5,6 +5,7 @@ import '../db/database.dart';
 import '../db/ping_dao.dart';
 import '../models/ping.dart';
 import '../services/geocoding_service.dart';
+import '../services/stats/date_range_presets.dart';
 
 export '../services/geocoding_service.dart' show GeocodeKey, geocodeKey;
 
@@ -103,6 +104,30 @@ final pingsByRangeProvider = FutureProvider.autoDispose
   if (range == null) return dao.fixesByDateRange();
   final b = mapRangeUtcBounds(range);
   return dao.fixesByDateRange(startUtc: b.startUtc, endUtc: b.endUtc);
+});
+
+/// Every calendar year the pings table has a fix in, newest-first —
+/// the map filter panel's year chips ("2024" next to "Last 30 days").
+///
+/// Includes Timeline imports (`PingDao.tsRange` deliberately does): the
+/// whole point of the chips is reaching the decade of history an import
+/// just added, which is otherwise five taps into the system date picker.
+/// Two integers out of the partial index, so it is cheap enough to run
+/// on every map mount.
+///
+/// Watches nothing — invalidate it from any path that adds or removes
+/// pings *outside* the current year: `invalidateAfterImport` (import +
+/// undo), the map's delete-pin, the archive flow. A "Ping now" or a
+/// panic row can only land in the current year, which is already in the
+/// list (and hidden by the panel when it is the only one).
+final pingYearsProvider = FutureProvider<List<int>>((ref) async {
+  final db = await TrailDatabase.shared();
+  final range = await PingDao(db).tsRange();
+  return yearsCovering(
+    minUtcMs: range.minUtcMs,
+    maxUtcMs: range.maxUtcMs,
+    now: DateTime.now(),
+  );
 });
 
 /// Last successful fix (null-coord rows excluded). Feeds the home-screen

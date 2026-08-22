@@ -329,4 +329,56 @@ class PingDao {
     );
     return (r.first['c'] as int?) ?? 0;
   }
+  /// Oldest and newest fix timestamps (epoch ms UTC), or `(null, null)`
+  /// on a table with no usable coordinate. Index-only: `MIN`/`MAX` over
+  /// [fixPredicate] is answered from the two ends of the partial index
+  /// `idx_pings_ts_fix`, never a scan.
+  ///
+  /// Timeline imports are deliberately INCLUDED (no
+  /// [notImportedPredicate]) — this feeds the map's year chips, and the
+  /// years an import added are exactly the ones the user needs a chip
+  /// for (docs/TIMELINE_IMPORT.md: imports are map-only, and the map is
+  /// what this serves).
+  Future<({int? minUtcMs, int? maxUtcMs})> tsRange() async {
+    final r = await db.rawQuery(
+      'SELECT MIN(ts_utc) AS lo, MAX(ts_utc) AS hi FROM pings '
+      'WHERE $fixPredicate',
+    );
+    final row = r.first;
+    return (minUtcMs: row['lo'] as int?, maxUtcMs: row['hi'] as int?);
+  }
+
+  /// `(ts_utc, lat, lon)` for one import batch's fixes, oldest-first,
+  /// stride-sampled down to at most [limit] rows.
+  ///
+  /// Feeds the per-import "Map detail…" action (a Timeline import older
+  /// than a year is out of reach of the Settings button, which only
+  /// looks at the last 365 days). The planner only needs enough points
+  /// to find the clusters, so an even stride over the whole batch beats
+  /// the first N rows — those would all sit in the oldest week.
+  /// `limit <= 0` disables the cap.
+  Future<List<({int tsUtcMs, double lat, double lon})>> fixesByImportId(
+    int importId, {
+    int limit = 5000,
+  }) async {
+    final rows = await db.query(
+      'pings',
+      columns: const ['ts_utc', 'lat', 'lon'],
+      where: 'import_id = ? AND $fixPredicate',
+      whereArgs: [importId],
+      orderBy: 'ts_utc ASC',
+    );
+    final stride =
+        (limit <= 0 || rows.length <= limit) ? 1 : (rows.length / limit).ceil();
+    final out = <({int tsUtcMs, double lat, double lon})>[];
+    for (var i = 0; i < rows.length; i += stride) {
+      final r = rows[i];
+      out.add((
+        tsUtcMs: r['ts_utc'] as int,
+        lat: (r['lat'] as num).toDouble(),
+        lon: (r['lon'] as num).toDouble(),
+      ));
+    }
+    return out;
+  }
 }
