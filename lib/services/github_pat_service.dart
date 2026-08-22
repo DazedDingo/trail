@@ -1,4 +1,4 @@
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'secure_storage.dart';
 
 /// Stores the GitHub Personal Access Token used to fire
 /// `workflow_dispatch` against `DazedDingo/trail`'s
@@ -7,16 +7,13 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 /// `public_repo` is enough — the workflow lives in a public repo.
 class GithubPatService {
   static const _key = 'trail_github_pat_v1';
-  static const _storage = FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
-  );
 
-  static Future<String?> read() => _storage.read(key: _key);
+  static Future<String?> read() => secureStorage.read(key: _key);
 
   static Future<void> write(String pat) =>
-      _storage.write(key: _key, value: pat.trim());
+      secureStorage.write(key: _key, value: pat.trim());
 
-  static Future<void> clear() => _storage.delete(key: _key);
+  static Future<void> clear() => secureStorage.delete(key: _key);
 
   /// Returns "ghp_…last4" so the settings tile can show the user that
   /// a token is configured without revealing its value.

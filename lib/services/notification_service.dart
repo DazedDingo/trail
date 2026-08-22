@@ -41,13 +41,26 @@ class NotificationService {
   static const quickCommentInputKey = 'comment_input';
 
   static final _plugin = FlutterLocalNotificationsPlugin();
-  static bool _initialized = false;
+  static Future<void>? _initFuture;
 
-  /// Idempotent. Safe to call from both the UI isolate (on startup) and
-  /// the WorkManager background isolate (when dispatching a background
-  /// panic task needs to post a receipt).
-  static Future<void> initialize() async {
-    if (_initialized) return;
+  /// Idempotent and concurrency-safe: the first call does the plugin
+  /// init + channel creation, overlapping callers share that future, and
+  /// a failure resets the memo so the next call retries. Safe from both
+  /// the UI isolate (where `main()` defers it past the first frame since
+  /// 0.14.1) and the WorkManager background isolate — every `post*`
+  /// method self-invokes it, so nothing depends on `main()` having run.
+  static Future<void> initialize() => _initFuture ??= _initializeOnce();
+
+  static Future<void> _initializeOnce() async {
+    try {
+      await _doInitialize();
+    } catch (_) {
+      _initFuture = null;
+      rethrow;
+    }
+  }
+
+  static Future<void> _doInitialize() async {
     const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
     const settings = InitializationSettings(android: androidInit);
     await _plugin.initialize(
@@ -74,7 +87,6 @@ class NotificationService {
         importance: Importance.defaultImportance,
       ),
     );
-    _initialized = true;
   }
 
   /// Post the "panic ping logged" receipt. No-op in test environments
