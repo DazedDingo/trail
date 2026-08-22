@@ -4,8 +4,18 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:sqflite_sqlcipher/sqflite.dart';
+
+/// Byte budget for the in-process tile LRU. 16 MB (0.14.1, down from
+/// 50 MB) still holds a few hundred z13–z14 vector tiles (20–100 KB
+/// gzipped each) — several viewports of panning — and it sits *behind*
+/// MapLibre's own native tile cache, so it only ever serves re-fetches
+/// the renderer itself evicted. Misses fall through to the SQLite read;
+/// the cache is dropped wholesale on memory pressure
+/// (`memory_pressure.dart`).
+const int kTileCacheMaxBytes = 16 * 1024 * 1024;
 
 /// Serves vector tiles from a local `.mbtiles` file over a localhost
 /// HTTP loopback so MapLibre Native (which silently fails to render
@@ -35,7 +45,7 @@ class LocalTileServer {
   String? _activePath;
   int _tileRequestCount = 0;
   String _lastTileStatus = '—';
-  final _TileCache _tileCache = _TileCache(maxBytes: 50 * 1024 * 1024);
+  final TileCache _tileCache = TileCache(maxBytes: kTileCacheMaxBytes);
 
   /// Returns the bound port, or `null` if the server isn't running.
   int? get port => _server?.port;
@@ -49,6 +59,15 @@ class LocalTileServer {
   /// Last tile-request status, e.g. "z=13 x=4011 y=2702 → 200 (78B)" or
   /// "404" or "503: db closed".
   String get lastTileStatus => _lastTileStatus;
+
+  /// Drops every cached tile blob; the server keeps running and the
+  /// next request for each tile re-reads it from SQLite. Called on
+  /// memory pressure and on `stop`.
+  void clearTileCache() => _tileCache.clear();
+
+  /// The live cache, for tests that need to seed / inspect it.
+  @visibleForTesting
+  TileCache get tileCache => _tileCache;
 
   /// Starts (or restarts) the server pointing at [mbtilesPath]. Idempotent
   /// when called with the same path. Returns the bound port.
@@ -240,9 +259,9 @@ class LocalTileServer {
     final cacheKey = '$z/$x/$y';
     // Hot-path cache: panning back over an already-fetched viewport
     // is the common case; reading from the SQLite + gunzip path
-    // every time is wasted work. ~50 MB LRU cap holds 1000+ typical
-    // vector tiles; eviction is invisible to the user since misses
-    // just fall through to the original SQL query.
+    // every time is wasted work. `kTileCacheMaxBytes` LRU cap;
+    // eviction is invisible to the user since misses just fall
+    // through to the original SQL query.
     final cached = _tileCache.get(cacheKey);
     if (cached != null) {
       _writeTileResponse(req, cached);
@@ -335,13 +354,22 @@ class LocalTileServer {
 /// `LinkedHashMap` IS the LRU order — `get` re-inserts to bump
 /// recency, `put` evicts oldest entries until the byte budget is
 /// satisfied. Reset on `LocalTileServer.stop` so a region swap never
-/// serves stale tiles from a previous file.
-class _TileCache {
-  _TileCache({required this.maxBytes});
+/// serves stale tiles from a previous file, and on memory pressure.
+///
+/// Public (not `_TileCache`) purely so the eviction maths is unit-
+/// testable; only [LocalTileServer] constructs one in production.
+class TileCache {
+  TileCache({required this.maxBytes});
 
   final int maxBytes;
   final LinkedHashMap<String, List<int>> _entries = LinkedHashMap();
   int _bytes = 0;
+
+  /// Bytes currently held.
+  int get bytes => _bytes;
+
+  /// Entries currently held.
+  int get length => _entries.length;
 
   List<int>? get(String key) {
     final value = _entries.remove(key);
