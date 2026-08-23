@@ -277,19 +277,23 @@ void _callbackDispatcher() {
       );
       return true;
     } on KeyMissingException {
-      // The DB key was not readable in THIS isolate. Trail's key escrow
-      // (`lib/services/key_escrow.dart`) is the UI-isolate's fallback and
-      // cannot help here: its MethodChannel handler is registered by
-      // `MainActivity`, and the WorkManager isolate has no activity — the
-      // call raises `MissingPluginException` and `KeystoreKey.read`
-      // reports "no key". Skip the tick rather than mint anything; the
-      // next UI launch takes the escrow path and re-persists the key,
-      // after which the worker reads it normally again.
+      // No key in Trail's store AND none in the escrow — and since
+      // 0.17.9 that means something, because both channels are registered
+      // in this isolate too (`packages/trail_secure_store` is a real
+      // `FlutterPlugin`, and `FlutterEngine(Context)` runs
+      // `GeneratedPluginRegistrant` for the background engine
+      // `workmanager_android`'s `BackgroundWorker` builds). Before that
+      // the escrow handler lived in `MainActivity`, so this branch mostly
+      // meant "wrong isolate" rather than "no key".
+      //
+      // Skip the tick rather than mint anything: `getOrCreate` refuses to
+      // create a key while `trail.db` exists, and the recovery screen the
+      // UI shows is the only place that can put this right.
       debugPrint('[scheduler] Skipping ping — DB key unavailable.');
       await WorkerRunLog.record(
         task: taskName,
         outcome: 'key_unavailable',
-        note: 'key unavailable — escrow fallback is UI-isolate only',
+        note: 'key unavailable in Trail store and escrow',
       );
       return true;
     } catch (e) {

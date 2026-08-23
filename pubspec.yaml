@@ -1,7 +1,7 @@
 name: trail
 description: "Trail — personal-safety GPS logger. Offline, encrypted, 4h-cadence background pings."
 publish_to: 'none'
-version: 0.17.8+110
+version: 0.17.9+111
 
 environment:
   sdk: ^3.5.0
@@ -34,6 +34,14 @@ dependencies:
 
   # Storage (encrypted)
   sqflite_sqlcipher: ^3.1.0+1
+  # Trail's own Keystore-backed secret store + DB-key escrow (0.17.9). A
+  # local plugin package, so `GeneratedPluginRegistrant` registers both
+  # channels in EVERY engine — WorkManager's background one included.
+  trail_secure_store:
+    path: packages/trail_secure_store
+  # Kept for this release ONLY so `MigratingSecureStore` can make one
+  # best-effort read of the old store per secret. Nothing else in the app
+  # touches it; the next release drops the dependency.
   flutter_secure_storage: ^11.0.0
   path: ^1.9.0
   path_provider: ^2.1.4

@@ -1,43 +1,85 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:trail_secure_store/trail_secure_store.dart';
 
-/// The one `FlutterSecureStorage` handle for the UI isolate.
+import 'secure_store_migration.dart';
+
+/// Every key Trail keeps in secure storage. **Add new secrets here** — a
+/// key that is not listed is never migrated off the legacy store and
+/// never verified by `SecureStorageMigration`.
 ///
-/// Every Keystore-backed value in the app — the onboarding flag, the
-/// panic-mode prefs, the GitHub PAT, the coverage token, and the
-/// SQLCipher key (`lib/db/keystore_key.dart`) — reads and writes through
-/// this single instance, so the `AndroidOptions` live in exactly one
-/// place and no call site can drift to a differently-configured store (a
-/// mismatch in namespace / prefix / cipher would silently read a
-/// *different* preferences file and report every key as missing).
+/// Lives in this file rather than next to `SecureStorageMigration` so the
+/// wiring below has no import cycle to reason about.
+const trailSecretKeys = <String>[
+  // The SQLCipher key for trail.db. Losing this loses the log.
+  'trail_db_passphrase_v1',
+  'trail_onboarded_v1',
+  'trail_panic_duration_v1',
+  'trail_panic_auto_send_v1',
+  'trail_github_pat_v1',
+  'trail_coverage_token_v1',
+];
+
+/// The one handle every Trail secret goes through.
 ///
-/// ## Why each option is pinned (release B: `flutter_secure_storage` 11.x)
+/// ## Why it is no longer `flutter_secure_storage` (0.17.9)
 ///
-/// Release A (0.17.3+105) ran on 10.3.1 with `encryptedSharedPreferences:
-/// true` and rewrote every secret through the new ciphers, recording
-/// `SecureStorageMigration.markerKey` on success. 11.x **removed** the
-/// parameter — and with it every branch that could read 9.2.4's
-/// Jetpack-`EncryptedSharedPreferences` data — so the marker is now the
-/// gate: `computeStartupKeyState` refuses to mint a key on a device that
-/// never ran A (`StartupKeyState.notMigrated` → `/recover`).
+/// On 2026-08-23 that plugin became unusable on the commander's phone:
+/// Android Keystore refused its RSA-OAEP unwrap with
+/// `KeyStoreException UNKNOWN_ERROR (-1000)`, persistently, on every
+/// launch. Worse than the outage is the plugin's own repair attempt —
+/// `createRSAKeysIfNeeded` regenerates the RSA pair whenever the Keystore
+/// reports the alias missing, which would orphan every value it has ever
+/// written, the SQLCipher key for the user's whole location log included.
 ///
-/// * `migrateOnAlgorithmChange: true` — still present in 11.x. It is what
-///   re-encrypts data in place if the saved algorithm markers ever differ
-///   from the pair below; with it off, 11.x's `handleKeyMismatch` has
-///   only `resetOnError` (i.e. `deleteAll()`) left to offer.
+/// So the secrets moved to a store Trail owns end to end: an AES-256-GCM
+/// key in AndroidKeyStore, encrypting values directly with no wrapping
+/// layer, in a prefs file nothing else writes
+/// (`packages/trail_secure_store/`). That is the same primitive
+/// `KeyEscrow` has been running on the same device, on the same Keystore,
+/// without a single failure since 0.17.7 — the evidence that the problem
+/// was the plugin's RSA path and not the hardware.
+///
+/// Being a real plugin rather than a `MainActivity` channel also fixes
+/// the escrow's old blind spot: `GeneratedPluginRegistrant` runs for
+/// every `FlutterEngine`, so the WorkManager background isolate can read
+/// the DB key too (gotcha 38's `key_unavailable` skip).
+///
+/// [MigratingSecureStore] wraps it and consults [legacySecureStorage]
+/// exactly once per key, best-effort, until every known secret has been
+/// tried; after that the marker is on disk and the old plugin is never
+/// called again.
+final MigratingSecureStore secureStorage = MigratingSecureStore(
+  store: const TrailSecureStore(),
+  legacy: legacySecureStorage,
+  knownKeys: trailSecretKeys,
+);
+
+/// The old `flutter_secure_storage` handle. **Migration only.**
+///
+/// Kept for one release so [secureStorage] can lift the existing secrets
+/// across on the first launch of 0.17.9. Nothing else may call it: every
+/// call is another run of the plugin's `createRSAKeysIfNeeded`, and on a
+/// device where the unwrap is failing that is the call that can destroy
+/// the store for good (gotcha 38). `SecureStorageRescue` still reads the
+/// plugin's *files* natively, which is a different, read-only path.
+///
+/// ## Why each option is pinned (`flutter_secure_storage` 11.x)
+///
+/// * `migrateOnAlgorithmChange: true` — re-encrypts in place if the saved
+///   algorithm markers ever differ from the pair below; with it off,
+///   11.x's `handleKeyMismatch` has only `resetOnError` (i.e.
+///   `deleteAll()`) left to offer.
 /// * `resetOnError: false` — 10.x flipped this default to `true` and 11.x
-///   keeps that default, which means *any* decrypt error wipes the whole
-///   secure store. That store holds the only copy of the SQLCipher key
-///   for the user's encrypted location log. Never enable it.
+///   keeps it, which means *any* decrypt error wipes the whole store.
+///   Even now that the store is only a migration source, that would
+///   destroy secrets we have not copied yet. Never enable it.
 /// * `keyCipherAlgorithm` / `storageCipherAlgorithm` — RSA-OAEP + AES-GCM,
-///   the only pair 11.x still ships, and the pair release A wrote with.
+///   the only pair 11.x ships and the pair release A (0.17.3) wrote with.
 ///   The 11.x defaults match, but defaults are not a contract.
-/// * `storageNamespace` / `preferencesKeyPrefix` — deliberately unset. Both
-///   would move the prefs file / key names away from what 9.2.4 and 10.3.1
-///   used and orphan every installed user.
-///
-/// Honest note on cost: sharing the Dart instance is hygiene, not a
-/// measured win — the native side re-runs its setup per call.
-const FlutterSecureStorage secureStorage = FlutterSecureStorage(
+/// * `storageNamespace` / `preferencesKeyPrefix` — deliberately unset.
+///   Both would move the prefs file / key names away from what 9.2.4 and
+///   10.3.1 used and orphan every installed user.
+const FlutterSecureStorage legacySecureStorage = FlutterSecureStorage(
   aOptions: AndroidOptions(
     migrateOnAlgorithmChange: true,
     resetOnError: false,

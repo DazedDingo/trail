@@ -21,7 +21,11 @@ class MainActivity : FlutterFragmentActivity() {
         PanicMethodChannel.register(flutterEngine, applicationContext)
         SchedulerMethodChannel.register(flutterEngine, applicationContext)
         EncryptedZipPlugin.register(flutterEngine)
-        KeyEscrowPlugin.register(flutterEngine, applicationContext)
+        // `trail/secure_store` and `trail/key_escrow` are NOT registered
+        // here: they live in the `trail_secure_store` plugin package, so
+        // `GeneratedPluginRegistrant` (invoked by super.configureFlutterEngine
+        // above, and by every other FlutterEngine the app creates —
+        // WorkManager's included) installs them everywhere.
         SecureStorageRescuePlugin.register(flutterEngine, applicationContext)
         // Must register *before* the first MapLibreMap mounts so the
         // logger override catches early style/source errors. Cheap to

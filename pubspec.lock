@@ -1221,6 +1221,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.9.4"
+  trail_secure_store:
+    dependency: "direct main"
+    description:
+      path: "packages/trail_secure_store"
+      relative: true
+    source: path
+    version: "1.0.0"
   typed_data:
     dependency: transitive
     description:

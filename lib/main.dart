@@ -13,6 +13,7 @@ import 'services/failed_photo_uris.dart';
 import 'services/memory_pressure.dart';
 import 'services/notification_service.dart';
 import 'services/scheduler/workmanager_scheduler.dart';
+import 'services/secure_storage.dart';
 import 'services/secure_storage_migration.dart';
 import 'services/startup_gates.dart';
 
@@ -181,14 +182,18 @@ void _runTrailApp(StartupOutcome outcome) {
 ///     the background worker built up (Phase C). Reads the network
 ///     label, then no-ops unless the feature is on, a server is
 ///     configured, and the connection is one the user allowed.
-///   - [SecureStorageMigration.verifyAndRewrite] re-writes every Trail
-///     secret through the current ciphers and refreshes the marker the
-///     startup gate requires. Still worth running on 11.x: it is the only
-///     thing that keeps the marker in step with what is actually readable,
-///     and it cannot throw out here — each key is tried in its own
-///     try/catch and a failure only withholds the marker. Safe to run
-///     alongside the DB open: it only reads and re-writes secure storage,
-///     and writing an identical value back is a no-op for every consumer.
+///   - The secure-storage pass, in two steps that must stay in this
+///     order. [MigratingSecureStore.migrateLegacySecrets] lifts any
+///     secret still sitting in `flutter_secure_storage` into Trail's own
+///     store — once per key, best-effort, and then it records
+///     `trail_secure_store_migrated_v1` and the old plugin is never
+///     called again (0.17.9). Only then does
+///     [SecureStorageMigration.verifyAndRewrite] read every key back and
+///     write it down again, which is what keeps the startup gate's marker
+///     in step with what is actually readable. Neither can throw out
+///     here — each key is tried in its own try/catch and a failure only
+///     withholds the marker. Safe to run alongside the DB open: writing
+///     an identical value back is a no-op for every consumer.
 ///   - [MapLibreMap.preWarm] builds the native renderer's shared
 ///     resources (maplibre_gl 0.27.0) before any map is mounted, so the
 ///     first `/map` visit doesn't pay for it. Fire-and-forget by design;
@@ -201,10 +206,10 @@ void _initDeferredServices() {
   unawaited(_guarded('map detail', _coverageResume.run));
   unawaited(_guarded('notifications', NotificationService.initialize));
   unawaited(_guarded('failed-photo denylist', FailedPhotoUris.preload));
-  unawaited(_guarded(
-    'secure storage migration',
-    () => SecureStorageMigration.verifyAndRewrite(),
-  ));
+  unawaited(_guarded('secure storage migration', () async {
+    await secureStorage.migrateLegacySecrets();
+    await SecureStorageMigration.verifyAndRewrite();
+  }));
   unawaited(MapLibreMap.preWarm().catchError((Object e) {
     debugPrint('preWarm failed: $e');
   }));

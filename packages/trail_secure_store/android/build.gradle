@@ -1,0 +1,66 @@
+group 'com.dazeddingo.trail_secure_store'
+version '1.0'
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.library'
+
+// AGP 9+ ships built-in Kotlin support and enables it by default; older
+// versions need the Kotlin Gradle Plugin applied explicitly. Trail's app
+// sets `android.builtInKotlin=false` (the Flutter 3.47 template does, so
+// unmigrated plugins keep working), which puts us back on the legacy KGP
+// path. Same shape as workmanager_android 0.10.8's module — and idempotent
+// with the app's root `build.gradle.kts`, which also applies KGP to every
+// `com.android.library` subproject (see its comment on AGP 9 + Flutter's
+// regex-based detection).
+def agpMajor = com.android.Version.ANDROID_GRADLE_PLUGIN_VERSION.tokenize('.')[0] as int
+def builtInKotlin = agpMajor >= 9 &&
+    project.findProperty('android.builtInKotlin')?.toString() != 'false'
+if (!builtInKotlin) {
+    apply plugin: 'kotlin-android'
+}
+
+android {
+    if (project.android.hasProperty("namespace")) {
+        namespace 'com.dazeddingo.trail_secure_store'
+    }
+
+    compileSdk 35
+
+    sourceSets {
+        main.java.srcDirs += 'src/main/kotlin'
+    }
+
+    defaultConfig {
+        // Matches the app's floor. Everything here is API 23 or older
+        // (KeyGenParameterSpec, AES/GCM, SharedPreferences).
+        minSdkVersion 24
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    if (agpMajor < 9) {
+        kotlinOptions {
+            tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+                kotlinOptions.jvmTarget = "17"
+            }
+        }
+    }
+}
+
+// AGP 9 removed `kotlinOptions` from the `android {}` block.
+if (agpMajor >= 9) {
+    kotlin {
+        compilerOptions {
+            jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+        }
+    }
+}

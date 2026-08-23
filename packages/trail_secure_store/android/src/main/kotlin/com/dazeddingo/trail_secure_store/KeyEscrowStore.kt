@@ -1,11 +1,9 @@
-package com.dazeddingo.trail
+package com.dazeddingo.trail_secure_store
 
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
-import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.plugin.common.MethodChannel
 import java.security.KeyStore
 import java.security.MessageDigest
 import javax.crypto.Cipher
@@ -16,6 +14,14 @@ import javax.crypto.spec.GCMParameterSpec
 /**
  * Trail-owned escrow for the SQLCipher DB key (`trail/key_escrow`).
  *
+ * Moved here from `com.dazeddingo.trail.KeyEscrowPlugin` in 0.17.9 —
+ * **byte-for-byte the same alias, prefs file and blob format**, because
+ * the escrow on the commander's phone is a live copy of the only key that
+ * opens their log. The only thing that changed is who registers the
+ * channel: it used to be `MainActivity` (UI isolate only), it is now
+ * [TrailSecureStorePlugin], which `GeneratedPluginRegistrant` installs in
+ * every engine including WorkManager's background one.
+ *
  * ## Why this exists
  *
  * Until 0.17.6 the key lived in exactly one place: `flutter_secure_storage`.
@@ -23,15 +29,13 @@ import javax.crypto.spec.GCMParameterSpec
  * user's entire encrypted log — the 0.17.5 incident (a secure-storage read
  * that threw/hung after the 10 → 11 upgrade) made that concrete. This is a
  * second, independent copy under our own control: our own Keystore alias,
- * our own SharedPreferences file, our own format. No third-party migration
- * can silently invalidate it, because nothing but this file writes it.
+ * our own SharedPreferences file, our own format.
  *
  * ## Format
  *
  * `base64(iv) + ':' + base64(ciphertext) + ':' + 'v1'` in the DEDICATED
- * prefs file [PREFS] (never the plugin's own file — a store that another
- * library owns is the thing we are hedging against) under [KEY_BLOB], plus
- * [KEY_STORED_AT] (epoch ms) and [KEY_SHA256].
+ * prefs file [PREFS] under [KEY_BLOB], plus [KEY_STORED_AT] (epoch ms) and
+ * [KEY_SHA256].
  *
  * The SHA-256 of the *plaintext* key is deliberate: the DB open path needs
  * to answer "is the escrowed copy already this key?" on every open, and a
@@ -66,23 +70,17 @@ import javax.crypto.spec.GCMParameterSpec
  * own comments). Nothing added there. The blob would be useless off-device
  * anyway — the wrapping key never leaves the Keystore.
  *
- * ## Threading
- *
- * Handlers run synchronously on the platform thread. Every operation is a
- * prefs read plus one AES-GCM block over ~43 bytes — sub-millisecond, and
- * none of it can ever wait on the user (that is what
- * `setUserAuthenticationRequired(false)` buys).
- *
  * ## Errors
  *
  * Any throw becomes `result.error(<exception class simple name>, message,
- * null)`. Nothing is ever deleted on a failed [load]: an `AEADBadTagException`
- * or `KeyPermanentlyInvalidatedException` is exactly when the Dart side
- * wants to *report*, not to clean up. Only the explicit `clear` call
- * removes anything.
+ * null)`. Nothing is ever deleted on a failed [load]: an
+ * `AEADBadTagException` or `KeyPermanentlyInvalidatedException` is exactly
+ * when the Dart side wants to *report*, not to clean up. Only the explicit
+ * `clear` call removes anything.
  */
-object KeyEscrowPlugin {
-    private const val CHANNEL = "trail/key_escrow"
+internal object KeyEscrowStore {
+    const val CHANNEL = "trail/key_escrow"
+
     private const val ALIAS = "com.dazeddingo.trail.db_key_escrow.v1"
 
     /** Dedicated prefs file — deliberately not shared with any plugin. */
@@ -97,41 +95,12 @@ object KeyEscrowPlugin {
     private const val FORMAT_VERSION = "v1"
     private const val B64 = Base64.NO_WRAP
 
-    fun register(engine: FlutterEngine, context: Context) {
-        val app = context.applicationContext
-        val channel = MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL)
-        channel.setMethodCallHandler { call, result ->
-            try {
-                when (call.method) {
-                    "store" -> {
-                        val bytes = call.argument<ByteArray>("bytes")
-                            ?: throw IllegalArgumentException("bytes is required")
-                        store(app, bytes)
-                        result.success(null)
-                    }
-                    "load" -> result.success(load(app))
-                    "clear" -> {
-                        clear(app)
-                        result.success(null)
-                    }
-                    "status" -> result.success(status(app))
-                    else -> result.notImplemented()
-                }
-            } catch (t: Throwable) {
-                // The class name is the payload: the Dart side branches on
-                // "the blob is corrupt" vs "the alias was invalidated" vs
-                // "this isolate has no handler at all".
-                result.error(t.javaClass.simpleName, t.message, null)
-            }
-        }
-    }
-
     /**
      * Idempotent: storing the same bytes twice leaves the blob and
      * [KEY_STORED_AT] untouched, so "present since" keeps meaning the
      * first time this key was escrowed rather than the last app open.
      */
-    private fun store(context: Context, bytes: ByteArray) {
+    fun store(context: Context, bytes: ByteArray) {
         if (bytes.isEmpty()) {
             throw IllegalArgumentException("refusing to escrow an empty key")
         }
@@ -161,7 +130,7 @@ object KeyEscrowPlugin {
     }
 
     /** `null` when nothing is stored or the alias is gone; throws otherwise. */
-    private fun load(context: Context): ByteArray? {
+    fun load(context: Context): ByteArray? {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val blob = prefs.getString(KEY_BLOB, null) ?: return null
         val key = existingSecretKey() ?: return null
@@ -177,7 +146,7 @@ object KeyEscrowPlugin {
     }
 
     /** The only path that deletes anything. Blob first, then the alias. */
-    private fun clear(context: Context) {
+    fun clear(context: Context) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .remove(KEY_BLOB)
@@ -188,7 +157,7 @@ object KeyEscrowPlugin {
         if (ks.containsAlias(ALIAS)) ks.deleteEntry(ALIAS)
     }
 
-    private fun status(context: Context): Map<String, Any?> {
+    fun status(context: Context): Map<String, Any?> {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val blob = prefs.getString(KEY_BLOB, null)
         val storedAt = prefs.getLong(KEY_STORED_AT, 0L)

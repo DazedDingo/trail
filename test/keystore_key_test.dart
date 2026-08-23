@@ -7,15 +7,19 @@ import 'package:path/path.dart' as p;
 import 'package:trail/db/keystore_key.dart';
 import 'package:trail/services/key_escrow.dart';
 import 'package:trail/services/passphrase_service.dart';
+import 'package:trail/services/secure_storage.dart';
 
-/// [KeystoreKey] calls `flutter_secure_storage` which internally talks to a
-/// native MethodChannel. There's no DI seam in the class (the secure-storage
-/// instance is a `static final`), so we fake the platform channel directly.
+/// [KeystoreKey] reads through the shared `secureStorage`, which since
+/// 0.17.9 is Trail's own `TrailSecureStore` (channel `trail/secure_store`,
+/// `packages/trail_secure_store`) behind the one-shot legacy migration.
+/// There is no DI seam in the class, so we fake the platform channel
+/// directly — the same trick as before, one channel name along.
 ///
-/// The channel name + method names are lifted from
-/// `flutter_secure_storage_platform_interface`. Keep them in sync if the
-/// package is ever bumped.
-const _channelName = 'plugins.it_nomads.com/flutter_secure_storage';
+/// The legacy `flutter_secure_storage` channel is deliberately left
+/// unmocked: in production it is consulted at most once per key, and a
+/// `MissingPluginException` from it is exactly the "could not look"
+/// outcome the wrapper swallows.
+const _channelName = 'trail/secure_store';
 const _storageKey = 'trail_db_passphrase_v1';
 
 class _FakeSecureStorage {
@@ -82,6 +86,7 @@ void main() {
 
   setUp(() async {
     fake = _FakeSecureStorage();
+    secureStorage.resetForTest();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
       const MethodChannel(_channelName),

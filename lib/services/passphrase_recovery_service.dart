@@ -1,7 +1,6 @@
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -13,6 +12,7 @@ import 'passphrase_service.dart';
 import 'secure_storage.dart';
 import 'secure_storage_migration.dart';
 import 'secure_storage_rescue.dart';
+import 'secure_store_migration.dart';
 import 'startup_gates.dart';
 
 /// SharedPreferences key holding the last [SecureStorageRescueSummary].
@@ -234,18 +234,18 @@ class PassphraseRecoveryService {
   PassphraseRecoveryService({
     Future<void> Function(String key)? verifyKey,
     SecureStorageRescue? rescue,
-    FlutterSecureStorage storage = secureStorage,
+    MigratingSecureStore? storage,
     SharedPreferences? prefs,
     DateTime Function()? now,
   })  : _verifyKey = verifyKey ?? TrailDatabase.openWithKeyForVerification,
         _rescue = rescue ?? SecureStorageRescue.instance,
-        _storage = storage,
+        _storage = storage ?? secureStorage,
         _prefs = prefs,
         _now = now ?? DateTime.now;
 
   final Future<void> Function(String key) _verifyKey;
   final SecureStorageRescue _rescue;
-  final FlutterSecureStorage _storage;
+  final MigratingSecureStore _storage;
   final SharedPreferences? _prefs;
   final DateTime Function() _now;
 
@@ -347,18 +347,24 @@ class PassphraseRecoveryService {
 
   /// Is `flutter_secure_storage` itself the broken part?
   ///
-  /// Two independent tells, neither of which writes anything:
+  /// Three independent tells, none of which writes anything:
   ///
-  ///   * [KeystoreKey.lastSecureStorageError] — startup's own read threw
-  ///     this launch (the live incident's signature), or
+  ///   * [MigratingSecureStore.lastLegacyError] — the one-shot migration
+  ///     read of the legacy store failed this launch. Since 0.17.9 that
+  ///     is the *primary* signal: the app's own reads now go to Trail's
+  ///     store, so a broken `flutter_secure_storage` no longer announces
+  ///     itself by taking startup down;
+  ///   * [KeystoreKey.lastSecureStorageError] — the DB-key read or write
+  ///     threw this launch, or
   ///   * [SecureStorageRescue.status] reports a wrapped AES key sitting in
-  ///     the store with no Keystore alias left to unwrap it, which is the
-  ///     same dead end one launch earlier.
+  ///     the legacy store with no Keystore alias left to unwrap it, which
+  ///     is the same dead end one launch earlier.
   ///
   /// A `status` the channel cannot answer (no handler, off-device) reads
   /// as "not broken" — the healthy path then just calls
   /// [KeystoreKey.persist] and finds out for itself.
   Future<bool> _pluginLooksBroken() async {
+    if (_storage.lastLegacyError != null) return true;
     if (KeystoreKey.lastSecureStorageError != null) return true;
     final status = await _rescue.status();
     return status.wrappedKeyPresent && !status.aliasExists;

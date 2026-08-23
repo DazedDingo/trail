@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.17.9+111] — 2026-08-23
+
+### Changed
+- **Trail now keeps all of its secrets in its own store** (the database key, onboarding flag, panic settings, GitHub token, map-detail server token) — an AES-GCM key in the Android Keystore that Trail owns, in a file Trail owns, readable by the background worker too. The third-party secure-storage plugin is kept for one release only, to copy across whatever it can still read; on a phone where it is broken, its values are simply skipped (the database key comes from the escrow, onboarding from the existence of your log). Why: on 2026-08-23 Android refused the one Keystore operation that plugin depends on, and the plugin's own fallback can silently regenerate its key. Trail's store never regenerates a key while entries exist, and never wipes.
+
 ## [0.17.8+110] — 2026-08-23
 
 ### Fixed

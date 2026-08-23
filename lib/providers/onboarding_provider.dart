@@ -42,25 +42,56 @@ class OnboardingGate {
   ///   2. an existing encrypted `trail.db` — a log on disk is proof that
   ///      onboarding happened, whatever the Keystore says.
   ///
-  /// Only when neither can vouch for it does a thrown read read as
+  /// **A legacy read that failed counts as a throw (0.17.9.)** On the
+  /// upgrade launch the flag is not in Trail's own store yet, so the
+  /// answer comes from `flutter_secure_storage` — and
+  /// `MigratingSecureStore` swallows that plugin's failures rather than
+  /// letting every call site handle them. Without this branch a phone
+  /// whose legacy store refuses to open would read `null`, i.e. "first
+  /// run", and be walked back through onboarding: the exact outcome the
+  /// fallbacks exist to prevent. [MigratingSecureStore.legacyFailedFor]
+  /// is what separates "no such secret" from "I could not look".
+  ///
+  /// Anything the fallbacks answer `true` is written back into the new
+  /// store (and the mirror) — otherwise the next launch, with the
+  /// migration marker now set and the legacy store off-limits, would ask
+  /// the same question and get a plain `null`.
+  ///
+  /// Only when neither fallback can vouch for it does the read come back
   /// `false`. Nothing is lost by that: the key-state gate
-  /// (`computeStartupKeyState`) still rethrows the same plugin failure,
-  /// so a genuinely broken store still reaches `/startup-failed` — just
-  /// with the accurate stage on it.
+  /// (`computeStartupKeyState`) still rethrows the same failure, so a
+  /// genuinely broken store still reaches `/startup-failed` — just with
+  /// the accurate stage on it.
   static Future<bool> isComplete() async {
     try {
-      return await secureStorage.read(key: storageKey) == '1';
+      if (await secureStorage.read(key: storageKey) == '1') return true;
+      if (!secureStorage.legacyFailedFor(storageKey)) return false;
+      debugPrint('[OnboardingGate] legacy store unreadable: '
+          '${secureStorage.lastLegacyError}');
     } catch (e) {
       debugPrint('[OnboardingGate] secure storage read failed: $e');
-      if (await _readMirror()) return true;
-      try {
-        if (await KeystoreKey.dbFileExists()) return true;
-      } catch (e2) {
-        // "I could not look" — the key-state gate owns that diagnosis.
-        debugPrint('[OnboardingGate] db probe failed too: $e2');
-      }
-      return false;
     }
+    if (await _readMirror()) return _healAndAccept();
+    try {
+      if (await KeystoreKey.dbFileExists()) return await _healAndAccept();
+    } catch (e2) {
+      // "I could not look" — the key-state gate owns that diagnosis.
+      debugPrint('[OnboardingGate] db probe failed too: $e2');
+    }
+    return false;
+  }
+
+  /// A fallback said yes. Record that in both durable homes so the next
+  /// launch never has to ask a fallback again, then answer `true`.
+  /// Best-effort throughout: this runs inside a startup gate.
+  static Future<bool> _healAndAccept() async {
+    try {
+      await secureStorage.write(key: storageKey, value: '1');
+    } catch (e) {
+      debugPrint('[OnboardingGate] re-seed failed: $e');
+    }
+    await writeMirror();
+    return true;
   }
 
   /// Writes both copies. Each is best-effort and independent: onboarding

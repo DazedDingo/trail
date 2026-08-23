@@ -45,8 +45,9 @@ class KeyPersistException implements Exception {
 ///
 /// **Keystore (legacy / default).** No salt file. First call generates a
 /// cryptographically-strong random 32-byte key, base64url-encodes it, and
-/// stores it in Android Keystore via [FlutterSecureStorage]. Subsequent
-/// launches read it back. The user never sees the key.
+/// stores it in Trail's own Keystore-backed store (`secureStorage`,
+/// `packages/trail_secure_store`). Subsequent launches read it back. The
+/// user never sees the key.
 ///
 /// **Passphrase (backup-enabled).** Salt file present. The derived key
 /// (PBKDF2 of the user's passphrase + the salt) is persisted here the same
@@ -75,7 +76,7 @@ class KeystoreKey {
   /// marker (`SecureStorageMigration.markVerified`) for an install that
   /// is already on the new format.
   static const storageKey = 'trail_db_passphrase_v1';
-  static const _secure = secureStorage;
+  static final _secure = secureStorage;
 
   /// Injectable "does the encrypted DB already exist?" probe. Production
   /// answers by stat'ing the file [TrailDatabase.open] opens; tests swap
@@ -140,11 +141,12 @@ class KeystoreKey {
   /// Two-source read since 0.17.6. Secure storage is still the primary,
   /// but neither of its failure modes is trusted on its own:
   ///
-  /// * a **throw** (the 0.17.5 incident — a read that threw/hung after
-  ///   the `flutter_secure_storage` 10 → 11 upgrade), and
-  /// * a **silent null**, which is what 11.x returns for data written by
-  ///   9.x and what a lost Jetpack master key returns for everything
-  ///   (gotcha 37) — indistinguishable from "no key was ever stored".
+  /// * a **throw** (an entry that will not decrypt; before 0.17.9, the
+  ///   `flutter_secure_storage` 10 → 11 unwrap failure), and
+  /// * a **silent null**, which on the upgrade launch is also what a
+  ///   legacy store that refused to be read looks like
+  ///   (`MigratingSecureStore` records that separately) —
+  ///   indistinguishable on its own from "no key was ever stored".
   ///
   /// Both fall through to [KeyEscrow], Trail's own copy. A hit is
   /// best-effort written back into secure storage so the next launch is

@@ -10,6 +10,7 @@ import 'package:trail/providers/backup_provider.dart';
 import 'package:trail/services/passphrase_service.dart';
 import 'package:trail/services/secure_storage_migration.dart';
 import 'package:trail/services/startup_gates.dart';
+import 'package:trail/services/secure_storage.dart';
 
 /// `computeStartupKeyState` is the one probe `main()` runs before the
 /// first frame; the router turns its answer into `/lock`, `/unlock` or
@@ -17,8 +18,9 @@ import 'package:trail/services/startup_gates.dart';
 /// worse — lets `KeystoreKey.getOrCreate` mint a key over a log it can
 /// no longer read.
 ///
-/// Same MethodChannel fake as `keystore_key_test.dart`.
-const _channelName = 'plugins.it_nomads.com/flutter_secure_storage';
+/// Same MethodChannel fake as `keystore_key_test.dart` — Trail's own
+/// store since 0.17.9.
+const _channelName = 'trail/secure_store';
 const _storageKey = 'trail_db_passphrase_v1';
 
 class _FakeSecureStorage {
@@ -68,6 +70,7 @@ void main() {
 
   setUp(() async {
     fake = _FakeSecureStorage();
+    secureStorage.resetForTest();
     SharedPreferences.setMockInitialValues({});
     prefs = await SharedPreferences.getInstance();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger

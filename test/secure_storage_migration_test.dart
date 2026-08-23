@@ -6,14 +6,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:trail/services/secure_storage.dart';
 import 'package:trail/services/secure_storage_migration.dart';
 
-/// `SecureStorageMigration` is the evidence trail for the
-/// `flutter_secure_storage` 9.2.4 → 10.3.1 cipher migration: it re-writes
-/// every secret through the new cipher and only then records the marker
-/// that release B (11.x) will refuse to upgrade without.
+/// `SecureStorageMigration` is the evidence trail behind the startup
+/// gate's marker: it reads every secret back, writes it straight down
+/// again, and only on a clean sweep records the pref that
+/// `computeStartupKeyState` refuses to proceed without.
 ///
-/// Same MethodChannel fake as `keystore_key_test.dart` — there is no DI
-/// seam under the plugin, so we fake the platform channel directly.
-const _channelName = 'plugins.it_nomads.com/flutter_secure_storage';
+/// Same MethodChannel fake as `keystore_key_test.dart` — Trail's own
+/// store (`trail/secure_store`) since 0.17.9.
+const _channelName = 'trail/secure_store';
 
 class _FakeSecureStorage {
   final Map<String, String> _store = {};
@@ -76,6 +76,7 @@ void main() {
 
   setUp(() async {
     fake = _FakeSecureStorage();
+    secureStorage.resetForTest();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
       const MethodChannel(_channelName),

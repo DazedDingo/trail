@@ -1,9 +1,9 @@
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart' show debugPrint;
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:trail_secure_store/trail_secure_store.dart';
 
 import 'secure_storage.dart';
 
@@ -60,17 +60,17 @@ class MigrationMarker {
 /// `date_labels.dart` without pulling its pin-specific patterns in.
 final DateFormat _markerDateFormat = DateFormat('d MMM yyyy');
 
-/// Verifies that every Trail secret survived the `flutter_secure_storage`
-/// 9.2.4 → 10.3.1 cipher migration, and re-writes each one so it is
-/// stored under the new (11.x-compatible) ciphers.
+/// Reads every Trail secret back, writes it straight down again, and
+/// records the marker that proves the round trip worked.
 ///
-/// Why a rewrite and not just a read: 10.x migrates lazily and its
-/// fallback branches can leave a value readable through the *old* Jetpack
-/// store while never re-encrypting it. Writing the identical value back
-/// forces the value through `storageCipher.encrypt` on the current
-/// algorithm pair, so the bytes on disk are ones release B (11.x, which
-/// dropped every legacy cipher) can still read. Writing an identical
-/// value is safe: worst case it is a no-op.
+/// Written for the `flutter_secure_storage` 9.2.4 → 10.3.1 → 11.x cipher
+/// migration (gotcha 37), and still the right pass now that the secrets
+/// live in Trail's own store (0.17.9): it runs after
+/// `MigratingSecureStore.migrateLegacySecrets`, so what it verifies is
+/// that everything that came across is readable *from the new store* —
+/// and the marker it keeps up to date is what `computeStartupKeyState`
+/// gates `notMigrated` on. Writing an identical value back is safe:
+/// worst case it is a no-op.
 ///
 /// Runs post-first-frame from `main()` and **never throws** — a failure
 /// here must not take down an app that has already painted. The absence
@@ -82,22 +82,18 @@ class SecureStorageMigration {
   static const markerKey = 'trail_secure_storage_v10_ok_v1';
 
   /// Every key Trail keeps in secure storage. **Add new secrets here** —
-  /// a key that is not listed is never verified and never counted.
-  static const knownKeys = <String>[
-    // The SQLCipher key for trail.db. Losing this loses the log.
-    'trail_db_passphrase_v1',
-    'trail_onboarded_v1',
-    'trail_panic_duration_v1',
-    'trail_panic_auto_send_v1',
-    'trail_github_pat_v1',
-    'trail_coverage_token_v1',
-  ];
+  /// a key that is not listed is never verified, never counted, and never
+  /// migrated off the legacy store. The list itself lives in
+  /// `secure_storage.dart` (the migrating wrapper needs it too, and one
+  /// canonical copy beats an import cycle).
+  static const knownKeys = trailSecretKeys;
 
   /// Read → write-back → re-read every key in [knownKeys].
   static Future<MigrationReport> verifyAndRewrite({
-    FlutterSecureStorage storage = secureStorage,
+    TrailSecureStore? storage,
     SharedPreferences? prefs,
   }) async {
+    final secrets = storage ?? secureStorage;
     final present = <String>[];
     final rewritten = <String>[];
     final mismatched = <String>[];
@@ -105,11 +101,11 @@ class SecureStorageMigration {
 
     for (final key in knownKeys) {
       try {
-        final before = await storage.read(key: key);
+        final before = await secrets.read(key: key);
         if (before == null) continue;
         present.add(key);
-        await storage.write(key: key, value: before);
-        final after = await storage.read(key: key);
+        await secrets.write(key: key, value: before);
+        final after = await secrets.read(key: key);
         if (after == before) {
           rewritten.add(key);
         } else {

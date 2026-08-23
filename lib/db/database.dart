@@ -183,9 +183,10 @@ class TrailDatabase {
   /// Deliberately **not awaited**: the escrow is a hedge, not a
   /// dependency, and the open path is on the startup critical path
   /// (gotcha 30 — two awaits, everything else post-frame).
-  /// [KeyEscrow.mirrorAfterOpen] swallows every failure, including the
-  /// `MissingPluginException` the WorkManager isolate raises because our
-  /// channel handler lives in `MainActivity` and that isolate has none.
+  /// [KeyEscrow.mirrorAfterOpen] swallows every failure. Since 0.17.9 the
+  /// escrow channel is registered in the WorkManager isolate too (the
+  /// handler moved into the `trail_secure_store` plugin package), so a
+  /// background open mirrors the key like any other.
   @visibleForTesting
   static void escrowKeyAfterOpen(String passphrase) {
     unawaited(KeyEscrow.instance.mirrorAfterOpen(passphrase));

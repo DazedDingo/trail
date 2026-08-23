@@ -1,11 +1,17 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:trail/services/secure_storage.dart';
+import 'package:trail/services/secure_storage_migration.dart';
+import 'package:trail/services/secure_store_migration.dart';
+import 'package:trail_secure_store/trail_secure_store.dart';
 
-/// The shared handle must carry the exact options every former
-/// per-class instance used; a drift in namespace / prefix / cipher would
-/// read a different preferences file and report every stored value
-/// (onboarding flag, panic prefs, PAT, **the SQLCipher key**) as missing.
+/// [legacySecureStorage] is the `flutter_secure_storage` handle Trail
+/// keeps for exactly one job in 0.17.9: the one-shot migration read that
+/// lifts each secret into Trail's own store. It must still carry the
+/// exact options the app has always used — a drift in namespace / prefix
+/// / cipher would read a *different* preferences file and report every
+/// stored value (onboarding flag, panic prefs, PAT, **the SQLCipher
+/// key**) as missing, i.e. silently migrate nothing.
 ///
 /// Every option is pinned here rather than trusted to the package's
 /// defaults, because `flutter_secure_storage` 10.0.0 changed several of
@@ -15,7 +21,21 @@ void main() {
   late Map<String, String> options;
 
   setUp(() {
-    options = secureStorage.aOptions.toMap();
+    options = legacySecureStorage.aOptions.toMap();
+  });
+
+  test('the app-wide handle is Trail\'s own store, not the plugin', () {
+    // The whole point of 0.17.9: nothing but the migration may reach
+    // `flutter_secure_storage`, because every call to it is another run
+    // of `createRSAKeysIfNeeded` (gotcha 38/39).
+    expect(secureStorage, isA<MigratingSecureStore>());
+    expect(secureStorage, isA<TrailSecureStore>());
+  });
+
+  test('knownKeys is the one canonical secret list', () {
+    expect(trailSecretKeys, SecureStorageMigration.knownKeys);
+    expect(trailSecretKeys.first, 'trail_db_passphrase_v1',
+        reason: 'the SQLCipher key migrates before anything else');
   });
 
   test('the deprecated Jetpack flag is gone — release B is on 11.x', () {
