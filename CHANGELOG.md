@@ -4,6 +4,16 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.16.2+101] — 2026-08-23
+
+### Fixed
+- **Every pin date now shows the year.** The time-slider readout, the playback labels, the pin detail sheet, the delete confirmation, Home's recent tiles and picture mode all read "11 Aug 2024, 14:05" instead of "Aug 11, 14:05" — with years of imported history, "11 Aug" stopped meaning anything.
+- **Playback above 16× actually goes faster.** The tick rate had already hit its 33 ms floor at ~10×, so the higher labels changed nothing; faster speeds now advance several fixes per tick, and 64× and 256× were added for scrubbing a whole year in seconds.
+
+### Added
+- **Imported pins are hollow** on the map so you can tell your own fixes from Google Timeline history at a glance (head and previous-pin emphasis unchanged); the map help text says so.
+- **Provenance on imported pins.** The detail sheet shows where an imported point came from — "Imported from Google Timeline · visit · Home", "… · activity · Walking, 1.2 km", "… · raw GPS" — and hides the sensor rows imports never have.
+
 ## [0.16.1+100] — 2026-08-22
 
 ### Added

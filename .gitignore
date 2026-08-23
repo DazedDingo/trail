@@ -6,7 +6,10 @@
 .pub-cache/
 .pub/
 build/
-pubspec.lock
+# pubspec.lock IS committed since 0.17.0: CI (a newer Flutter stable) floated
+# pmtiles 2.2.0 and workmanager_platform_interface and broke a build + a
+# test fake on 2026-08-22. `flutter pub get` still re-resolves if the SDK
+# forces it; `flutter pub upgrade` is the deliberate way to move versions.
 
 # IDE
 .idea/

@@ -11,13 +11,14 @@ Ping _fix({
   required DateTime ts,
   double? lat = 51.5,
   double? lon = -0.12,
+  PingSource source = PingSource.scheduled,
 }) =>
     Ping(
       id: id,
       timestampUtc: ts,
       lat: lat,
       lon: lon,
-      source: PingSource.scheduled,
+      source: source,
     );
 
 DateTime _t(int hour, [int minute = 0]) => DateTime.utc(2026, 8, 1, hour, minute);
@@ -90,6 +91,32 @@ void main() {
       expect(identical(snap.byId[-2], b), isTrue);
     });
 
+    test('stamps the source flag: 0 for live rows, 1 for imports', () {
+      final snap = buildPinSnapshot([
+        _fix(id: 1, ts: _t(0)),
+        _fix(id: 2, ts: _t(1), source: PingSource.imported),
+        _fix(id: 3, ts: _t(2), source: PingSource.panic),
+        _fix(id: 4, ts: _t(3), source: PingSource.boot),
+      ]);
+      expect(snap.cols.srcs, [
+        kPinSourceLive,
+        kPinSourceImported,
+        kPinSourceLive,
+        kPinSourceLive,
+      ]);
+    });
+
+    test('srcs stays aligned with ids after coordinate-less rows drop out',
+        () {
+      final snap = buildPinSnapshot([
+        _fix(id: 1, ts: _t(0), lat: null, source: PingSource.imported),
+        _fix(id: 2, ts: _t(1), source: PingSource.imported),
+        _fix(id: 3, ts: _t(2)),
+      ]);
+      expect(snap.cols.ids, [2, 3]);
+      expect(snap.cols.srcs, [kPinSourceImported, kPinSourceLive]);
+    });
+
     test('preserves DAO order (time-ascending) and keeps duplicates', () {
       final dupe = _t(5);
       final snap = buildPinSnapshot([
@@ -110,7 +137,7 @@ void main() {
           {'type': 'FeatureCollection', 'features': []});
     });
 
-    test('one Feature per fix with [lon, lat] order and id/ts/i properties',
+    test('one Feature per fix with [lon, lat] order and id/ts/i/s properties',
         () {
       final c = PinColumns(
         ids: Int64List.fromList([7, 8]),
@@ -131,21 +158,70 @@ void main() {
         'type': 'Point',
         'coordinates': [-0.125, 51.5],
       });
-      expect(f0['properties'], {'id': 7, 'ts': 1000, 'i': 0});
+      expect(f0['properties'], {'id': 7, 'ts': 1000, 'i': 0, 's': 0});
 
       final f1 = features[1] as Map<String, dynamic>;
       expect(f1['id'], 8);
       expect((f1['geometry'] as Map)['coordinates'], [1.0, 52.25]);
-      expect(f1['properties'], {'id': 8, 'ts': 2000, 'i': 1});
+      expect(f1['properties'], {'id': 8, 'ts': 2000, 'i': 1, 's': 0});
     });
 
-    test('properties carry nothing but id, ts and i', () {
+    test('properties carry nothing but id, ts, i and s', () {
       final json = buildPinsGeoJson(_cols([1, 2, 3]));
       final features = (jsonDecode(json) as Map)['features'] as List;
       for (final f in features) {
         expect(((f as Map)['properties'] as Map).keys,
-            unorderedEquals(['id', 'ts', 'i']));
+            unorderedEquals(['id', 'ts', 'i', 's']));
       }
+    });
+
+    test('s defaults to live when the columns do not spell it out', () {
+      final features =
+          (jsonDecode(buildPinsGeoJson(_cols([1, 2]))) as Map)['features']
+              as List;
+      for (final f in features) {
+        expect(((f as Map)['properties'] as Map)['s'], kPinSourceLive);
+      }
+    });
+
+    test('s is 1 for imported fixes and 0 for live ones, per feature', () {
+      final snap = buildPinSnapshot([
+        _fix(id: 1, ts: _t(0)),
+        _fix(id: 2, ts: _t(1), source: PingSource.imported),
+        _fix(id: 3, ts: _t(2), source: PingSource.imported),
+        _fix(id: 4, ts: _t(3), source: PingSource.panic),
+      ]);
+      final features =
+          (jsonDecode(buildPinsGeoJson(snap.cols)) as Map)['features'] as List;
+      expect(
+        features.map((f) => ((f as Map)['properties'] as Map)['s']),
+        [0, 1, 1, 0],
+      );
+      // Small ints, so they survive maplibre-android's float32 narrowing
+      // (unlike a ts literal) and the ['==', ['get','s'], 1] branch in
+      // buildPinStyle matches exactly.
+      expect(
+        features.map((f) => ((f as Map)['properties'] as Map)['s']),
+        everyElement(isA<int>()),
+      );
+    });
+
+    test('the id and i properties are untouched by the s addition', () {
+      final snap = buildPinSnapshot([
+        _fix(id: 41, ts: _t(0), source: PingSource.imported),
+        _fix(id: 42, ts: _t(1)),
+      ]);
+      final features =
+          (jsonDecode(buildPinsGeoJson(snap.cols)) as Map)['features'] as List;
+      expect(features.map((f) => (f as Map)['id']), [41, 42]);
+      expect(
+        features.map((f) => ((f as Map)['properties'] as Map)['id']),
+        [41, 42],
+      );
+      expect(
+        features.map((f) => ((f as Map)['properties'] as Map)['i']),
+        [0, 1],
+      );
     });
 
     test('round-trips through jsonDecode for realistic values', () {
@@ -214,6 +290,19 @@ void main() {
         [21, 11],
         [22, 12],
       ]);
+    });
+
+    test('segment properties are unchanged by the pins s flag', () {
+      final snap = buildPinSnapshot([
+        _fix(id: 1, ts: _t(0), source: PingSource.imported),
+        _fix(id: 2, ts: _t(1), source: PingSource.imported),
+      ]);
+      final features =
+          (jsonDecode(buildSegmentsGeoJson(snap.cols)) as Map)['features']
+              as List;
+      expect(features.length, 1);
+      expect(((features.first as Map)['properties'] as Map).keys,
+          unorderedEquals(['ts', 'i']));
     });
 
     test('each segment carries the ts AND the index i of its LATER endpoint',
@@ -440,13 +529,21 @@ void main() {
     PinStyle style(int n) =>
         buildPinStyle(visibleN: n, baseHex: base, dimHex: dim);
 
-    test('n = 0 ⇒ plain literals, constant colour', () {
+    final isImported = [
+      '==',
+      ['get', 's'],
+      1,
+    ];
+
+    test('n = 0 ⇒ plain literals, constant colour, imported branch only', () {
       final s = style(0);
       expect(s.radius, kPinRadius);
-      expect(s.strokeWidth, 0.5);
       expect(s.strokeOpacity, 0.6);
-      expect(s.strokeColor, '#FFFFFF');
       expect(s.color, base);
+      expect(s.opacity, ['case', isImported, kImportedPinOpacity, 1]);
+      expect(s.strokeWidth,
+          ['case', isImported, kImportedPinStrokeWidth, 0.5]);
+      expect(s.strokeColor, ['case', isImported, base, kLivePinStrokeHex]);
     });
 
     test('n = 1 ⇒ head at i == 0, constant colour (ramp needs n-1 > 0, '
@@ -459,8 +556,20 @@ void main() {
       ];
       expect(s.radius, ['case', isHead, kHeadPinRadius, kPinRadius]);
       expect(s.color, ['case', isHead, kHeadPinHex, base]);
-      expect(s.strokeWidth, ['case', isHead, 1, 0.5]);
       expect(s.strokeOpacity, ['case', isHead, 0.95, 0.6]);
+      // Head first, imported second — an imported head pin stays solid.
+      expect(s.opacity,
+          ['case', isHead, 1, isImported, kImportedPinOpacity, 1]);
+      expect(s.strokeWidth,
+          ['case', isHead, 1, isImported, kImportedPinStrokeWidth, 0.5]);
+      expect(s.strokeColor, [
+        'case',
+        isHead,
+        kLivePinStrokeHex,
+        isImported,
+        base,
+        kLivePinStrokeHex,
+      ]);
     });
 
     test('n = 2 ⇒ head i == 1, previous i == 0, ramp over 0..1', () {
@@ -476,8 +585,27 @@ void main() {
         0,
       ];
       expect(s.radius, ['case', isHead, kHeadPinRadius, kPinRadius]);
-      expect(s.strokeWidth, ['case', isHead, 1, isPrev, 1, 0.5]);
       expect(s.strokeOpacity, ['case', isHead, 0.95, isPrev, 0.95, 0.6]);
+      expect(s.strokeWidth, [
+        'case',
+        isHead,
+        1,
+        isPrev,
+        1,
+        isImported,
+        kImportedPinStrokeWidth,
+        0.5,
+      ]);
+      expect(s.opacity, [
+        'case',
+        isHead,
+        1,
+        isPrev,
+        1,
+        isImported,
+        kImportedPinOpacity,
+        1,
+      ]);
       expect(s.color, [
         'case',
         isHead,
@@ -522,10 +650,63 @@ void main() {
       expect((s.radius as List)[1], color[1]);
     });
 
-    test('never keys on ts or id — only i is float32-safe at any N', () {
+    test('imported pins are hollow: faint fill, ramp-coloured ring', () {
+      final s = style(7200);
+      final opacity = s.opacity as List;
+      // ['case', isHead, 1, isPrev, 1, isImported, 0.15, 1]
+      expect(opacity[5], isImported);
+      expect(opacity[6], kImportedPinOpacity);
+      expect(opacity.last, 1);
+      final strokeWidth = s.strokeWidth as List;
+      expect(strokeWidth[5], isImported);
+      expect(strokeWidth[6], kImportedPinStrokeWidth);
+      expect(strokeWidth.last, 0.5);
+      final strokeColor = s.strokeColor as List;
+      expect(strokeColor[5], isImported);
+      // The ring is the same teal ramp the fill would have used.
+      expect(strokeColor[6], (s.color as List)[5]);
+      expect(strokeColor.last, kLivePinStrokeHex);
+    });
+
+    test('the s branch keys on the property, never on i', () {
       for (final n in [0, 1, 2, 7200]) {
         final s = style(n);
-        for (final e in [s.radius, s.color, s.strokeWidth, s.strokeOpacity]) {
+        for (final e in [s.opacity, s.strokeWidth, s.strokeColor]) {
+          expect(jsonEncode(e), contains('["get","s"]'), reason: 'n=$n');
+        }
+      }
+    });
+
+    test('head and previous emphasis is identical for live and imported '
+        'pins — an imported head pin must not fade to 15%', () {
+      for (final n in [1, 2, 7200]) {
+        final s = style(n);
+        final opacity = s.opacity as List;
+        // The head (and, from n = 2, the previous) branch is evaluated
+        // before the imported one, so the cursor pin is always solid.
+        expect(opacity[1], (s.radius as List)[1],
+            reason: 'n=$n: head condition must come first');
+        expect(opacity[2], 1, reason: 'n=$n: head opacity');
+        final strokeColor = s.strokeColor as List;
+        expect(strokeColor[2], kLivePinStrokeHex, reason: 'n=$n');
+        final importedIdx = opacity.indexOf(kImportedPinOpacity);
+        expect(importedIdx, greaterThan(2),
+            reason: 'n=$n: imported branch must come after head/prev');
+      }
+    });
+
+    test('never keys on ts or id — only i and s are float32-safe at any N',
+        () {
+      for (final n in [0, 1, 2, 7200]) {
+        final s = style(n);
+        for (final e in [
+          s.radius,
+          s.color,
+          s.opacity,
+          s.strokeWidth,
+          s.strokeOpacity,
+          s.strokeColor,
+        ]) {
           final json = jsonEncode(e);
           expect(json, isNot(contains('"ts"')), reason: 'n=$n: $json');
           expect(json, isNot(contains('"id"')), reason: 'n=$n: $json');
@@ -535,7 +716,14 @@ void main() {
 
     test('every expression jsonEncodes (what setLayerProperties ships)', () {
       final s = style(52600);
-      for (final e in [s.radius, s.color, s.strokeWidth, s.strokeOpacity]) {
+      for (final e in [
+        s.radius,
+        s.color,
+        s.opacity,
+        s.strokeWidth,
+        s.strokeOpacity,
+        s.strokeColor,
+      ]) {
         expect(() => jsonEncode(e), returnsNormally);
       }
     });
@@ -568,8 +756,10 @@ void main() {
           ...literals(windowFilter(n)),
           ...literals(s.radius),
           ...literals(s.color),
+          ...literals(s.opacity),
           ...literals(s.strokeWidth),
           ...literals(s.strokeOpacity),
+          ...literals(s.strokeColor),
         ];
         expect(all, isNotEmpty);
         for (final v in all) {
@@ -587,6 +777,16 @@ void main() {
           }
         }
       }
+    });
+
+    test('the source flag literals (0 / 1) are float32-exact', () {
+      expect(exact(kPinSourceLive), isTrue);
+      expect(exact(kPinSourceImported), isTrue);
+      expect((narrowed(kImportedPinOpacity) - kImportedPinOpacity).abs(),
+          lessThan(1e-6));
+      expect(
+          (narrowed(kImportedPinStrokeWidth) - kImportedPinStrokeWidth).abs(),
+          lessThan(1e-6));
     });
 
     test('an epoch-ms literal is NOT float32-exact — why the window is an '

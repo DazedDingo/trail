@@ -58,12 +58,24 @@ class PinColumns {
   final Float64List lats;
   final Float64List lons;
 
-  const PinColumns({
+  /// Provenance flag per fix: [kPinSourceLive] for a fix this phone
+  /// recorded, [kPinSourceImported] for a Google Timeline row
+  /// (`PingSource.imported`, gotcha 34). Emitted as the `s` property so
+  /// [buildPinStyle] can draw imports hollow. A byte per fix rather than
+  /// a bool list — it crosses the isolate boundary in the same cheap
+  /// buffer copy as the rest of the columns.
+  ///
+  /// Optional at construction (defaults to all-live) so the many
+  /// coordinate-only fixtures don't have to spell it out.
+  final Uint8List srcs;
+
+  PinColumns({
     required this.ids,
     required this.tsMs,
     required this.lats,
     required this.lons,
-  });
+    Uint8List? srcs,
+  }) : srcs = srcs ?? Uint8List(ids.length);
 
   static final PinColumns empty = PinColumns(
     ids: Int64List(0),
@@ -120,6 +132,18 @@ bool hasUsableCoords(Ping p) {
 /// chrono list. Negative so it can never collide with a real rowid.
 int placeholderPinId(int index) => -(index + 1);
 
+/// `s` property value for a fix this phone recorded.
+const int kPinSourceLive = 0;
+
+/// `s` property value for a fix that came out of a Google Timeline
+/// import. 0 and 1 are float32-exact, so `['==', ['get','s'], 1]`
+/// survives maplibre-android's narrowing (see the library doc).
+const int kPinSourceImported = 1;
+
+/// The `s` flag for one ping.
+int pinSourceFlag(Ping p) =>
+    p.source == PingSource.imported ? kPinSourceImported : kPinSourceLive;
+
 /// Builds the per-data snapshot from the raw provider list. O(n), no
 /// intermediate `where().toList()` copies beyond the single `chrono`
 /// list itself. Null/non-finite-coordinate rows are excluded here —
@@ -137,6 +161,7 @@ PinSnapshot buildPinSnapshot(List<Ping> pings) {
   final tsMs = Int64List(n);
   final lats = Float64List(n);
   final lons = Float64List(n);
+  final srcs = Uint8List(n);
   final byId = <int, Ping>{};
 
   var i = 0;
@@ -148,26 +173,34 @@ PinSnapshot buildPinSnapshot(List<Ping> pings) {
     tsMs[i] = p.timestampUtc.millisecondsSinceEpoch;
     lats[i] = p.lat!;
     lons[i] = p.lon!;
+    srcs[i] = pinSourceFlag(p);
     byId[id] = p;
     i++;
   }
   return PinSnapshot(
     chrono: chrono,
-    cols: PinColumns(ids: ids, tsMs: tsMs, lats: lats, lons: lons),
+    cols: PinColumns(
+      ids: ids,
+      tsMs: tsMs,
+      lats: lats,
+      lons: lons,
+      srcs: srcs,
+    ),
     byId: byId,
   );
 }
 
 /// One Point Feature per fix, shaped exactly like
-/// `{"type":"Feature","id":ID,"geometry":{"type":"Point","coordinates":[LON,LAT]},"properties":{"id":ID,"ts":TS_MS,"i":INDEX}}`
-/// where `INDEX` is the fix's 0-based chronological position.
+/// `{"type":"Feature","id":ID,"geometry":{"type":"Point","coordinates":[LON,LAT]},"properties":{"id":ID,"ts":TS_MS,"i":INDEX,"s":SRC}}`
+/// where `INDEX` is the fix's 0-based chronological position and `SRC`
+/// is [kPinSourceLive] / [kPinSourceImported].
 ///
 /// Nothing else goes in `properties` — the annotation API used to stamp
 /// seven style keys per point, which is most of why its payload was so
 /// fat. The window filter and head/previous/age styling are data-driven
 /// expressions on `i` (float32-exact, see the library doc); `id` serves
-/// the tap path; `ts` is informational. Designed to run under
-/// `Isolate.run`.
+/// the tap path; `s` drives the hollow imported-pin branch; `ts` is
+/// informational. Designed to run under `Isolate.run`.
 String buildPinsGeoJson(PinColumns c) {
   final n = c.length;
   if (n == 0) return emptyFeatureCollection;
@@ -190,6 +223,8 @@ String buildPinsGeoJson(PinColumns c) {
       ..write(c.tsMs[i])
       ..write(',"i":')
       ..write(i)
+      ..write(',"s":')
+      ..write(c.srcs[i])
       ..write('}}');
   }
   sb.write(']}');
@@ -329,19 +364,32 @@ DateTime effectiveSliderMax(DateTime? selected, List<Ping> chrono) {
 /// The ramp is only emitted when `n-1 > 0` — MapLibre's `interpolate`
 /// requires strictly ascending stops, and a single visible pin would
 /// collapse both stops onto 0.
+///
+/// Imported pins (`s == 1`) are drawn **hollow**: a nearly transparent
+/// fill inside a ring in the same ramp colour, so a year of Google
+/// Timeline history reads as background texture instead of drowning the
+/// handful of fixes this phone actually recorded. The head and previous
+/// emphasis is checked FIRST in every expression, so the cursor pin is
+/// solid red and its predecessor solid amber whether the row was
+/// imported or live — otherwise playing back an imported trail would
+/// leave the head pin at 15% opacity and effectively invisible.
 class PinStyle {
   final Object radius;
   final Object color;
+
+  /// `circleOpacity` — 1 everywhere except the hollow imported body.
+  final Object opacity;
   final Object strokeWidth;
   final Object strokeOpacity;
-  final String strokeColor;
+  final Object strokeColor;
 
   const PinStyle({
     required this.radius,
     required this.color,
     required this.strokeWidth,
     required this.strokeOpacity,
-    this.strokeColor = '#FFFFFF',
+    this.opacity = 1,
+    this.strokeColor = kLivePinStrokeHex,
   });
 }
 
@@ -362,6 +410,18 @@ const String kHeadPinHex = '#FF1744';
 /// Amber for the previous fix, matching the HUD's second row.
 const String kPrevPinHex = '#FFB300';
 
+/// Thin white halo every live pin carries so a dot stays legible over a
+/// pale tile.
+const String kLivePinStrokeHex = '#FFFFFF';
+
+/// Fill opacity of an imported pin's body — enough to keep the dot
+/// tappable, faint enough that the ring reads as the shape.
+const double kImportedPinOpacity = 0.15;
+
+/// Ring width of an imported pin. Wider than the live halo (0.5)
+/// because for a hollow pin the ring *is* the pin.
+const double kImportedPinStrokeWidth = 1.5;
+
 PinStyle buildPinStyle({
   required int visibleN,
   required String baseHex,
@@ -379,12 +439,20 @@ PinStyle buildPinStyle({
           baseHex,
         ]
       : baseHex;
+  // `s` is 0/1 — both float32-exact, unlike a ts literal.
+  final isImported = [
+    '==',
+    ['get', 's'],
+    kPinSourceImported,
+  ];
   if (visibleN < 1) {
     return PinStyle(
       radius: kPinRadius,
       color: base,
-      strokeWidth: 0.5,
+      opacity: ['case', isImported, kImportedPinOpacity, 1],
+      strokeWidth: ['case', isImported, kImportedPinStrokeWidth, 0.5],
       strokeOpacity: 0.6,
+      strokeColor: ['case', isImported, base, kLivePinStrokeHex],
     );
   }
   final isHead = [
@@ -396,8 +464,24 @@ PinStyle buildPinStyle({
     return PinStyle(
       radius: ['case', isHead, kHeadPinRadius, kPinRadius],
       color: ['case', isHead, kHeadPinHex, base],
-      strokeWidth: ['case', isHead, 1, 0.5],
+      opacity: ['case', isHead, 1, isImported, kImportedPinOpacity, 1],
+      strokeWidth: [
+        'case',
+        isHead,
+        1,
+        isImported,
+        kImportedPinStrokeWidth,
+        0.5,
+      ],
       strokeOpacity: ['case', isHead, 0.95, 0.6],
+      strokeColor: [
+        'case',
+        isHead,
+        kLivePinStrokeHex,
+        isImported,
+        base,
+        kLivePinStrokeHex,
+      ],
     );
   }
   final isPrev = [
@@ -408,8 +492,37 @@ PinStyle buildPinStyle({
   return PinStyle(
     radius: ['case', isHead, kHeadPinRadius, kPinRadius],
     color: ['case', isHead, kHeadPinHex, isPrev, kPrevPinHex, base],
-    strokeWidth: ['case', isHead, 1, isPrev, 1, 0.5],
+    opacity: [
+      'case',
+      isHead,
+      1,
+      isPrev,
+      1,
+      isImported,
+      kImportedPinOpacity,
+      1,
+    ],
+    strokeWidth: [
+      'case',
+      isHead,
+      1,
+      isPrev,
+      1,
+      isImported,
+      kImportedPinStrokeWidth,
+      0.5,
+    ],
     strokeOpacity: ['case', isHead, 0.95, isPrev, 0.95, 0.6],
+    strokeColor: [
+      'case',
+      isHead,
+      kLivePinStrokeHex,
+      isPrev,
+      kLivePinStrokeHex,
+      isImported,
+      base,
+      kLivePinStrokeHex,
+    ],
   );
 }
 

@@ -6,7 +6,6 @@ import 'dart:math' show Point;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:intl/intl.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../db/database.dart';
@@ -16,6 +15,8 @@ import '../providers/map_settings_provider.dart';
 import '../providers/mbtiles_provider.dart';
 import '../providers/pings_provider.dart';
 import '../providers/tile_server_provider.dart';
+import '../services/date_labels.dart';
+import '../services/import/import_provenance.dart';
 import '../services/map/pin_geojson.dart';
 import '../services/mbtiles_service.dart';
 import '../services/tiles/tile_schema.dart';
@@ -763,8 +764,9 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
         CircleLayerProperties(
           circleRadius: kPinRadius,
           circleColor: primaryHex,
+          circleOpacity: 1,
           circleStrokeWidth: 0.5,
-          circleStrokeColor: '#FFFFFF',
+          circleStrokeColor: kLivePinStrokeHex,
           circleStrokeOpacity: 0.6,
           visibility: _showHeatmap ? 'none' : 'visible',
         ),
@@ -921,6 +923,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
           CircleLayerProperties(
             circleRadius: style.radius,
             circleColor: style.color,
+            circleOpacity: style.opacity,
             circleStrokeWidth: style.strokeWidth,
             circleStrokeColor: style.strokeColor,
             circleStrokeOpacity: style.strokeOpacity,
@@ -1237,8 +1240,12 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
 
   void _startPlaybackTimer() {
     _playbackTimer?.cancel();
-    final interval = playbackInterval(_basePlaybackStep, _playbackSpeed);
-    _playbackTimer = Timer.periodic(interval, (_) {
+    // Above ~10× the interval is pinned at the 33 ms floor, so the
+    // remaining speed comes from advancing several fixes per tick — and
+    // the interval is then re-derived from the step count so the pace is
+    // exactly the nominal speed. Both numbers come from one plan.
+    final plan = playbackTickPlan(_basePlaybackStep, _playbackSpeed);
+    _playbackTimer = Timer.periodic(plan.interval, (_) {
       if (!mounted) return;
       // Read the snapshot per tick so a data change mid-playback (pin
       // delete, range swap) is picked up instead of stepping a dead list.
@@ -1248,7 +1255,9 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
         return;
       }
       final current = effectiveSliderMax(_sliderMax, chrono);
-      final next = _stepFrom(current, 1);
+      // `_stepFrom` clamps at the last index, so an overshoot on the
+      // final tick lands on the end rather than running off it.
+      final next = _stepFrom(current, plan.steps);
       if (next == null || !next.isAfter(current)) {
         _pausePlayback();
         return;
@@ -1320,12 +1329,28 @@ class _MapHostState extends State<_MapHost> {
 /// slowest. Order is **slow → fast** so the chip's label reads naturally
 /// as the user increases speed. Sub-1× speeds were added in 0.12.0 so
 /// the user can study high-frequency panic-burst pings frame by frame.
-/// The fastest entries are effectively capped by [playbackInterval]'s
-/// 33 ms floor (16× on the 350 ms base step ticks at ~30 Hz, not 45).
-const List<double> kPlaybackSpeeds = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
+///
+/// 64× and 256× were added once Google Timeline imports put years of
+/// fixes behind one slider — at 16× a 50 000-pin trail still takes half
+/// an hour to play. Above ~10× the timer interval is pinned to
+/// [playbackInterval]'s 33 ms floor, so the extra speed comes from
+/// [playbackStepsPerTick] advancing several indices per tick rather
+/// than from a faster timer (the earlier cycle changed the label and
+/// nothing else above 16× — gotcha 23).
+const List<double> kPlaybackSpeeds = [
+  0.25,
+  0.5,
+  1.0,
+  2.0,
+  4.0,
+  8.0,
+  16.0,
+  64.0,
+  256.0,
+];
 
 /// Returns the next speed in [kPlaybackSpeeds] after [current], wrapping
-/// past 16× back to 0.25×. Tolerates a [current] that isn't in the cycle
+/// past 256× back to 0.25×. Tolerates a [current] that isn't in the cycle
 /// (e.g. a persisted value from a future build with more speeds) by
 /// snapping to the closest cycle entry first.
 double nextPlaybackSpeed(double current) {
@@ -1354,11 +1379,86 @@ double nextPlaybackSpeed(double current) {
 /// speed=0 returning Infinity).
 ///
 /// Pure + exported so unit tests can hit it without a widget tree.
+/// Above the floor the *interval* stops shrinking, so anything faster
+/// buys its speed from [playbackStepsPerTick] instead.
 Duration playbackInterval(Duration baseStep, double speed) {
   if (speed <= 0) speed = 1.0; // defensive — speed=0 → infinity loop
   return Duration(
     milliseconds:
         (baseStep.inMilliseconds / speed).round().clamp(33, 4000),
+  );
+}
+
+/// How many fixes one playback tick should advance the cursor.
+///
+/// While `baseStep / speed` is still at or above the [floor] the timer
+/// alone carries the speed and this is always 1. Once it would go under
+/// [playbackInterval] clamps and the nominal speed stops meaning
+/// anything — 16×, 64× and 256× all ticked at 30 Hz and looked
+/// identical (gotcha 23). From there the tick advances
+/// `floor / rawInterval` indices instead, so 64× on the 350 ms base
+/// step moves 6 fixes every 33 ms ≈ 182 fixes/s, which is what 64×
+/// nominally means.
+///
+/// Never returns less than 1 (a tick that advances nothing would stall
+/// playback), and the caller clamps at the end of the list — the head
+/// emphasis and `visibleCount` maths are unaffected because the window
+/// is ordinal, not temporal.
+///
+/// Pure + exported so unit tests can hit it without a widget tree.
+int playbackStepsPerTick(
+  Duration baseStep,
+  double speed, {
+  Duration floor = const Duration(milliseconds: 33),
+}) {
+  if (speed <= 0) speed = 1.0; // defensive, same rule as playbackInterval
+  final baseMs = baseStep.inMilliseconds;
+  final floorMs = floor.inMilliseconds;
+  if (baseMs <= 0 || floorMs <= 0) return 1;
+  final rawMs = baseMs / speed;
+  if (rawMs >= floorMs) return 1;
+  final steps = (floorMs / rawMs).round();
+  return steps < 1 ? 1 : steps;
+}
+
+/// Timer period + cursor advance for one playback speed, as a pair —
+/// the two are only correct together.
+///
+/// [playbackStepsPerTick] alone gets the *rate* into the right area but
+/// not onto it: at 16× on a 350 ms base it advances 2 fixes on a tick
+/// clamped to 33 ms, which is 60.6 fixes/s where 16× means 45.7 — a
+/// third too fast. So once the step count is above 1 the interval is
+/// re-derived from it as `steps × baseStep / speed`, which puts the
+/// effective pace back on the nominal speed (16× → 2 fixes / 44 ms,
+/// 64× → 6 / 33 ms, 256× → 24 / 33 ms). Still bounded by the same
+/// `[floor, 4 s]` window as [playbackInterval] — a tick can't outrun a
+/// display frame however the arithmetic lands.
+///
+/// At `steps == 1` this is exactly [playbackInterval], so the whole
+/// sub-16× range is unchanged. A non-default [floor] moves the
+/// threshold and the lower bound of the derived interval; the 4 s
+/// ceiling and the single-step path keep [playbackInterval]'s own
+/// 33 ms bound.
+///
+/// Pure + exported so unit tests can hit it without a widget tree.
+({int steps, Duration interval}) playbackTickPlan(
+  Duration baseStep,
+  double speed, {
+  Duration floor = const Duration(milliseconds: 33),
+}) {
+  final steps = playbackStepsPerTick(baseStep, speed, floor: floor);
+  if (steps == 1) {
+    return (steps: 1, interval: playbackInterval(baseStep, speed));
+  }
+  // steps > 1 implies a positive base step, a positive floor and a
+  // positive speed (see playbackStepsPerTick), so the division is safe.
+  final floorMs = floor.inMilliseconds.clamp(1, 4000);
+  return (
+    steps: steps,
+    interval: Duration(
+      milliseconds:
+          (steps * baseStep.inMilliseconds / speed).round().clamp(floorMs, 4000),
+    ),
   );
 }
 
@@ -1581,7 +1681,6 @@ class _TimeSlider extends StatelessWidget {
         current.millisecondsSinceEpoch - first.millisecondsSinceEpoch;
     final disabled = totalMs <= 0;
     final scheme = Theme.of(context).colorScheme;
-    final fmt = DateFormat('MMM d, HH:mm');
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
       color: scheme.surfaceContainerHighest.withValues(alpha: 0.4),
@@ -1592,7 +1691,7 @@ class _TimeSlider extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  '${fmt.format(current.toLocal())} · '
+                  '${formatPinTime(current.toLocal())} · '
                   '$visibleCount / $totalCount fixes shown',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
@@ -1855,7 +1954,6 @@ class _PlaybackHud extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final fmt = DateFormat('MMM d HH:mm');
     return Material(
       color: Colors.black.withValues(alpha: 0.6),
       borderRadius: BorderRadius.circular(6),
@@ -1871,7 +1969,7 @@ class _PlaybackHud extends StatelessWidget {
                 _Dot(color: const Color(0xFFFF1744)),
                 const SizedBox(width: 5),
                 Text(
-                  fmt.format(current.timestampUtc.toLocal()),
+                  formatHudTime(current.timestampUtc.toLocal()),
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 11,
@@ -1888,7 +1986,7 @@ class _PlaybackHud extends StatelessWidget {
                   _Dot(color: const Color(0xFFFFB300)),
                   const SizedBox(width: 5),
                   Text(
-                    '${fmt.format(previous!.timestampUtc.toLocal())} · '
+                    '${formatHudTime(previous!.timestampUtc.toLocal())} · '
                     '${_humanGap(current.timestampUtc.difference(previous!.timestampUtc))}',
                     style: TextStyle(
                       color: Colors.white.withValues(alpha: 0.78),
@@ -1936,10 +2034,16 @@ class _PingDetailSheet extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final fmt = DateFormat('EEE MMM d, HH:mm:ss');
     final tsLocal = ping.timestampUtc.toLocal();
     final lat = ping.lat?.toStringAsFixed(5) ?? '—';
     final lon = ping.lon?.toStringAsFixed(5) ?? '—';
+    // Imported rows carry their Timeline provenance in `note` as a
+    // machine token (gotcha 35). Render the human form here and drop
+    // the raw Note row below — showing both would be the same fact
+    // twice, once unreadably.
+    final provenance = ping.source == PingSource.imported
+        ? describeImportNote(ping.note)
+        : null;
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       child: Column(
@@ -1947,7 +2051,7 @@ class _PingDetailSheet extends ConsumerWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            fmt.format(tsLocal),
+            formatPinTimeWithWeekday(tsLocal),
             style: Theme.of(context).textTheme.titleMedium,
           ),
           Text(
@@ -1956,6 +2060,13 @@ class _PingDetailSheet extends ConsumerWidget {
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
           ),
+          if (provenance != null)
+            Text(
+              provenance,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+            ),
           const SizedBox(height: 12),
           // Photos gallery — auto-fetched + user-attached. Hidden on
           // pings with no rowid (shouldn't happen for circle taps, but
@@ -1975,7 +2086,8 @@ class _PingDetailSheet extends ConsumerWidget {
             _row('Network', ping.networkState!),
           if (ping.cellId != null) _row('Cell', ping.cellId!),
           if (ping.wifiSsid != null) _row('Wi-Fi', ping.wifiSsid!),
-          if (ping.note != null) _row('Note', ping.note!),
+          if (ping.note != null && provenance == null)
+            _row('Note', ping.note!),
           if (ping.comment != null && ping.comment!.isNotEmpty)
             _row('Comment', ping.comment!),
           if (ping.id != null) ...[
@@ -2026,13 +2138,13 @@ class _DeletePingButtonState extends ConsumerState<_DeletePingButton> {
 
   Future<void> _confirmAndDelete() async {
     final ping = widget.ping;
-    final fmt = DateFormat('EEE MMM d, HH:mm:ss');
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Delete this pin?'),
         content: Text(
-          'Removes the ${fmt.format(ping.timestampUtc.toLocal())} ping + '
+          'Removes the '
+          '${formatPinTimeWithWeekday(ping.timestampUtc.toLocal())} ping + '
           'any attached photos. Cannot be undone — the only way to '
           '"redo" is to wait for the next scheduled fix.',
         ),

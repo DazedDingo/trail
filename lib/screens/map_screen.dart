@@ -44,8 +44,8 @@ class MapScreen extends ConsumerWidget {
                 title: 'Time slider + playback',
                 body:
                     'Drag the slider to scrub through history; the trail '
-                    'redraws live. Play / Pause auto-advances at 1× → 16× '
-                    'speeds. The HUD top-left shows the current and '
+                    'redraws live. Play / Pause auto-advances at 0.25× → '
+                    '256× speeds. The HUD top-left shows the current and '
                     'previous fix timestamps with the gap between them.',
               ),
               HelpSection(
@@ -53,7 +53,9 @@ class MapScreen extends ConsumerWidget {
                 title: 'Pin colours',
                 body:
                     'Red = current fix (slider tip). Amber = previous fix. '
-                    'Teal = earlier fixes, dimmer the older they are. The blue dot is your live '
+                    'Teal = earlier fixes, dimmer the older they are. '
+                    'Hollow pins were imported from Google Timeline. '
+                    'The blue dot is your live '
                     'location from Android — toggle it via the my-location '
                     'icon in the control row.',
               ),

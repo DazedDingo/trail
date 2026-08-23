@@ -4,12 +4,12 @@ import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/intl.dart';
 
 import '../db/database.dart';
 import '../db/ping_photo_dao.dart';
 import '../models/ping.dart';
 import '../models/ping_photo.dart';
+import '../services/date_labels.dart';
 import '../services/failed_photo_uris.dart';
 import '../services/online_photo_service.dart';
 import '../services/photo_uri.dart';
@@ -262,7 +262,7 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
     }
   }
 
-  static String _fmtTime(DateTime t) => DateFormat('MMM d, HH:mm').format(t);
+  static String _fmtTime(DateTime t) => formatPinTime(t);
 }
 
 class _SlidePage extends StatelessWidget {
@@ -278,7 +278,6 @@ class _SlidePage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final fmt = DateFormat('MMM d, yyyy · HH:mm');
     final uri = renderableUriFor(photo);
     return Stack(
       fit: StackFit.expand,
@@ -300,7 +299,8 @@ class _SlidePage extends StatelessWidget {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(
-                        fmt.format(ping.timestampUtc.toLocal()),
+                        formatPhotoCaptionTime(
+                            ping.timestampUtc.toLocal()),
                         style: const TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.w600,

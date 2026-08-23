@@ -268,7 +268,9 @@ class _HeartbeatLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final tsFmt = DateFormat.MMMd().add_Hms();
+    // yMMMd, not MMMd: Timeline imports put years of history behind the
+    // same UI, and "11 Aug" alone doesn't say which one.
+    final tsFmt = DateFormat.yMMMd().add_Hms();
     final ts = ping == null
         ? null
         : tsFmt.format(ping!.timestampUtc.toLocal());
