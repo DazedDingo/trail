@@ -5,6 +5,7 @@ import '../db/import_dao.dart';
 import '../db/ping_dao.dart';
 import '../services/import/timeline_import_service.dart';
 import 'pings_provider.dart';
+import 'places_provider.dart';
 
 /// The Google Maps Timeline import service, bound to the shared DB
 /// handle (same rule as every other DAO consumer — one SQLCipher
@@ -54,5 +55,7 @@ void invalidateAfterImport(WidgetRef ref) {
     // shown (that is the case this feature exists for); an undo may
     // have taken the only fix in one away again.
     ..invalidate(pingYearsProvider)
-    ..invalidate(importHistoryProvider);
+    ..invalidate(importHistoryProvider)
+    // The Places screen is built entirely from imported visit rows.
+    ..invalidate(placesProvider);
 }

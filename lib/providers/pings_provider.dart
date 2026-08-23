@@ -6,6 +6,7 @@ import '../db/ping_dao.dart';
 import '../models/ping.dart';
 import '../services/geocoding_service.dart';
 import '../services/stats/date_range_presets.dart';
+import 'stats_settings_provider.dart';
 
 export '../services/geocoding_service.dart' show GeocodeKey, geocodeKey;
 
@@ -45,7 +46,9 @@ final historyPingsProvider = FutureProvider<List<Ping>>((ref) async {
 /// (`topPlacesProvider`, daily and hourly counts), trip detection
 /// (`tripsProvider`), the Trips screen. Excludes Timeline imports
 /// (schema v5, `PingDao.allPings`'s default) — imports are map-only per
-/// the commander's decision; stats/trips stay real Trail data.
+/// the commander's decision; stats/trips stay real Trail data UNLESS the
+/// user opts in via [statsIncludeImportsProvider] (default off), in
+/// which case this includes them too.
 ///
 /// The map does NOT read this. Since 0.14.1 it goes through
 /// [pingsByRangeProvider], which is a *different* query (fixes only, a
@@ -57,7 +60,8 @@ final historyPingsProvider = FutureProvider<List<Ping>>((ref) async {
 /// providers, invalidated only on writes.
 final allPingsProvider = FutureProvider<List<Ping>>((ref) async {
   final db = await TrailDatabase.shared();
-  return PingDao(db).allPings();
+  final includeImported = await ref.watch(statsIncludeImportsProvider.future);
+  return PingDao(db).allPings(includeImported: includeImported);
 });
 
 /// UTC instants for the SQL `BETWEEN` of a map date filter. The picker
@@ -129,6 +133,120 @@ final pingYearsProvider = FutureProvider<List<int>>((ref) async {
     now: DateTime.now(),
   );
 });
+
+/// Rows per History page. 200 is the same number the un-paged History
+/// screen used to cap at, so the first screenful costs exactly what it
+/// always did; everything older arrives one "Load more" at a time.
+const historyPageSize = 200;
+
+/// The half-open epoch-ms UTC window of one LOCAL calendar [year] —
+/// `[1 Jan 00:00, next 1 Jan 00:00)`. Local on purpose: the year chips
+/// sit on a screen full of local timestamps, and a ping logged at 23:30
+/// on 31 Dec belongs to the year the user remembers it in (same rule as
+/// `yearsCovering` / `rangeForYear`). Pure, so `history_grouping_test`
+/// can pin the boundary without a DB.
+({int startMs, int endMs}) historyYearUtcBoundsMs(int year) => (
+      startMs: DateTime(year, 1, 1).millisecondsSinceEpoch,
+      endMs: DateTime(year + 1, 1, 1).millisecondsSinceEpoch,
+    );
+
+/// One year's worth of History, as far as the user has paged into it.
+class HistoryYearPage {
+  /// Newest-first, every page loaded so far concatenated.
+  final List<Ping> pings;
+
+  /// The last page came back full, so there is probably more below.
+  final bool hasMore;
+
+  /// A "Load more" fetch is in flight — the rows already on screen stay
+  /// put (this is not an `AsyncLoading`, which would blank the list).
+  final bool loadingMore;
+
+  const HistoryYearPage({
+    required this.pings,
+    required this.hasMore,
+    this.loadingMore = false,
+  });
+
+  HistoryYearPage copyWith({bool? loadingMore}) => HistoryYearPage(
+        pings: pings,
+        hasMore: hasMore,
+        loadingMore: loadingMore ?? this.loadingMore,
+      );
+}
+
+/// History for ONE calendar year, keyset-paginated (0.16.2).
+///
+/// Why not another `FutureProvider` over `recent()`: History's old read
+/// was "the newest 200 rows, full stop" — after a Timeline import drops
+/// a decade in, that is 200 rows of one afternoon and no way to reach
+/// 2019. This walks a year at a time through `PingDao.pageByRange`,
+/// 200 rows per page, seeking on the last row's `ts_utc` rather than
+/// `OFFSET` (see the DAO doc for why).
+///
+/// Includes Timeline imports — History is the one list where they
+/// belong (gotcha 34), same as [historyPingsProvider], which still
+/// serves the "All" chip.
+///
+/// `autoDispose`: leaving the screen releases every page the user
+/// scrolled through; coming back re-reads page 1 (which also means a
+/// ping written while away shows up without an explicit invalidate).
+final historyYearProvider = AsyncNotifierProvider.autoDispose
+    .family<HistoryYearNotifier, HistoryYearPage, int>(
+  HistoryYearNotifier.new,
+);
+
+class HistoryYearNotifier
+    extends AutoDisposeFamilyAsyncNotifier<HistoryYearPage, int> {
+  @override
+  Future<HistoryYearPage> build(int arg) async {
+    final rows = await _fetch(before: null);
+    return HistoryYearPage(
+      pings: rows,
+      hasMore: rows.length == historyPageSize,
+    );
+  }
+
+  Future<List<Ping>> _fetch({required int? before}) async {
+    final db = await TrailDatabase.shared();
+    final bounds = historyYearUtcBoundsMs(arg);
+    return PingDao(db).pageByRange(
+      startUtcMs: bounds.startMs,
+      endUtcMs: bounds.endMs,
+      limit: historyPageSize,
+      beforeTsUtcMs: before,
+    );
+  }
+
+  /// Appends the next page. No-op when there is nothing more, when one
+  /// is already in flight, or before the first page has resolved.
+  Future<void> loadMore() async {
+    final current = state.valueOrNull;
+    if (current == null ||
+        !current.hasMore ||
+        current.loadingMore ||
+        current.pings.isEmpty) {
+      return;
+    }
+    state = AsyncData(current.copyWith(loadingMore: true));
+    try {
+      final next = await _fetch(
+        before: current.pings.last.timestampUtc.millisecondsSinceEpoch,
+      );
+      state = AsyncData(
+        HistoryYearPage(
+          pings: [...current.pings, ...next],
+          hasMore: next.length == historyPageSize,
+        ),
+      );
+    } catch (_) {
+      // Keep the rows already on screen and put "Load more" back —
+      // an AsyncError here would blank a list the user has scrolled
+      // through for a failure that is retryable in one tap.
+      state = AsyncData(current.copyWith(loadingMore: false));
+    }
+  }
+}
 
 /// Last successful fix (null-coord rows excluded). Feeds the home-screen
 /// "last successful ping" card.

@@ -66,5 +66,67 @@ void main() {
     await _openSheet(tester, records: const []);
     expect(find.text('No Timeline imports yet'), findsOneWidget);
     expect(find.byTooltip('Map detail…'), findsNothing);
+    expect(find.byTooltip('Photos…'), findsNothing);
+  });
+
+  // Photos for an import are opt-in, per import: imported coordinates
+  // may only reach Wikimedia when the user has read what gets sent and
+  // tapped Fetch (CLAUDE.md gotcha 21).
+  group('Photos…', () {
+    testWidgets('every row offers it alongside Map detail and Undo',
+        (tester) async {
+      await _openSheet(tester, records: [_record(id: 1), _record(id: 2)]);
+      expect(find.byTooltip('Photos…'), findsNWidgets(2));
+      expect(find.byTooltip('Map detail…'), findsNWidgets(2));
+      expect(find.byTooltip('Undo import'), findsNWidgets(2));
+    });
+
+    testWidgets('asks first, naming what is sent and to whom',
+        (tester) async {
+      await _openSheet(tester, records: [_record(rows: 120)]);
+      await tester.tap(find.byTooltip('Photos…'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Fetch photos for this import?'), findsOneWidget);
+      expect(
+        find.textContaining(
+          'Sends the coordinates of up to 120 imported places to Wikimedia '
+          'Commons',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Imports never do this on their own.'),
+        findsOneWidget,
+      );
+      expect(find.widgetWithText(TextButton, 'Cancel'), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, 'Fetch'), findsOneWidget);
+    });
+
+    testWidgets('a one-ping import is asked about in the singular',
+        (tester) async {
+      await _openSheet(tester, records: [_record(rows: 1)]);
+      await tester.tap(find.byTooltip('Photos…'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('up to 1 imported place to Wikimedia'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('Cancel sends nothing and leaves the sheet standing',
+        (tester) async {
+      await _openSheet(tester, records: [_record()]);
+      await tester.tap(find.byTooltip('Photos…'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Fetch photos for this import?'), findsNothing);
+      // The progress dialog is the first thing a real fetch pushes.
+      expect(find.text('Fetching photos'), findsNothing);
+      expect(find.byTooltip('Photos…'), findsOneWidget);
+    });
   });
 }

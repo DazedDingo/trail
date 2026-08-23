@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../services/stats/date_range_presets.dart';
+import 'year_chips_row.dart';
 
 /// Inline date-range picker for the map screen. Replaces the
 /// `showDateRangePicker` modal that used to take over the whole screen.
@@ -93,16 +94,9 @@ class _PanelBody extends StatelessWidget {
     required this.onClose,
   });
 
-  /// How many year chips fit before the row starts wrapping into a wall
-  /// of numbers. Beyond this the oldest ones collapse into "Older…".
-  static const maxYearChips = 12;
-
-  /// The year row is noise on a fresh install (one year, and it's this
-  /// one — every preset already lands inside it). It earns its space as
-  /// soon as there are two years, or one that isn't the current one
-  /// (which is exactly the "I just imported 2015–2019" case).
-  bool get _showYears =>
-      years.length >= 2 || (years.length == 1 && years.first != now.year);
+  /// The year row is noise on a fresh install — see
+  /// [shouldShowYearChips], shared with the History screen.
+  bool get _showYears => shouldShowYearChips(years, now.year);
 
   @override
   Widget build(BuildContext context) {
@@ -162,12 +156,12 @@ class _PanelBody extends StatelessWidget {
             runSpacing: 6,
             children: [
               for (final preset in presets)
-                _PresetChip(
+                FilterPresetChip(
                   label: preset.label,
                   selected: preset.id == activeId,
                   onTap: () => onApply(preset.range),
                 ),
-              _CustomRangeChip(
+              FilterActionChip(
                 onTap: () async {
                   final picked = await _showSystemPicker(context);
                   if (picked != null) onApply(picked);
@@ -186,40 +180,25 @@ class _PanelBody extends StatelessWidget {
     );
   }
 
-  /// Second chip row: one chip per calendar year with data, newest
-  /// first. A year tap is an ordinary custom range
-  /// ([rangeForYear]) pushed through the SAME `onApply` the presets
-  /// use, so the map's explicit-refresh behaviour is untouched.
+  /// Second chip row ([YearChipsRow], shared with History since
+  /// 0.16.2): one chip per calendar year with data, newest first. A
+  /// year tap is an ordinary custom range ([rangeForYear]) pushed
+  /// through the SAME `onApply` the presets use, so the map's
+  /// explicit-refresh behaviour is untouched. "Older…" opens the system
+  /// picker on the newest hidden year, so the user lands next to what
+  /// they were reaching for.
   Widget _yearRow(BuildContext context) {
-    final selectedYear = yearOfRange(currentRange);
-    // More years than fit: keep the newest, and fold the tail into one
-    // "Older…" chip that opens the system picker on the newest hidden
-    // year (so the user lands next to what they were reaching for).
-    final overflowing = years.length > maxYearChips;
-    final shown = overflowing ? years.take(maxYearChips - 1) : years;
-    final olderSeedYear = overflowing ? years[maxYearChips - 1] : null;
-    return Wrap(
-      spacing: 6,
-      runSpacing: 6,
-      children: [
-        for (final year in shown)
-          _PresetChip(
-            label: '$year',
-            selected: year == selectedYear,
-            onTap: () => onApply(rangeForYear(year)),
-          ),
-        if (olderSeedYear != null)
-          _CustomRangeChip(
-            label: 'Older…',
-            onTap: () async {
-              final picked = await _showSystemPicker(
-                context,
-                seed: rangeForYear(olderSeedYear),
-              );
-              if (picked != null) onApply(picked);
-            },
-          ),
-      ],
+    return YearChipsRow(
+      years: years,
+      selectedYear: yearOfRange(currentRange),
+      onYear: (year) => onApply(rangeForYear(year)),
+      onOlder: (hidden) async {
+        final picked = await _showSystemPicker(
+          context,
+          seed: rangeForYear(hidden.first),
+        );
+        if (picked != null) onApply(picked);
+      },
     );
   }
 
@@ -267,61 +246,6 @@ class _PanelBody extends StatelessWidget {
       initialDateRange: DateTimeRange(start: start, end: end),
       helpText: 'Filter trail by date',
       saveText: 'Apply',
-    );
-  }
-}
-
-class _PresetChip extends StatelessWidget {
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _PresetChip({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return ChoiceChip(
-      label: Text(label, style: const TextStyle(fontSize: 12)),
-      selected: selected,
-      onSelected: (_) => onTap(),
-      visualDensity: VisualDensity.compact,
-      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      selectedColor: scheme.primary.withValues(alpha: 0.30),
-      side: BorderSide(
-        color: selected
-            ? scheme.primary.withValues(alpha: 0.6)
-            : scheme.outlineVariant.withValues(alpha: 0.4),
-      ),
-    );
-  }
-}
-
-class _CustomRangeChip extends StatelessWidget {
-  final VoidCallback onTap;
-
-  /// "Custom range…" on the preset row, "Older…" on the year row — same
-  /// chip, same system picker, only the seed year differs.
-  final String label;
-
-  const _CustomRangeChip({required this.onTap, this.label = 'Custom range…'});
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return ActionChip(
-      label: Text(label, style: const TextStyle(fontSize: 12)),
-      avatar: Icon(Icons.tune, size: 14, color: scheme.onSurfaceVariant),
-      onPressed: onTap,
-      visualDensity: VisualDensity.compact,
-      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      side: BorderSide(
-        color: scheme.outlineVariant.withValues(alpha: 0.4),
-      ),
     );
   }
 }

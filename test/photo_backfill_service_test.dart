@@ -1,6 +1,15 @@
-import 'package:flutter_test/flutter_test.dart';
+import 'dart:ffi';
+import 'dart:io';
 
+import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:sqlite3/open.dart';
+
+import 'package:trail/db/database.dart';
+import 'package:trail/db/ping_dao.dart';
 import 'package:trail/models/ping.dart';
+import 'package:trail/services/online_photo_service.dart';
 import 'package:trail/services/photo_backfill_service.dart';
 
 Ping _p({
@@ -15,6 +24,73 @@ Ping _p({
       lat: lat,
       lon: lon,
       source: source,
+    );
+
+/// Top-level libsqlite3 loader workaround (CLAUDE.md gotcha 8) — same
+/// copy as `ping_dao_test.dart`; must be top-level to survive the
+/// `Isolate.spawn` inside `sqflite_common_ffi`.
+void _ffiInit() {
+  if (Platform.isLinux) {
+    open.overrideFor(OperatingSystem.linux, () {
+      for (final candidate in const [
+        'libsqlite3.so.0',
+        '/lib/aarch64-linux-gnu/libsqlite3.so.0',
+        '/lib/x86_64-linux-gnu/libsqlite3.so.0',
+        '/usr/lib/aarch64-linux-gnu/libsqlite3.so.0',
+        '/usr/lib/x86_64-linux-gnu/libsqlite3.so.0',
+      ]) {
+        try {
+          return DynamicLibrary.open(candidate);
+        } on ArgumentError {
+          // Try next candidate.
+        }
+      }
+      return DynamicLibrary.open('libsqlite3.so');
+    });
+  }
+}
+
+/// Production DDL on an ffi handle (gotcha 28's preferred pattern).
+Future<Database> _openMemDb() async {
+  sqfliteFfiInit();
+  databaseFactory = createDatabaseFactoryFfi(ffiInit: _ffiInit);
+  final db = await databaseFactory.openDatabase(inMemoryDatabasePath);
+  await TrailDatabase.createSchemaForTest(db);
+  return db;
+}
+
+/// Stands in for Wikimedia: records every coordinate it was asked
+/// about — which is the whole point of the import tests, since a
+/// leaked imported coordinate is the bug (gotcha 21) — and always
+/// returns one photo so the walk has something to attach.
+class _RecordingPhotoService extends OnlinePhotoService {
+  final List<({double lat, double lon})> asked = [];
+
+  @override
+  Future<List<FetchedOnlinePhoto>> fetchNearby({
+    required double lat,
+    required double lon,
+    int radiusMeters = 500,
+    int limit = 5,
+  }) async {
+    asked.add((lat: lat, lon: lon));
+    return [
+      FetchedOnlinePhoto(
+        uri: 'https://example.invalid/$lat,$lon.jpg',
+        attribution: 'Someone',
+        license: 'CC BY-SA 4.0',
+        distanceMeters: 12,
+      ),
+    ];
+  }
+}
+
+/// A persistable ping (no id — SQLite assigns it).
+Ping _row(double lat, double lon, {int minute = 0}) => Ping(
+      timestampUtc: DateTime.utc(2026, 5, 17, 9, minute),
+      lat: lat,
+      lon: lon,
+      source: PingSource.scheduled,
     );
 
 void main() {
@@ -118,6 +194,173 @@ void main() {
         const <int>{},
       );
       expect(out, hasLength(1));
+    });
+  });
+
+  group('selectEligibleForBackfill includeImported', () {
+    test('the opt-in lets imported rows through', () {
+      final out = selectEligibleForBackfill(
+        [_p(id: 1, source: PingSource.imported)],
+        const <int>{},
+        includeImported: true,
+      );
+      expect(out.map((p) => p.id).toList(), [1]);
+    });
+
+    test('the opt-in still skips no_fix, null coords and null ids', () {
+      final out = selectEligibleForBackfill(
+        [
+          _p(id: 1, source: PingSource.noFix),
+          _p(id: 2, lat: null, source: PingSource.imported),
+          _p(id: 3, source: PingSource.imported),
+        ],
+        const <int>{},
+        includeImported: true,
+      );
+      expect(out.map((p) => p.id).toList(), [3]);
+    });
+
+    test('the opt-in still skips rows that already have wikimedia photos',
+        () {
+      final out = selectEligibleForBackfill(
+        [
+          _p(id: 1, source: PingSource.imported),
+          _p(id: 2, source: PingSource.imported),
+        ],
+        const {1},
+        includeImported: true,
+      );
+      expect(out.map((p) => p.id).toList(), [2]);
+    });
+
+    test('defaults to false — an unnamed caller never gets imports', () {
+      final out = selectEligibleForBackfill(
+        [_p(id: 1, source: PingSource.imported)],
+        const <int>{},
+      );
+      expect(out, isEmpty);
+    });
+  });
+
+  // The default walk must never send an imported coordinate to
+  // Wikimedia (CLAUDE.md gotcha 21); `onlyImportId` is the single,
+  // user-confirmed exception and must reach that import and nothing
+  // else. Real (ffi) DB + a recording stand-in for Wikimedia.
+  group('PhotoBackfillService.run', () {
+    late Database db;
+    late PingDao dao;
+    late _RecordingPhotoService online;
+    late PhotoBackfillService service;
+    late int ownPingId;
+    late List<int> importOneIds;
+    late int importTwoId;
+
+    Future<List<int>> pingIdsWithPhotos() async {
+      final rows = await db.rawQuery(
+        'SELECT DISTINCT ping_id FROM ping_photos ORDER BY ping_id',
+      );
+      return rows.map((r) => (r['ping_id'] as num).toInt()).toList();
+    }
+
+    setUp(() async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      db = await _openMemDb();
+      TrailDatabase.useSharedForTest(db);
+      dao = PingDao(db);
+      online = _RecordingPhotoService();
+      service = PhotoBackfillService(
+        onlineService: online,
+        throttle: Duration.zero,
+      );
+
+      ownPingId = await dao.insert(_row(51.5, -0.1));
+      // Import 1: two distinct cells plus a repeat of the first cell.
+      await dao.insertImportedBatch(
+        [
+          _row(52.1, -1.1, minute: 1),
+          _row(52.2, -1.2, minute: 2),
+          _row(52.1001, -1.1001, minute: 3),
+        ],
+        importId: 1,
+      );
+      await dao.insertImportedBatch([_row(53.3, -2.3, minute: 4)],
+          importId: 2);
+      final rows = await db.query('pings',
+          columns: ['id', 'import_id'], orderBy: 'id ASC');
+      importOneIds = [
+        for (final r in rows)
+          if ((r['import_id'] as num?)?.toInt() == 1) (r['id'] as num).toInt(),
+      ];
+      importTwoId = [
+        for (final r in rows)
+          if ((r['import_id'] as num?)?.toInt() == 2) (r['id'] as num).toInt(),
+      ].single;
+    });
+
+    tearDown(() async {
+      TrailDatabase.resetSharedForTest();
+      await db.close();
+    });
+
+    test('the default walk never touches an imported row', () async {
+      final events = await service.run().toList();
+
+      expect(events.last.finished, isTrue);
+      expect(events.last.error, isNull);
+      expect(events.last.total, 1, reason: 'only the one own ping');
+      expect(online.asked, [(lat: 51.5, lon: -0.1)]);
+      expect(await pingIdsWithPhotos(), [ownPingId]);
+    });
+
+    test('onlyImportId touches that import and nothing else', () async {
+      final events = await service.run(onlyImportId: 1).toList();
+
+      expect(events.last.finished, isTrue);
+      expect(events.last.total, 3);
+      expect(events.last.processed, 3);
+      // Two lookups, not three: the third ping shares a cell with the
+      // first (see the cell-cache test below).
+      expect(online.asked.map((a) => a.lat).toList(), [52.1, 52.2]);
+      expect(await pingIdsWithPhotos(), importOneIds);
+      expect(await pingIdsWithPhotos(), isNot(contains(ownPingId)));
+      expect(await pingIdsWithPhotos(), isNot(contains(importTwoId)));
+    });
+
+    test('the cell cache still applies — a repeated cell is one lookup',
+        () async {
+      // 52.1 and 52.1001 quantize to the same ~110 m cell, so the third
+      // ping is served from `area_photos`.
+      final events = await service.run(onlyImportId: 1).toList();
+
+      expect(online.asked, hasLength(2));
+      expect(events.last.cellCacheHits, 1);
+      expect(await pingIdsWithPhotos(), hasLength(3));
+    });
+
+    test('pings that already have a wikimedia row are skipped', () async {
+      await db.insert('ping_photos', {
+        'ping_id': importOneIds.first,
+        'uri': 'https://example.invalid/existing.jpg',
+        'source': 'wikimedia',
+        'fetched_at': DateTime.utc(2026, 5, 1).millisecondsSinceEpoch,
+        'ordinal': 0,
+      });
+
+      final events = await service.run(onlyImportId: 1).toList();
+
+      expect(events.last.total, 2);
+      expect(online.asked.map((a) => a.lat).toList(), [52.2, 52.1001]);
+    });
+
+    test('an import with no rows left finishes at zero, fetching nothing',
+        () async {
+      final events = await service.run(onlyImportId: 999).toList();
+
+      expect(events.last.total, 0);
+      expect(events.last.finished, isTrue);
+      expect(online.asked, isEmpty);
+      expect(await pingIdsWithPhotos(), isEmpty);
     });
   });
 

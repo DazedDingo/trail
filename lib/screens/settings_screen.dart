@@ -26,6 +26,7 @@ import '../providers/photos_provider.dart';
 import '../providers/panic_provider.dart';
 import '../providers/pings_provider.dart';
 import '../providers/scheduler_provider.dart';
+import '../providers/stats_settings_provider.dart';
 import '../providers/mbtiles_provider.dart';
 import '../services/coverage/coverage_flow.dart';
 import '../services/coverage/coverage_planner.dart';
@@ -364,6 +365,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             trailing: const Icon(Icons.chevron_right),
             onTap: () => context.push('/trips'),
           ),
+          ListTile(
+            leading: const Icon(Icons.place_outlined),
+            title: const Text('Places'),
+            subtitle: const Text(
+              'Places from your Google Timeline visits — counts, dates, '
+              'time spent.',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => context.push('/places'),
+          ),
+          const _StatsIncludeImportsTile(),
           const Divider(),
           const _SectionHeader('History'),
           ListTile(
@@ -1478,6 +1490,33 @@ class _HomeMapHeightTile extends ConsumerWidget {
             DropdownMenuItem(value: h, child: Text(h.label)),
         ],
       ),
+    );
+  }
+}
+
+/// Toggle for whether Stats (heatmap, top places, time-of-day, trips)
+/// also counts imported Google Timeline history. Default OFF — imports
+/// are map-only per the commander's decision (CLAUDE.md gotcha 34); this
+/// is the opt-in override, same shape as the Wikimedia auto-fetch tile.
+class _StatsIncludeImportsTile extends ConsumerWidget {
+  const _StatsIncludeImportsTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(statsIncludeImportsProvider);
+    final on = async.valueOrNull ?? false;
+    return SwitchListTile(
+      secondary: const Icon(Icons.history_outlined),
+      title: const Text('Include imported history in Stats'),
+      subtitle: const Text(
+        'Heatmap, top places, time-of-day and trips also count Google '
+        'Timeline imports. Off = your own pings only.',
+      ),
+      isThreeLine: true,
+      value: on,
+      onChanged: async.isLoading
+          ? null
+          : (v) => ref.read(statsIncludeImportsProvider.notifier).set(v),
     );
   }
 }

@@ -426,4 +426,188 @@ void main() {
       ]);
     });
   });
+
+  // --- storage hygiene helpers (pure; no disk, no prefs) ----------------
+
+  /// A coverage pack named the way `coverageFileName` names them, so
+  /// the date sniffer sees the shape it will see in production.
+  TilesRegion pack(
+    String date, {
+    String slug = 'lat+51.38_lon-002.36',
+    int bytes = 2 * 1024 * 1024,
+  }) {
+    final name = 'coverage-$slug-z7-14-$date';
+    return TilesRegion(
+      name: name,
+      path: '/t/$name.pmtiles',
+      bytes: bytes,
+      role: TileRole.coverage,
+    );
+  }
+
+  group('archiveDateFromName', () {
+    test('reads the date off a coverage pack, with or without extension',
+        () {
+      expect(
+        archiveDateFromName(
+            'coverage-lat+51.25_lon-002.25-z7-14-20260822.pmtiles'),
+        20260822,
+      );
+      expect(
+        archiveDateFromName('coverage-lat+51.25_lon-002.25-z7-14-20260822'),
+        20260822,
+      );
+    });
+
+    test('a name with no date reads as unknown', () {
+      expect(archiveDateFromName('lake-district.pmtiles'), isNull);
+      expect(archiveDateFromName('gb-z13.mbtiles'), isNull);
+      expect(archiveDateFromName('world-overview.pmtiles'), isNull);
+      // No separator before the digits, and nine digits, are both "not
+      // our naming convention" rather than a date.
+      expect(archiveDateFromName('20260822.pmtiles'), isNull);
+      expect(archiveDateFromName('coverage-123456789.pmtiles'), isNull);
+    });
+
+    test('eight digits that are not a real date read as unknown', () {
+      expect(archiveDateFromName('coverage-x-20261301.pmtiles'), isNull);
+      expect(archiveDateFromName('coverage-x-20260230.pmtiles'), isNull);
+      expect(archiveDateFromName('coverage-x-20260000.pmtiles'), isNull);
+      expect(archiveDateFromName('coverage-x-19690101.pmtiles'), isNull);
+    });
+  });
+
+  group('summarizeArchives', () {
+    final now = DateTime.utc(2026, 8, 22);
+
+    test('adds bytes and counts up per role', () {
+      final summary = summarizeArchives([
+        const TilesRegion(
+            name: 'gb', path: '/t/gb.pmtiles', bytes: 700, role: TileRole.region),
+        const TilesRegion(
+            name: 'world-overview',
+            path: '/t/world-overview.pmtiles',
+            bytes: 45,
+            role: TileRole.overview),
+        pack('20260801', bytes: 10),
+        pack('20260802', slug: 'lat+52.00_lon-001.00', bytes: 20),
+      ], now: now);
+
+      expect(summary.countFor(TileRole.region), 1);
+      expect(summary.bytesFor(TileRole.region), 700);
+      expect(summary.countFor(TileRole.coverage), 2);
+      expect(summary.bytesFor(TileRole.coverage), 30);
+      expect(summary.countFor(TileRole.overview), 1);
+      expect(summary.bytesFor(TileRole.overview), 45);
+      expect(summary.totalBytes, 775);
+      expect(summary.totalCount, 4);
+      expect(summary.staleCoverageCount, 0);
+    });
+
+    test('counts coverage packs older than six months as stale', () {
+      final summary = summarizeArchives([
+        pack('20260101'), // ~233 days — stale
+        pack('20260225', slug: 'lat+52.00_lon-001.00'), // 178 days — fresh
+        pack('20260822', slug: 'lat+53.00_lon-001.00'), // today
+      ], now: now);
+      expect(summary.countFor(TileRole.coverage), 3);
+      expect(summary.staleCoverageCount, 1);
+    });
+
+    test('an undated pack is unknown age, never stale', () {
+      final summary = summarizeArchives(const [
+        TilesRegion(
+          name: 'bath-coverage',
+          path: '/t/bath-coverage.pmtiles',
+          bytes: 5,
+          role: TileRole.coverage,
+        ),
+      ], now: now);
+      expect(summary.countFor(TileRole.coverage), 1);
+      expect(summary.staleCoverageCount, 0);
+    });
+
+    test('an ageing region or overview is never counted as stale', () {
+      final summary = summarizeArchives([
+        TilesRegion(
+          name: pack('20200101').name,
+          path: '/t/old-region.pmtiles',
+          bytes: 5,
+        ),
+      ], now: now);
+      expect(summary.staleCoverageCount, 0);
+    });
+
+    test('an empty library summarises to zero', () {
+      final summary = summarizeArchives(const [], now: now);
+      expect(summary.totalBytes, 0);
+      expect(summary.totalCount, 0);
+      expect(summary.countFor(TileRole.coverage), 0);
+      expect(summary.bytesFor(TileRole.region), 0);
+      expect(summary.staleCoverageCount, 0);
+    });
+  });
+
+  group('selectStalePacks', () {
+    final now = DateTime.utc(2026, 8, 22);
+
+    test('picks the oldest stale packs first, capped at maxCount', () {
+      final picked = selectStalePacks([
+        pack('20250601', slug: 'lat+50.00_lon-001.00'),
+        pack('20240101', slug: 'lat+51.00_lon-001.00'),
+        pack('20250101', slug: 'lat+52.00_lon-001.00'),
+      ], now: now);
+      expect(
+        picked.map((r) => archiveDateFromName(r.name)).toList(),
+        [20240101, 20250101],
+      );
+    });
+
+    test('maxCount is honoured', () {
+      final all = [
+        pack('20240101', slug: 'lat+51.00_lon-001.00'),
+        pack('20250101', slug: 'lat+52.00_lon-001.00'),
+      ];
+      expect(selectStalePacks(all, now: now, maxCount: 1).length, 1);
+      expect(selectStalePacks(all, now: now, maxCount: 5).length, 2);
+      expect(selectStalePacks(all, now: now, maxCount: 0), isEmpty);
+    });
+
+    test('nothing stale selects nothing', () {
+      expect(
+        selectStalePacks([pack('20260801'), pack('20260822')], now: now),
+        isEmpty,
+      );
+      expect(selectStalePacks(const [], now: now), isEmpty);
+    });
+
+    test('exactly staleAfterDays old counts as stale', () {
+      // 2026-02-23 is 180 days before 2026-08-22.
+      expect(selectStalePacks([pack('20260223')], now: now).length, 1);
+      expect(selectStalePacks([pack('20260224')], now: now), isEmpty);
+    });
+
+    test('undated packs and non-coverage roles are never selected', () {
+      final picked = selectStalePacks([
+        const TilesRegion(
+          name: 'bath-coverage',
+          path: '/t/bath-coverage.pmtiles',
+          bytes: 5,
+          role: TileRole.coverage,
+        ),
+        TilesRegion(
+          name: pack('20200101').name,
+          path: '/t/gb-20200101.pmtiles',
+          bytes: 5,
+        ),
+        TilesRegion(
+          name: pack('20200101', slug: 'lat+54.00_lon-001.00').name,
+          path: '/t/overview-20200101.pmtiles',
+          bytes: 5,
+          role: TileRole.overview,
+        ),
+      ], now: now);
+      expect(picked, isEmpty);
+    });
+  });
 }

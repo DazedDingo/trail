@@ -5,12 +5,14 @@ import 'package:flutter/material.dart' show DateTimeRange;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:geocoding/geocoding.dart' show Placemark;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:sqlite3/open.dart';
 import 'package:trail/db/database.dart';
 import 'package:trail/db/ping_dao.dart';
 import 'package:trail/models/ping.dart';
 import 'package:trail/providers/pings_provider.dart';
+import 'package:trail/providers/stats_settings_provider.dart';
 import 'package:trail/services/geocoding_service.dart';
 
 /// Provider-level wiring for the pings reads. Runs against an in-memory
@@ -62,6 +64,13 @@ Ping _noFix(DateTime local) => Ping(
       note: 'timeout',
     );
 
+Ping _imported(DateTime local, double lat) => Ping(
+      timestampUtc: local.toUtc(),
+      lat: lat,
+      lon: -0.1,
+      source: PingSource.imported,
+    );
+
 void main() {
   group('mapRangeUtcBounds', () {
     test('single local day → [00:00, 23:59:59.999] of that day, in UTC',
@@ -104,6 +113,7 @@ void main() {
     late ProviderContainer container;
 
     setUp(() async {
+      SharedPreferences.setMockInitialValues({});
       db = await _openMemDb();
       TrailDatabase.useSharedForTest(db);
       container = ProviderContainer();
@@ -127,6 +137,25 @@ void main() {
       expect(all.map((p) => p.source), contains(PingSource.noFix));
       expect(all.map((p) => p.timestampUtc).toList(),
           all.map((p) => p.timestampUtc).toList()..sort());
+    });
+
+    test('allPingsProvider passes statsIncludeImportsProvider through to '
+        'PingDao.allPings(includeImported:) — off by default, on when the '
+        'toggle is set', () async {
+      await PingDao(db).insert(_imported(DateTime(2026, 1, 4, 12), 51.4));
+
+      // Default (toggle off): the import is excluded.
+      final excluded = await container.read(allPingsProvider.future);
+      expect(excluded, hasLength(4));
+      expect(excluded.map((p) => p.source), isNot(contains(PingSource.imported)));
+
+      // Flip the toggle on and re-read — allPingsProvider watches
+      // statsIncludeImportsProvider.future, so this propagates without
+      // an explicit invalidate.
+      await container.read(statsIncludeImportsProvider.notifier).set(true);
+      final included = await container.read(allPingsProvider.future);
+      expect(included, hasLength(5));
+      expect(included.map((p) => p.source), contains(PingSource.imported));
     });
 
     test('pingsByRangeProvider(null) returns fixes only, oldest-first',

@@ -89,6 +89,7 @@ class CoverageRunResult {
     this.planned = 0,
     this.downloaded = 0,
     this.bytes = 0,
+    this.refreshed = 0,
     this.cancelled = false,
     this.exceededCap = false,
     this.notConfigured = false,
@@ -104,6 +105,11 @@ class CoverageRunResult {
   /// Bytes written.
   final int bytes;
 
+  /// Stale coverage packs rebuilt on a newer planet build during the
+  /// same run (the weekly pass in [CoverageService.processPendingOnAppOpen]).
+  /// Independent of [downloaded], which only counts NEW places.
+  final int refreshed;
+
   final bool cancelled;
 
   /// The plan was bigger than the auto budget and the caller hadn't
@@ -115,7 +121,21 @@ class CoverageRunResult {
 
   final String? error;
 
-  bool get didWork => downloaded > 0;
+  bool get didWork => downloaded > 0 || refreshed > 0;
+
+  /// Same result with [refreshed] filled in — the refresh pass runs
+  /// after the pending fetch, so the two halves are stitched together
+  /// before the notice is written.
+  CoverageRunResult withRefreshed(int count) => CoverageRunResult(
+        planned: planned,
+        downloaded: downloaded,
+        bytes: bytes,
+        refreshed: count,
+        cancelled: cancelled,
+        exceededCap: exceededCap,
+        notConfigured: notConfigured,
+        error: error,
+      );
 
   /// True when the caller should put its points back on the pending
   /// queue rather than considering them handled.
@@ -134,7 +154,9 @@ class CoverageRunResult {
 ///      detailed tiles" for the UI isolate to act on later.
 ///   2. [processPendingOnAppOpen] — app start / resume. Gated by
 ///      [shouldAutoFetchNow] and a 20 MB budget; anything bigger stays
-///      pending and surfaces as a Settings notice.
+///      pending and surfaces as a Settings notice. Once a week the same
+///      pass also rebuilds up to [maxStaleRefreshPerRun] coverage packs
+///      whose planet build has gone stale.
 ///   3. [planForPoints] + [fetchPlan] — the explicit paths (the
 ///      Settings "fetch now" button, and later the Timeline import's
 ///      finish screen). The user sees box count and megabytes before
@@ -148,10 +170,12 @@ class CoverageService {
     Future<List<TilesRegion>> Function()? listInstalled,
     Future<ServedArchiveSummary> Function(String path)? probe,
     Future<CoverageTileServer?> Function()? serverFactory,
+    Future<void> Function(TilesRegion region)? deleteArchive,
     this.autoByteCap = defaultAutoByteCap,
   })  : _listInstalled = listInstalled ?? TilesService.listInstalled,
         _probe = probe ?? LocalTileServer.probe,
-        _serverFactory = serverFactory ?? _serverFromPrefs;
+        _serverFactory = serverFactory ?? _serverFromPrefs,
+        _deleteArchive = deleteArchive ?? TilesService.delete;
 
   /// Singleton used by `main.dart` and the Settings screen. Assignable
   /// so tests can swap in a service built on fakes.
@@ -165,9 +189,21 @@ class CoverageService {
   /// apps doesn't re-plan every few seconds.
   static const autoRunThrottle = Duration(minutes: 10);
 
+  /// Minimum gap between stale-coverage-pack refresh passes. A pack is
+  /// six months out of date at worst; re-checking weekly is plenty and
+  /// keeps the resume path off the network almost every time.
+  static const staleRefreshInterval = Duration(days: 7);
+
+  /// How many stale packs one pass may rebuild. Two at ~2 MB apiece is
+  /// a rounding error against the 20 MB budget, and a library that has
+  /// gone stale wholesale is worked through a fortnight at a time
+  /// rather than in one surprise download.
+  static const maxStaleRefreshPerRun = 2;
+
   final Future<List<TilesRegion>> Function() _listInstalled;
   final Future<ServedArchiveSummary> Function(String path) _probe;
   final Future<CoverageTileServer?> Function() _serverFactory;
+  final Future<void> Function(TilesRegion region) _deleteArchive;
   final int autoByteCap;
 
   DateTime? _lastAutoRun;
@@ -458,24 +494,39 @@ class CoverageService {
       _lastAutoRun = at;
       try {
         final pending = await CoveragePrefs.readPending();
-        await refreshExtents();
-        if (pending.isEmpty) {
-          // An archive installed by hand since the last launch changes
-          // what counts as "already covered", so the refresh above is
-          // worth doing even with an empty queue.
-          return;
+        // An archive installed by hand since the last launch changes
+        // what counts as "already covered", so this is worth doing even
+        // with an empty queue — and the refresh pass below needs it.
+        final extents = await refreshExtents();
+        var result = const CoverageRunResult();
+        var takenCount = 0;
+        if (pending.isNotEmpty) {
+          final taken = await CoveragePrefs.takePending();
+          takenCount = taken.length;
+          result = await fetchForPoints(
+            [for (final p in taken) p.toGeoPoint()],
+            confirmLarge: false,
+            onInstalled: onInstalled,
+            server: client,
+          );
+          if (result.shouldRequeue) {
+            await CoveragePrefs.addPendingAll(taken);
+          }
         }
-        final taken = await CoveragePrefs.takePending();
-        final result = await fetchForPoints(
-          [for (final p in taken) p.toGeoPoint()],
-          confirmLarge: false,
+        final refreshed = await _refreshStalePacks(
+          client: client,
+          at: at,
+          spentBytes: result.bytes,
+          extents: extents,
           onInstalled: onInstalled,
-          server: client,
         );
-        if (result.shouldRequeue) {
-          await CoveragePrefs.addPendingAll(taken);
+        // Nothing happened at all: leave whatever notice the last run
+        // wrote rather than blanking the Settings tile on every resume.
+        if (pending.isNotEmpty || refreshed > 0) {
+          await CoveragePrefs.writeNotice(
+            noticeFor(result.withRefreshed(refreshed), takenCount),
+          );
         }
-        await CoveragePrefs.writeNotice(noticeFor(result, taken.length));
       } finally {
         client.close();
       }
@@ -484,9 +535,106 @@ class CoverageService {
     }
   }
 
+  /// Weekly maintenance: rebuilds the oldest stale coverage packs on
+  /// the server's current planet build.
+  ///
+  /// A pack is a snapshot of a planet extract, so an ageing one shows
+  /// ageing streets. Rather than expiring packs (which would blank the
+  /// map for a place the user has actually been) we re-fetch the SAME
+  /// bbox and zooms — taken from the probed extents, so the new file
+  /// covers exactly what the old one did — and delete the old file only
+  /// once the new one has landed.
+  ///
+  /// Deliberately timid: [staleRefreshInterval] between passes,
+  /// [maxStaleRefreshPerRun] packs per pass, and only the leftover of
+  /// the same [autoByteCap] the pending fetch already spent from. Never
+  /// throws; a pack that fails is left alone until next week.
+  Future<int> _refreshStalePacks({
+    required CoverageTileServer client,
+    required DateTime at,
+    required int spentBytes,
+    required List<ArchiveExtent> extents,
+    void Function()? onInstalled,
+  }) async {
+    final last = await CoveragePrefs.readLastRefresh();
+    if (last != null && at.difference(last) < staleRefreshInterval) return 0;
+    final stale = selectStalePacks(
+      await _listInstalled(),
+      now: at,
+      maxCount: maxStaleRefreshPerRun,
+    );
+    // Nothing stale: don't burn the weekly marker, so the pass still
+    // runs on the day a pack does age out.
+    if (stale.isEmpty) return 0;
+    // From here we are about to spend network, so the marker is set
+    // whatever the outcome — a server that 500s must not be retried on
+    // every resume for a week.
+    await CoveragePrefs.setLastRefresh(at);
+    final byPath = {for (final e in extents) e.path: e};
+    var budget = autoByteCap - spentBytes;
+    var refreshed = 0;
+    _running = true;
+    try {
+      for (final pack in stale) {
+        final extent = byPath[pack.path];
+        final box = extent?.bounds;
+        // No probed bounds means we cannot ask for the same area again,
+        // and a guessed bbox would move the pack's footprint.
+        if (extent == null || box == null) continue;
+        try {
+          final sized = await client.dryRun(
+            box,
+            minzoom: extent.minZoom,
+            maxzoom: extent.maxZoom,
+          );
+          // The server is still on the planet build this pack came
+          // from: the download would be a byte-for-byte copy under the
+          // same name.
+          final packDate = archiveDateFromName(pack.name);
+          if (int.tryParse(sized.planetDate) == packDate) continue;
+          if (sized.bytes > budget) break;
+          final fresh = await client.downloadExtract(
+            box,
+            minzoom: extent.minZoom,
+            maxzoom: extent.maxZoom,
+            planetDate: sized.planetDate,
+          );
+          if (fresh.bytes <= 0) continue;
+          budget -= fresh.bytes;
+          // Only now is the old pack redundant. The path guard covers
+          // the pathological case of a new file landing on the old
+          // one's name.
+          if (fresh.path != pack.path) await _deleteArchive(pack);
+          refreshed++;
+        } catch (e) {
+          debugPrint('[coverage] refresh failed for ${pack.name}: $e');
+        }
+      }
+    } finally {
+      _running = false;
+    }
+    if (refreshed > 0) {
+      await refreshExtents();
+      onInstalled?.call();
+    }
+    return refreshed;
+  }
+
   /// One-line status for the Settings tile. Pure so the wording is
   /// unit-testable.
   static String? noticeFor(CoverageRunResult result, int pendingCount) {
+    final parts = <String>[];
+    final pending = _pendingNotice(result, pendingCount);
+    if (pending != null) parts.add(pending);
+    if (result.refreshed > 0) {
+      parts.add('Refreshed ${result.refreshed} map-detail pack'
+          '${result.refreshed == 1 ? '' : 's'}.');
+    }
+    return parts.isEmpty ? null : parts.join(' ');
+  }
+
+  /// The half of [noticeFor] that talks about newly discovered places.
+  static String? _pendingNotice(CoverageRunResult result, int pendingCount) {
     if (result.exceededCap) {
       final mb = (result.bytes / (1024 * 1024)).toStringAsFixed(0);
       return '$pendingCount new place${pendingCount == 1 ? '' : 's'} need '

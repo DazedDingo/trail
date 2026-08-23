@@ -10,13 +10,17 @@ import '../db/database.dart';
 import '../db/import_dao.dart';
 import '../db/ping_dao.dart';
 import '../providers/backup_provider.dart';
+import '../providers/home_location_provider.dart';
 import '../providers/import_provider.dart';
 import '../providers/mbtiles_provider.dart';
 import '../services/coverage/coverage_flow.dart';
 import '../services/coverage/coverage_planner.dart';
+import '../services/home_location_service.dart';
+import '../services/import/google_home.dart';
 import '../services/import/import_thinning.dart';
 import '../services/import/timeline_import_service.dart';
 import '../services/import/timeline_models.dart';
+import '../services/photo_backfill_service.dart';
 import '../widgets/help_button.dart';
 
 /// Google Maps Timeline import (docs/TIMELINE_IMPORT.md, 0.16.0).
@@ -54,6 +58,12 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
   ImportProgress? _progress;
   ImportCancelToken? _cancel;
   ImportResult? _result;
+
+  /// The `frequentPlaces` entry worth offering as the home location, or
+  /// null when the export has none / the saved home already matches
+  /// (`google_home.dart`). Survives the preview → result transition so
+  /// the offer is still there on the result card.
+  ImportFrequentPlace? _googleHome;
 
   bool _coverageBusy = false;
   String? _coverageNote;
@@ -96,6 +106,7 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
       _already = null;
       _result = null;
       _error = null;
+      _googleHome = null;
       _coverageNote = null;
       _coverageNeedsServer = false;
     });
@@ -130,6 +141,7 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
         _previewing = false;
         _progress = null;
       });
+      await _refreshGoogleHome(preview.frequentPlaces);
     } on AlreadyImportedException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -180,7 +192,11 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
         _preview = result.ok ? null : _preview;
         _error = result.error;
       });
-      if (result.ok && result.rows > 0) {
+      // Re-checked rather than carried over: the user may have set a
+      // home from somewhere else while the insert ran, and the offer
+      // has to be right on the result card too.
+      await _refreshGoogleHome(preview.frequentPlaces);
+      if (mounted && result.ok && result.rows > 0) {
         await _offerCoverage(result);
       }
     } catch (e) {
@@ -232,6 +248,35 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
       if (!mounted) return;
       setState(() => _error = '$e');
     }
+  }
+
+  /// Decides whether to offer "set home from Google" for this export.
+  ///
+  /// Shows nothing when the export has no HOME/INFERRED_HOME place, or
+  /// when the home Trail already has is within
+  /// [kGoogleHomeThresholdM] of it — a button that moves home by 20 m
+  /// is noise, and the user may have placed their pin deliberately.
+  Future<void> _refreshGoogleHome(List<ImportFrequentPlace> places) async {
+    final pick = pickGoogleHome(places);
+    if (pick == null) {
+      if (mounted) setState(() => _googleHome = null);
+      return;
+    }
+    final current = await ref.read(homeLocationProvider.future);
+    if (!mounted) return;
+    setState(() => _googleHome = homeDiffers(current, pick) ? pick : null);
+  }
+
+  Future<void> _useGoogleHome(ImportFrequentPlace place) async {
+    await HomeLocationService.set(
+      lat: place.lat,
+      lon: place.lon,
+      label: kGoogleHomeLabel,
+    );
+    if (!mounted) return;
+    ref.invalidate(homeLocationProvider);
+    setState(() => _googleHome = null);
+    _snack('Home location set.');
   }
 
   /// Offers high-zoom map detail for the places the import just added
@@ -331,6 +376,7 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
           if (_preview != null && !_committing) _previewCard(_preview!),
           if (_committing) _progressCard(),
           if (_result != null) _resultCard(_result!),
+          if (_googleHome != null) _googleHomeCard(_googleHome!),
           if (_coverageBusy || _coverageNote != null) _coverageCard(),
           if (_error != null) _errorCard(_error!),
         ],
@@ -596,6 +642,32 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
     );
   }
 
+  /// "Google says home is at …" — the export's HOME place, offered as
+  /// Trail's home location. Stays on screen through the import so the
+  /// user can take it after the rows land, not only before.
+  Widget _googleHomeCard(ImportFrequentPlace place) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Home location', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 8),
+            Text('Google says home is at ${formatGoogleHome(place)}'),
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              onPressed: () => _useGoogleHome(place),
+              icon: const Icon(Icons.home_outlined),
+              label: const Text('Use as home location'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _coverageCard() {
     return Card(
       child: Column(
@@ -793,6 +865,116 @@ class _TimelineImportsSheetState extends ConsumerState<_TimelineImportsSheet> {
     }
   }
 
+  /// Per-import photo fetch — the ONE path on which imported
+  /// coordinates are allowed to reach Wikimedia (CLAUDE.md gotcha 21).
+  /// Explicit, per import, behind a dialog that says exactly what gets
+  /// sent; nothing about an import does this on its own, and the
+  /// Settings backfill still skips every imported row.
+  Future<void> _photos(ImportRecord record) async {
+    final id = record.id;
+    if (id == null || _busyId != null) return;
+    final places = record.rowCount;
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (c) => AlertDialog(
+            title: const Text('Fetch photos for this import?'),
+            content: Text(
+              'Sends the coordinates of up to $places imported place'
+              '${places == 1 ? '' : 's'} to Wikimedia Commons to find '
+              'nearby photos (same as auto-fetch for your own pings). '
+              'Imports never do this on their own.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(c, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(c, true),
+                child: const Text('Fetch'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed || !mounted) return;
+    setState(() => _busyId = id);
+
+    final cancel = Completer<void>();
+    final progress = ValueNotifier<PhotoBackfillProgress>(
+      const PhotoBackfillProgress(processed: 0, total: 0, photosAdded: 0),
+    );
+    // Held route, not `showDialog`, for the same two reasons as the
+    // coverage flow: this sheet is itself a modal (a pop-by-captured-
+    // context would take the sheet down), and a walk that finishes
+    // before the dialog's first build must still be removable.
+    final navigator = Navigator.of(context);
+    final progressRoute = DialogRoute<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (c) => AlertDialog(
+        title: const Text('Fetching photos'),
+        content: ValueListenableBuilder<PhotoBackfillProgress>(
+          valueListenable: progress,
+          builder: (_, p, __) => Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              LinearProgressIndicator(value: p.total == 0 ? null : p.fraction),
+              const SizedBox(height: 12),
+              Text('${p.processed} of ${p.total} place'
+                  '${p.total == 1 ? '' : 's'} · ${p.photosAdded} photo'
+                  '${p.photosAdded == 1 ? '' : 's'} added'),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              if (!cancel.isCompleted) cancel.complete();
+              Navigator.of(c).pop();
+            },
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+    unawaited(navigator.push(progressRoute));
+
+    var last = progress.value;
+    String? error;
+    try {
+      final stream =
+          PhotoBackfillService().run(cancel: cancel, onlyImportId: id);
+      await for (final p in stream) {
+        last = p;
+        progress.value = p;
+      }
+      error = last.error;
+    } catch (e) {
+      error = '$e';
+    }
+    if (navigator.mounted && progressRoute.isActive) {
+      navigator.removeRoute(progressRoute);
+    }
+    // `progress` is deliberately NOT disposed — a popped route keeps
+    // rebuilding through its exit transition and a
+    // `ValueListenableBuilder` re-subscribing to a disposed notifier
+    // throws (see `coverage_flow.dart`).
+    if (!mounted) return;
+    setState(() => _busyId = null);
+    final added = last.photosAdded;
+    if (error != null) {
+      _snack('Photo fetch failed: $error');
+    } else if (last.total == 0) {
+      _snack('Nothing to fetch — those places already have photos.');
+    } else if (cancel.isCompleted) {
+      _snack('Stopped — added $added photo${added == 1 ? '' : 's'}.');
+    } else {
+      _snack('Added $added photo${added == 1 ? '' : 's'} across '
+          '${last.processed} place${last.processed == 1 ? '' : 's'}.');
+    }
+  }
+
   Future<void> _serverMissingDialog(String note) async {
     final open = await showDialog<bool>(
       context: context,
@@ -871,7 +1053,7 @@ class _TimelineImportsSheetState extends ConsumerState<_TimelineImportsSheet> {
                                   CircularProgressIndicator(strokeWidth: 2),
                             ),
                           )
-                        else
+                        else ...[
                           IconButton(
                             icon: const Icon(
                               Icons.download_for_offline_outlined,
@@ -881,6 +1063,13 @@ class _TimelineImportsSheetState extends ConsumerState<_TimelineImportsSheet> {
                                 ? null
                                 : () => _mapDetail(record),
                           ),
+                          IconButton(
+                            icon: const Icon(Icons.photo_library_outlined),
+                            tooltip: 'Photos…',
+                            onPressed:
+                                _busyId != null ? null : () => _photos(record),
+                          ),
+                        ],
                         IconButton(
                           icon: const Icon(Icons.undo),
                           tooltip: 'Undo import',

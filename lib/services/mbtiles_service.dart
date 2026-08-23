@@ -129,6 +129,136 @@ class TilesRegion {
       TilesRegion(name: name, path: path, bytes: bytes, role: role);
 }
 
+/// How old a coverage pack may get before it counts as stale — six
+/// months, which is the wording the regions screen shows ("older than
+/// 6 months") and the window the weekly auto-refresh pass uses.
+const int staleArchiveDays = 180;
+
+/// The `-YYYYMMDD` stamp `coverageFileName` writes before the
+/// extension, as a compact `20260822` int, or `null` when the name
+/// carries no valid date. Pure.
+///
+/// Accepts a name with or without its extension, so both
+/// [TilesRegion.name] and a bare file name work. Deliberately
+/// tolerant: a hand-sideloaded `lake-district.pmtiles` has no date,
+/// which reads as "unknown age" — never as "stale". We must not
+/// re-fetch or delete a file whose age we can't reason about.
+int? archiveDateFromName(String fileName) {
+  final match = RegExp(r'-(\d{8})(?:\.[A-Za-z0-9]+)?$').firstMatch(fileName);
+  if (match == null) return null;
+  final compact = int.parse(match.group(1)!);
+  return _dateFromCompact(compact) == null ? null : compact;
+}
+
+/// Per-role accounting for the installed library — what the regions
+/// screen's header line and the "delete all coverage packs" confirm
+/// dialog are built from. Pure, so the arithmetic is unit-testable
+/// without a disk.
+class StorageSummary {
+  const StorageSummary({
+    required this.counts,
+    required this.bytes,
+    required this.staleCoverageCount,
+  });
+
+  static const empty =
+      StorageSummary(counts: {}, bytes: {}, staleCoverageCount: 0);
+
+  /// Archives per role. Roles with nothing installed are absent rather
+  /// than zero — [countFor] papers over the difference.
+  final Map<TileRole, int> counts;
+
+  /// Bytes per role, same keying as [counts].
+  final Map<TileRole, int> bytes;
+
+  /// Coverage packs older than [staleArchiveDays]. Packs whose name
+  /// carries no date are unknown-age, and never counted here.
+  final int staleCoverageCount;
+
+  int countFor(TileRole role) => counts[role] ?? 0;
+
+  int bytesFor(TileRole role) => bytes[role] ?? 0;
+
+  int get totalBytes => bytes.values.fold(0, (a, b) => a + b);
+
+  int get totalCount => counts.values.fold(0, (a, b) => a + b);
+}
+
+/// Adds [installed] up per role and counts the stale coverage packs.
+StorageSummary summarizeArchives(
+  List<TilesRegion> installed, {
+  DateTime? now,
+  int staleAfterDays = staleArchiveDays,
+}) {
+  final at = (now ?? DateTime.now()).toUtc();
+  final counts = <TileRole, int>{};
+  final bytes = <TileRole, int>{};
+  var stale = 0;
+  for (final r in installed) {
+    counts[r.role] = (counts[r.role] ?? 0) + 1;
+    bytes[r.role] = (bytes[r.role] ?? 0) + r.bytes;
+    if (r.role == TileRole.coverage &&
+        _isStaleName(r.name, at, staleAfterDays)) {
+      stale++;
+    }
+  }
+  return StorageSummary(
+    counts: counts,
+    bytes: bytes,
+    staleCoverageCount: stale,
+  );
+}
+
+/// The coverage packs a refresh pass should rebuild: stale ones only,
+/// OLDEST first, capped at [maxCount]. Pure — the caller owns the
+/// network, the byte budget and the delete-after-success step.
+///
+/// Only [TileRole.coverage] archives are eligible: a region or world
+/// overview is the user's own file, and re-fetching one is not ours to
+/// decide.
+List<TilesRegion> selectStalePacks(
+  List<TilesRegion> installed, {
+  DateTime? now,
+  int maxCount = 2,
+  int staleAfterDays = staleArchiveDays,
+}) {
+  if (maxCount <= 0) return const [];
+  final at = (now ?? DateTime.now()).toUtc();
+  final stale = <({TilesRegion region, int date})>[];
+  for (final r in installed) {
+    if (r.role != TileRole.coverage) continue;
+    final date = archiveDateFromName(r.name);
+    if (date == null) continue;
+    if (!_isStaleName(r.name, at, staleAfterDays)) continue;
+    stale.add((region: r, date: date));
+  }
+  stale.sort((a, b) => a.date.compareTo(b.date));
+  return [for (final e in stale.take(maxCount)) e.region];
+}
+
+bool _isStaleName(String fileName, DateTime at, int staleAfterDays) {
+  final compact = archiveDateFromName(fileName);
+  if (compact == null) return false;
+  final built = _dateFromCompact(compact);
+  if (built == null) return false;
+  return at.difference(built).inDays >= staleAfterDays;
+}
+
+/// `20260822` → 2026-08-22 UTC, or `null` for an impossible date
+/// (`20260231`, month 00, a pre-1970 year — all of which mean the eight
+/// digits weren't a date at all).
+DateTime? _dateFromCompact(int compact) {
+  final year = compact ~/ 10000;
+  final month = (compact ~/ 100) % 100;
+  final day = compact % 100;
+  if (year < 1970 || month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
+  final built = DateTime.utc(year, month, day);
+  if (built.month != month || built.day != day) return null;
+  return built;
+}
+
 /// Manages the on-device tile-archive library.
 ///
 /// Storage layout:

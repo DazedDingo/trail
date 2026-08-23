@@ -41,22 +41,28 @@ class PhotoBackfillProgress {
 /// shot doesn't replace what the auto-fetcher would have found.
 ///
 /// Timeline-imported rows (schema v5, `PingSource.imported`) are never
-/// eligible: their coordinates must not leave the device via the
-/// Wikimedia lookup (CLAUDE.md gotcha 21, docs/TIMELINE_IMPORT.md
+/// eligible by default: their coordinates must not leave the device via
+/// the Wikimedia lookup (CLAUDE.md gotcha 21, docs/TIMELINE_IMPORT.md
 /// exclusions). Belt-and-braces with the DB-level default in
 /// `PingDao.allPings()`, which already excludes imports before this
-/// function ever sees them — this check holds even if a future caller
-/// passes `includeImported: true`.
+/// function ever sees them.
+///
+/// [includeImported] is the ONE opt-in: the per-import "Photos…" action
+/// in the Timeline imports sheet, where the user has read what gets sent
+/// and tapped Fetch for that one import. Only [PhotoBackfillService.run]
+/// with `onlyImportId` set passes it, and it passes rows that already
+/// come from a single `import_id` — never the whole table.
 List<Ping> selectEligibleForBackfill(
   List<Ping> pings,
-  Set<int> pingIdsWithWikimedia,
-) {
+  Set<int> pingIdsWithWikimedia, {
+  bool includeImported = false,
+}) {
   final out = <Ping>[];
   for (final p in pings) {
     if (p.id == null) continue;
     if (p.lat == null || p.lon == null) continue;
     if (p.source == PingSource.noFix) continue;
-    if (p.source == PingSource.imported) continue;
+    if (!includeImported && p.source == PingSource.imported) continue;
     if (pingIdsWithWikimedia.contains(p.id!)) continue;
     out.add(p);
   }
@@ -82,16 +88,33 @@ class PhotoBackfillService {
   /// Streams progress events. Final event carries `finished: true` (or
   /// an `error` string). Cancellation: complete [cancel] from the
   /// caller — the next inter-ping pause checks it and exits cleanly.
-  Stream<PhotoBackfillProgress> run({Completer<void>? cancel}) async* {
+  ///
+  /// [onlyImportId] restricts the walk to one Timeline import batch —
+  /// the per-import "Photos…" action, the only path on which imported
+  /// coordinates are allowed to reach Wikimedia (CLAUDE.md gotcha 21:
+  /// explicit, per import, after a dialog that says what gets sent).
+  /// Leave it null and imports are excluded exactly as before; the
+  /// `area_photos` cell cache and the "already has wikimedia rows"
+  /// skip apply on both paths.
+  Stream<PhotoBackfillProgress> run({
+    Completer<void>? cancel,
+    int? onlyImportId,
+  }) async* {
     final db = await TrailDatabase.shared();
     final pingDao = PingDao(db);
     final photoDao = PingPhotoDao(db);
     final areaDao = AreaPhotoDao(db);
     final salt = await PhotoShufflePrefs.getSalt();
 
-    final all = await pingDao.allPings();
+    final all = onlyImportId == null
+        ? await pingDao.allPings()
+        : await pingDao.pingsByImportId(onlyImportId);
     final wikimediaIds = await _idsWithWikimediaPhotos(db);
-    final eligible = selectEligibleForBackfill(all, wikimediaIds);
+    final eligible = selectEligibleForBackfill(
+      all,
+      wikimediaIds,
+      includeImported: onlyImportId != null,
+    );
     final total = eligible.length;
     var processed = 0;
     var added = 0;

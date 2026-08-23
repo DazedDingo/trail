@@ -143,6 +143,57 @@ class PingDao {
     return rows.map(Ping.fromMap).toList();
   }
 
+  /// ONE page of History, newest-first, clipped to the half-open
+  /// window `[startUtcMs, endUtcMs)` (epoch ms UTC — the local-year →
+  /// UTC conversion lives in `pings_provider.dart`,
+  /// `historyYearUtcBoundsMs`, so this layer stays free of Flutter
+  /// types). Start inclusive, end exclusive on purpose: a calendar year
+  /// is `[1 Jan, next 1 Jan)`, so consecutive years tile the timeline
+  /// with neither a gap nor a shared row (unlike [byDateRange]'s
+  /// `BETWEEN`, which is inclusive at both ends because export/archive
+  /// windows are user-picked days).
+  ///
+  /// Keyset pagination, not OFFSET: pass the LAST row's `ts_utc` of the
+  /// previous page as [beforeTsUtcMs] and the next page starts strictly
+  /// below it. `LIMIT n OFFSET k` re-walks and discards `k` index
+  /// entries per page, which turns "Load more" on a decade-deep import
+  /// into an O(k) scan; a keyset seek is one index descent regardless
+  /// of depth, and it can't skip or duplicate rows when a write lands
+  /// between two pages.
+  ///
+  /// Includes Timeline imports by DEFAULT (the inverse of [recent]) —
+  /// History is the one list where an import belongs (gotcha 34).
+  ///
+  /// Ties: rows sharing the exact boundary millisecond with the page's
+  /// last row are not carried into the next page (the seek is strictly
+  /// `<`). `ts_utc` is a wall-clock-millisecond fix time, so this needs
+  /// two pings in the same millisecond at a 200-row page boundary to
+  /// bite; the tie-break inside a page is `id DESC` so the order is
+  /// still total and stable.
+  Future<List<Ping>> pageByRange({
+    required int startUtcMs,
+    required int endUtcMs,
+    required int limit,
+    int? beforeTsUtcMs,
+    bool includeImported = true,
+  }) async {
+    final where = StringBuffer('ts_utc >= ? AND ts_utc < ?');
+    final args = <Object?>[startUtcMs, endUtcMs];
+    if (beforeTsUtcMs != null) {
+      where.write(' AND ts_utc < ?');
+      args.add(beforeTsUtcMs);
+    }
+    if (!includeImported) where.write(' AND $notImportedPredicate');
+    final rows = await db.query(
+      'pings',
+      where: where.toString(),
+      whereArgs: args,
+      orderBy: 'ts_utc DESC, id DESC',
+      limit: limit,
+    );
+    return rows.map(Ping.fromMap).toList();
+  }
+
   /// Fixes only — rows with a usable `lat`/`lon` — oldest-first,
   /// optionally clipped to `[startUtc, endUtc]` (both ends inclusive;
   /// either bound may be omitted, neither = every fix ever). This is the
@@ -346,6 +397,58 @@ class PingDao {
     );
     final row = r.first;
     return (minUtcMs: row['lo'] as int?, maxUtcMs: row['hi'] as int?);
+  }
+
+  /// Full [Ping] rows for one import batch's fixes, oldest-first.
+  ///
+  /// [fixesByImportId] hands the coverage planner stripped triples; the
+  /// per-import "Photos…" action needs real [Ping] objects (ids and
+  /// source) to feed `selectEligibleForBackfill`. Fixes only — a
+  /// no-coordinate row has nothing to look up. No cap: the caller is
+  /// about to make one network round-trip per uncached cell, so it wants
+  /// the honest count, not a sample.
+  Future<List<Ping>> pingsByImportId(int importId) async {
+    final rows = await db.query(
+      'pings',
+      where: 'import_id = ? AND $fixPredicate',
+      whereArgs: [importId],
+      orderBy: 'ts_utc ASC',
+    );
+    return rows.map(Ping.fromMap).toList();
+  }
+
+  /// Every imported Timeline **visit** row, oldest-first — the
+  /// `visitStart` / `visitEnd` pairs `timeline_mappers.dart` writes for a
+  /// `semanticSegments[].visit` element (both rows share the
+  /// `gmaps:visit:<TYPE>:<placeId>` note and the place's coordinates, see
+  /// gotcha 35). Feeds the Places screen via `buildPlaces`.
+  ///
+  /// The one read that is imports-ONLY: a visit note can only exist on an
+  /// imported row, and live pings have no notion of "a place you stayed
+  /// at". This does not loosen the exclusion contract (gotcha 34) — it
+  /// runs the other way, showing imports and nothing else.
+  ///
+  /// Bounded by the export, not by history: an Android Timeline export
+  /// carries a few thousand visits, so this returns the whole set rather
+  /// than paging.
+  Future<List<({int tsUtcMs, double lat, double lon, String note})>>
+      importedVisits() async {
+    final rows = await db.query(
+      'pings',
+      columns: const ['ts_utc', 'lat', 'lon', 'note'],
+      where: "source = 'import' AND note LIKE 'gmaps:visit:%' "
+          'AND $fixPredicate',
+      orderBy: 'ts_utc ASC',
+    );
+    return [
+      for (final r in rows)
+        (
+          tsUtcMs: r['ts_utc'] as int,
+          lat: (r['lat'] as num).toDouble(),
+          lon: (r['lon'] as num).toDouble(),
+          note: r['note'] as String,
+        ),
+    ];
   }
 
   /// `(ts_utc, lat, lon)` for one import batch's fixes, oldest-first,

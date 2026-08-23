@@ -23,6 +23,8 @@ import 'coverage_planner.dart';
 ///     yet, waiting for the app to be opened on a suitable network.
 ///   * [settingsKey] — the two user toggles.
 ///   * [lastFetchKey] / [noticeKey] — what the Settings tile shows.
+///   * [lastRefreshKey] — when the stale-pack refresh pass last ran, so
+///     it happens weekly rather than on every resume.
 ///   * [serverUrlKey] — the user's own extract server. Not a secret.
 ///
 /// The bearer token is the one value that does NOT live here: it goes
@@ -38,6 +40,7 @@ class CoveragePrefs {
   static const pendingKey = 'trail_coverage_pending_v1';
   static const settingsKey = 'trail_coverage_settings_v1';
   static const lastFetchKey = 'trail_coverage_last_fetch_v1';
+  static const lastRefreshKey = 'trail_coverage_last_refresh_v1';
   static const serverUrlKey = 'trail_coverage_server_url_v1';
   static const noticeKey = 'trail_coverage_notice_v1';
   static const tokenKey = 'trail_coverage_token_v1';
@@ -247,6 +250,21 @@ class CoveragePrefs {
   static Future<void> setLastFetch(DateTime when) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(lastFetchKey, when.toUtc().millisecondsSinceEpoch);
+  }
+
+  /// When the weekly stale-coverage-pack refresh pass last spent
+  /// network. `null` until the first pass runs.
+  static Future<DateTime?> readLastRefresh() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ms = prefs.getInt(lastRefreshKey);
+    return ms == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true);
+  }
+
+  static Future<void> setLastRefresh(DateTime when) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(lastRefreshKey, when.toUtc().millisecondsSinceEpoch);
   }
 
   /// One-line status the Settings tile shows — e.g. why an auto run

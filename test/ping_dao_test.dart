@@ -6,6 +6,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:sqlite3/open.dart';
 import 'package:trail/db/ping_dao.dart';
 import 'package:trail/models/ping.dart';
+import 'package:trail/services/stats/places_service.dart';
 
 /// Isolate-side sqlite3 loader. Must be a TOP-LEVEL function so it can be
 /// sent across the `Isolate.spawn` boundary inside `sqflite_common_ffi`'s
@@ -1030,6 +1031,305 @@ void main() {
     test('limit <= 0 disables the cap', () async {
       await seedImport(1, 5, DateTime.utc(2015, 6, 1));
       expect(await dao.fixesByImportId(1, limit: 0), hasLength(5));
+    });
+  });
+  group('PingDao.importedVisits (Places screen)', () {
+    Future<void> seedVisitPair(
+      int importId,
+      DateTime start,
+      DateTime end, {
+      String type = 'UNKNOWN',
+      String placeId = '-',
+      double lat = 51.5,
+      double lon = -0.1,
+    }) =>
+        dao.insertImportedBatch(
+          [
+            for (final t in [start, end])
+              Ping(
+                timestampUtc: t,
+                lat: lat,
+                lon: lon,
+                source: PingSource.imported,
+                note: 'gmaps:visit:$type:$placeId',
+              ),
+          ],
+          importId: importId,
+        );
+
+    test('returns only imported visit rows, oldest-first', () async {
+      // A live ping that happens to carry a visit-shaped note (paranoia:
+      // the source check, not the note, is what excludes it).
+      await dao.insert(_p(
+        DateTime.utc(2026, 1, 1),
+        lat: 60,
+        lon: 10,
+        note: 'gmaps:visit:HOME:fake',
+      ));
+      // Imported path/activity/raw rows — same import, wrong note.
+      await dao.insertImportedBatch(
+        [
+          _p(DateTime.utc(2015, 6, 1), lat: 51.0, lon: -0.2,
+              note: 'gmaps:path'),
+          _p(DateTime.utc(2015, 6, 1, 1),
+              lat: 51.0, lon: -0.2, note: 'gmaps:activity:WALKING:1200m'),
+          _p(DateTime.utc(2015, 6, 1, 2),
+              lat: 51.0, lon: -0.2, note: 'gmaps:raw:GPS'),
+        ],
+        importId: 1,
+      );
+      // Two visits, seeded newest-first to prove the ORDER BY.
+      await seedVisitPair(
+        1,
+        DateTime.utc(2019, 6, 2, 9),
+        DateTime.utc(2019, 6, 2, 10),
+        type: 'WORK',
+        placeId: 'p2',
+      );
+      await seedVisitPair(
+        1,
+        DateTime.utc(2015, 6, 3, 9),
+        DateTime.utc(2015, 6, 3, 11),
+        type: 'HOME',
+        placeId: 'p1',
+      );
+
+      final rows = await dao.importedVisits();
+      expect(rows, hasLength(4));
+      expect(
+        rows.map((r) => r.note).toList(),
+        [
+          'gmaps:visit:HOME:p1',
+          'gmaps:visit:HOME:p1',
+          'gmaps:visit:WORK:p2',
+          'gmaps:visit:WORK:p2',
+        ],
+      );
+      final ts = rows.map((r) => r.tsUtcMs).toList();
+      expect(ts, [...ts]..sort());
+      expect(rows.first.lat, 51.5);
+      expect(rows.first.lon, -0.1);
+    });
+
+    test('a coordinate-less visit row is dropped', () async {
+      await seedVisitPair(
+        1,
+        DateTime.utc(2015, 6, 3, 9),
+        DateTime.utc(2015, 6, 3, 11),
+        placeId: 'p1',
+      );
+      await db.insert('pings', {
+        'ts_utc': DateTime.utc(2015, 6, 4).millisecondsSinceEpoch,
+        'source': 'import',
+        'import_id': 1,
+        'note': 'gmaps:visit:HOME:p1',
+      });
+      expect(await dao.countByImportId(1), 3);
+      expect(await dao.importedVisits(), hasLength(2));
+    });
+
+    test('no imports → empty', () async {
+      await dao.insert(_p(DateTime.utc(2026, 1, 1), lat: 60, lon: 10));
+      expect(await dao.importedVisits(), isEmpty);
+    });
+
+    test('feeds buildPlaces end to end', () async {
+      await seedVisitPair(
+        1,
+        DateTime.utc(2015, 6, 3, 9),
+        DateTime.utc(2015, 6, 3, 11),
+        type: 'HOME',
+        placeId: 'p1',
+      );
+      await seedVisitPair(
+        1,
+        DateTime.utc(2016, 6, 3, 9),
+        DateTime.utc(2016, 6, 3, 10),
+        type: 'HOME',
+        placeId: 'p1',
+      );
+      final places = buildPlaces(await dao.importedVisits());
+      expect(places, hasLength(1));
+      expect(places.single.key, 'pid:p1');
+      expect(places.single.semanticType, 'Home');
+      expect(places.single.visitCount, 2);
+      expect(places.single.totalDuration, const Duration(hours: 3));
+    });
+  });
+
+  group('PingDao.pageByRange (History paging, 0.16.2)', () {
+    // Plain epoch-ms bounds: the local-year → UTC conversion is the
+    // provider's job (`historyYearUtcBoundsMs`), so the DAO test picks
+    // UTC instants and stays timezone-independent.
+    final start2024 = DateTime.utc(2024, 1, 1).millisecondsSinceEpoch;
+    final start2025 = DateTime.utc(2025, 1, 1).millisecondsSinceEpoch;
+
+    Future<void> seed(List<DateTime> stamps) async {
+      for (final t in stamps) {
+        await dao.insert(_p(t, lat: 51, lon: -0.1));
+      }
+    }
+
+    test('start bound inclusive, end bound exclusive', () async {
+      await seed([
+        DateTime.utc(2023, 12, 31, 23, 59, 59, 999), // just before
+        DateTime.utc(2024, 1, 1), // exactly the start
+        DateTime.utc(2024, 12, 31, 23, 59, 59, 999), // last ms of the year
+        DateTime.utc(2025, 1, 1), // exactly the end
+      ]);
+      final rows = await dao.pageByRange(
+        startUtcMs: start2024,
+        endUtcMs: start2025,
+        limit: 100,
+      );
+      expect(rows.map((p) => p.timestampUtc).toList(), [
+        DateTime.utc(2024, 12, 31, 23, 59, 59, 999),
+        DateTime.utc(2024, 1, 1),
+      ]);
+    });
+
+    test('newest first', () async {
+      await seed([
+        DateTime.utc(2024, 3, 1),
+        DateTime.utc(2024, 9, 1),
+        DateTime.utc(2024, 6, 1),
+      ]);
+      final rows = await dao.pageByRange(
+        startUtcMs: start2024,
+        endUtcMs: start2025,
+        limit: 100,
+      );
+      expect(rows.map((p) => p.timestampUtc.month).toList(), [9, 6, 3]);
+    });
+
+    test('limit caps the page at the newest rows', () async {
+      await seed([
+        for (var d = 1; d <= 5; d++) DateTime.utc(2024, 1, d),
+      ]);
+      final rows = await dao.pageByRange(
+        startUtcMs: start2024,
+        endUtcMs: start2025,
+        limit: 2,
+      );
+      expect(rows.map((p) => p.timestampUtc.day).toList(), [5, 4]);
+    });
+
+    test('keyset: beforeTsUtcMs walks the whole year with no duplicates '
+        'and no gaps', () async {
+      await seed([
+        for (var d = 1; d <= 5; d++) DateTime.utc(2024, 1, d),
+      ]);
+      final seen = <DateTime>[];
+      int? before;
+      while (true) {
+        final page = await dao.pageByRange(
+          startUtcMs: start2024,
+          endUtcMs: start2025,
+          limit: 2,
+          beforeTsUtcMs: before,
+        );
+        if (page.isEmpty) break;
+        seen.addAll(page.map((p) => p.timestampUtc));
+        before = page.last.timestampUtc.millisecondsSinceEpoch;
+      }
+      expect(seen.map((t) => t.day).toList(), [5, 4, 3, 2, 1]);
+      expect(seen.toSet(), hasLength(5)); // no row served twice
+    });
+
+    test('beforeTsUtcMs is strict — the seek row is not repeated',
+        () async {
+      await seed([
+        DateTime.utc(2024, 1, 1),
+        DateTime.utc(2024, 1, 2),
+      ]);
+      final rows = await dao.pageByRange(
+        startUtcMs: start2024,
+        endUtcMs: start2025,
+        limit: 100,
+        beforeTsUtcMs: DateTime.utc(2024, 1, 2).millisecondsSinceEpoch,
+      );
+      expect(rows.map((p) => p.timestampUtc).toList(),
+          [DateTime.utc(2024, 1, 1)]);
+    });
+
+    test('paging past the oldest row returns an empty page', () async {
+      await seed([DateTime.utc(2024, 1, 1)]);
+      final rows = await dao.pageByRange(
+        startUtcMs: start2024,
+        endUtcMs: start2025,
+        limit: 100,
+        beforeTsUtcMs: DateTime.utc(2024, 1, 1).millisecondsSinceEpoch,
+      );
+      expect(rows, isEmpty);
+    });
+
+    test('a year with no pings is empty', () async {
+      await seed([DateTime.utc(2026, 5, 1)]);
+      final rows = await dao.pageByRange(
+        startUtcMs: start2024,
+        endUtcMs: start2025,
+        limit: 100,
+      );
+      expect(rows, isEmpty);
+    });
+
+    test('coordinate-less rows are kept — History shows the gaps',
+        () async {
+      await dao.insert(
+          _p(DateTime.utc(2024, 2, 2), source: PingSource.noFix));
+      final rows = await dao.pageByRange(
+        startUtcMs: start2024,
+        endUtcMs: start2025,
+        limit: 100,
+      );
+      expect(rows, hasLength(1));
+      expect(rows.single.source, PingSource.noFix);
+    });
+
+    test('imports are INCLUDED by default (gotcha 34: History is their '
+        'one list)', () async {
+      await seed([DateTime.utc(2024, 4, 1)]);
+      await dao.insertImportedBatch(
+        [
+          Ping(
+            timestampUtc: DateTime.utc(2024, 5, 1),
+            lat: 51,
+            lon: -0.1,
+            source: PingSource.scheduled,
+          ),
+        ],
+        importId: 1,
+      );
+      final rows = await dao.pageByRange(
+        startUtcMs: start2024,
+        endUtcMs: start2025,
+        limit: 100,
+      );
+      expect(rows.map((p) => p.source).toList(),
+          [PingSource.imported, PingSource.scheduled]);
+    });
+
+    test('includeImported: false drops them', () async {
+      await seed([DateTime.utc(2024, 4, 1)]);
+      await dao.insertImportedBatch(
+        [
+          Ping(
+            timestampUtc: DateTime.utc(2024, 5, 1),
+            lat: 51,
+            lon: -0.1,
+            source: PingSource.scheduled,
+          ),
+        ],
+        importId: 1,
+      );
+      final rows = await dao.pageByRange(
+        startUtcMs: start2024,
+        endUtcMs: start2025,
+        limit: 100,
+        includeImported: false,
+      );
+      expect(rows, hasLength(1));
+      expect(rows.single.source, PingSource.scheduled);
     });
   });
 }

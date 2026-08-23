@@ -4,6 +4,19 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.17.0+102] — 2026-08-23
+
+### Added
+- **Places.** *Settings → Insights → Places* lists every place your Google Timeline recorded a visit to — visit count, first and last visit, time spent, with Home / Work chips and reverse-geocoded names — sortable by visits, most recent or longest. Tap a place for its visit list; each visit has a *Show on map* that opens the map on that day. Fills in as soon as you import.
+- **History over years.** Year chips at the top (All · 2026 · 2025 · 2024 …), month headers ("August 2024"), and "Load more" paging inside a year instead of one long recent list.
+- **Include imported history in Stats** (*Settings → Insights*, off by default): when on, the heatmap, top places, time-of-day chart and trips also count Google Timeline imports, and the Stats title shows an *incl. imports* chip.
+- **Photos for an import, on request.** *Timeline imports → Photos…* looks up Wikimedia photos for that import's places after an explicit confirmation that spells out what is sent. Imports still never do this on their own.
+- **Home location from Google.** If your export carries a HOME place and Trail's home is unset or more than 100 m away, the import screen offers *Use as home location*.
+- **Coverage hygiene.** The Regions screen shows storage by role ("Region 738 MB · Coverage 12 packs, 38 MB (3 older than 6 months) · Overview 45 MB · total 821 MB"), has *Delete all coverage packs…*, and once a week on Wi-Fi Trail quietly re-fetches up to two coverage packs older than six months from a newer planet build (inside the same 20 MB auto cap). The add button now says *Add archive*.
+
+### Changed
+- `pubspec.lock` is committed so CI builds the versions that were tested.
+
 ## [0.16.2+101] — 2026-08-23
 
 ### Fixed

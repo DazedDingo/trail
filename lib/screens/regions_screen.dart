@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../providers/mbtiles_provider.dart';
 import '../providers/tile_server_provider.dart';
+import '../services/coverage/coverage_service.dart';
 import '../services/github_api.dart';
 import '../services/local_tile_server.dart';
 import '../services/mbtiles_service.dart';
@@ -44,11 +45,67 @@ class _RegionsScreenState extends ConsumerState<RegionsScreen> {
 
   void _forgetProbe(String path) => _probes.remove(path);
 
+  /// Bulk-deletes every [TileRole.coverage] pack after one confirm.
+  ///
+  /// Coverage packs are the only archives the app installs on its own,
+  /// so they are the only ones it may offer to clear wholesale — and
+  /// they are also the cheapest to lose, since auto-fetch rebuilds them
+  /// from the places the user visits. Extents are re-probed afterwards
+  /// or the worker keeps believing the deleted packs still cover those
+  /// places and stops queueing them (CLAUDE.md gotcha 36).
+  Future<void> _deleteAllCoverage(List<TilesRegion> installed) async {
+    final packs =
+        installed.where((r) => r.role == TileRole.coverage).toList();
+    if (packs.isEmpty) return;
+    final bytes = packs.fold<int>(0, (a, r) => a + r.bytes);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Delete all coverage packs?'),
+        content: Text(
+          'Deletes ${packs.length} coverage pack'
+          '${packs.length == 1 ? '' : 's'} (${_formatBytes(bytes)}). '
+          'Auto-fetch will rebuild them as you visit places again.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    for (final pack in packs) {
+      await TilesService.delete(pack);
+      _forgetProbe(pack.path);
+    }
+    if (!mounted) return;
+    invalidateTileProviders(ref);
+    await CoverageService.instance.refreshExtents();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Deleted ${packs.length} coverage pack'
+          '${packs.length == 1 ? '' : 's'} — ${_formatBytes(bytes)} freed',
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final regions = ref.watch(installedRegionsProvider);
     final active = ref.watch(activeRegionProvider);
     final tileServer = ref.watch(tileServerProvider).valueOrNull;
+    final installed = regions.valueOrNull ?? const <TilesRegion>[];
+    final coveragePacks =
+        installed.where((r) => r.role == TileRole.coverage).length;
 
     return Scaffold(
       appBar: AppBar(
@@ -89,7 +146,7 @@ class _RegionsScreenState extends ConsumerState<RegionsScreen> {
                 icon: Icons.add_circle_outline,
                 title: 'Add an archive',
                 body:
-                    'Tap "Add region" for four sources: pick a `.pmtiles` '
+                    'Tap "Add archive" for four sources: pick a `.pmtiles` '
                     'or `.mbtiles` file from your device, paste a download '
                     'URL, browse the curated catalog (built from '
                     'raw.githubusercontent), or build one on demand from a '
@@ -131,6 +188,20 @@ class _RegionsScreenState extends ConsumerState<RegionsScreen> {
               }
             },
           ),
+          PopupMenuButton<_LibraryAction>(
+            tooltip: 'Library actions',
+            onSelected: (a) => switch (a) {
+              _LibraryAction.deleteAllCoverage =>
+                _deleteAllCoverage(installed),
+            },
+            itemBuilder: (_) => [
+              PopupMenuItem(
+                value: _LibraryAction.deleteAllCoverage,
+                enabled: coveragePacks > 0,
+                child: const Text('Delete all coverage packs…'),
+              ),
+            ],
+          ),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
@@ -141,7 +212,7 @@ class _RegionsScreenState extends ConsumerState<RegionsScreen> {
           _probes.clear();
         },
         icon: const Icon(Icons.add),
-        label: const Text('Add region'),
+        label: const Text('Add archive'),
       ),
       body: Column(
         children: [
@@ -163,7 +234,12 @@ class _RegionsScreenState extends ConsumerState<RegionsScreen> {
                   itemCount: list.length + 1,
                   separatorBuilder: (_, __) => const SizedBox(height: 8),
                   itemBuilder: (context, i) {
-                    if (i == 0) return _Header(activeRegion: activeRegion);
+                    if (i == 0) {
+                      return _Header(
+                        activeRegion: activeRegion,
+                        summary: summarizeArchives(list),
+                      );
+                    }
                     final r = list[i - 1];
                     final isActive = activeRegion?.path == r.path;
                     return _RegionTile(
@@ -315,7 +391,12 @@ class _MixedSchemaNote extends StatelessWidget {
 
 class _Header extends StatelessWidget {
   final TilesRegion? activeRegion;
-  const _Header({required this.activeRegion});
+
+  /// Per-role byte totals for the whole library — the one place the
+  /// user can see what the offline maps actually cost them.
+  final StorageSummary summary;
+
+  const _Header({required this.activeRegion, required this.summary});
 
   @override
   Widget build(BuildContext context) {
@@ -345,6 +426,13 @@ class _Header extends StatelessWidget {
                     'detailed-first, and zooms no archive holds are drawn '
                     'from the nearest coarser tile.',
                     style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    _storageLine(summary),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
                   ),
                 ],
               ),
@@ -584,6 +672,10 @@ class _RoleChip extends StatelessWidget {
 }
 
 enum _RegionAction { setActive, clearActive, changeRole, delete }
+
+/// Whole-library actions in the app-bar overflow, as opposed to the
+/// per-row [_RegionAction] menu.
+enum _LibraryAction { deleteAllCoverage }
 
 enum _AddSource { filePicker, url, catalog, build }
 
@@ -1206,6 +1298,31 @@ class _EmptyState extends StatelessWidget {
       ),
     );
   }
+}
+
+/// "Region 738.0 MB · Coverage 12 packs, 38.0 MB (3 older than 6
+/// months) · Overview 45.0 MB · total 821.0 MB" — roles with nothing
+/// installed are left out entirely, and the stale note only appears
+/// when a pack has actually aged past [staleArchiveDays].
+String _storageLine(StorageSummary summary) {
+  final parts = <String>[];
+  if (summary.countFor(TileRole.region) > 0) {
+    parts.add('Region ${_formatBytes(summary.bytesFor(TileRole.region))}');
+  }
+  final packs = summary.countFor(TileRole.coverage);
+  if (packs > 0) {
+    final stale = summary.staleCoverageCount;
+    parts.add(
+      'Coverage $packs pack${packs == 1 ? '' : 's'}, '
+      '${_formatBytes(summary.bytesFor(TileRole.coverage))}'
+      '${stale == 0 ? '' : ' ($stale older than 6 months)'}',
+    );
+  }
+  if (summary.countFor(TileRole.overview) > 0) {
+    parts.add('Overview ${_formatBytes(summary.bytesFor(TileRole.overview))}');
+  }
+  parts.add('total ${_formatBytes(summary.totalBytes)}');
+  return parts.join(' · ');
 }
 
 String _formatBytes(int bytes) {

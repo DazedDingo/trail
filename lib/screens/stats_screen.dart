@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 import '../providers/home_location_provider.dart';
 import '../providers/pings_provider.dart';
 import '../providers/stats_provider.dart';
+import '../providers/stats_settings_provider.dart';
 import '../services/stats/stats_service.dart';
 import '../widgets/help_button.dart';
 import '../widgets/stats/calendar_heatmap.dart';
@@ -31,10 +32,25 @@ class StatsScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final pingsAsync = ref.watch(allPingsProvider);
     final homeAsync = ref.watch(homeLocationProvider);
+    final includeImports =
+        ref.watch(statsIncludeImportsProvider).valueOrNull ?? false;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Stats'),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Stats'),
+            if (includeImports) ...[
+              const SizedBox(width: 8),
+              const Chip(
+                label: Text('incl. imports'),
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ],
+          ],
+        ),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: () =>

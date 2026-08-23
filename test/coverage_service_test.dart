@@ -16,7 +16,10 @@ class _FakeServer implements CoverageTileServer {
 
   final int bytesPerBox;
   final int tilesPerBox = 75;
-  final String planetDate = '20260822';
+
+  /// The planet build the server is currently serving. Mutable so a
+  /// test can put it on the same date as an installed pack.
+  String planetDate = '20260822';
 
   /// Set by a test to make the next dry-run / download fail.
   TileServerException? dryRunError;
@@ -103,6 +106,7 @@ void main() {
     Set<String> probeFailures = const {},
     CoverageTileServer? server,
     int autoByteCap = CoverageService.defaultAutoByteCap,
+    List<TilesRegion>? deleted,
   }) {
     return CoverageService(
       listInstalled: () async => installed,
@@ -111,6 +115,7 @@ void main() {
         return probes[path] ?? _summary(path);
       },
       serverFactory: () async => server,
+      deleteArchive: (region) async => deleted?.add(region),
       autoByteCap: autoByteCap,
     );
   }
@@ -557,6 +562,24 @@ void main() {
       );
     });
 
+    test('a refresh is appended to the download notice', () {
+      expect(
+        CoverageService.noticeFor(
+          const CoverageRunResult(
+              downloaded: 1, bytes: 2 * 1024 * 1024, refreshed: 2),
+          1,
+        ),
+        'Downloaded 1 area (2.0 MB). Refreshed 2 map-detail packs.',
+      );
+    });
+
+    test('a refresh on its own is the whole notice, singular', () {
+      expect(
+        CoverageService.noticeFor(const CoverageRunResult(refreshed: 1), 0),
+        'Refreshed 1 map-detail pack.',
+      );
+    });
+
     test('cancelled, failed, unconfigured and idle', () {
       expect(
         CoverageService.noticeFor(const CoverageRunResult(cancelled: true), 1),
@@ -572,6 +595,224 @@ void main() {
         isNull,
       );
       expect(CoverageService.noticeFor(const CoverageRunResult(), 0), isNull);
+    });
+  });
+
+  group('stale-pack refresh', () {
+    // A coverage pack named exactly the way `coverageFileName` names
+    // them, so the date sniffer sees production shapes.
+    TilesRegion pack(String date, {String slug = 'lat+51.38_lon-002.36'}) {
+      final name = 'coverage-$slug-z7-14-$date';
+      return TilesRegion(
+        name: name,
+        path: '/t/$name.pmtiles',
+        bytes: 2 * 1024 * 1024,
+        role: TileRole.coverage,
+      );
+    }
+
+    ServedArchiveSummary bounded(String path) => _summary(
+          path,
+          minZoom: 7,
+          maxZoom: 14,
+          bounds: [-2.40, 51.30, -2.32, 51.45],
+        );
+
+    CoverageService refreshServiceWith({
+      required List<TilesRegion> installed,
+      required CoverageTileServer server,
+      required List<TilesRegion> deleted,
+      int autoByteCap = CoverageService.defaultAutoByteCap,
+    }) =>
+        serviceWith(
+          installed: installed,
+          probes: {for (final r in installed) r.path: bounded(r.path)},
+          server: server,
+          deleted: deleted,
+          autoByteCap: autoByteCap,
+        );
+
+    final now = DateTime.utc(2026, 8, 22, 10);
+
+    test('rebuilds a stale pack on the new planet build, old file last',
+        () async {
+      final old = pack('20250101');
+      final server = _FakeServer();
+      final deleted = <TilesRegion>[];
+      final service = refreshServiceWith(
+        installed: [old],
+        server: server,
+        deleted: deleted,
+      );
+
+      await service.processPendingOnAppOpen(networkState: 'wifi', now: now);
+
+      expect(server.dryRuns.length, 1);
+      expect(server.downloads.length, 1);
+      // Same bbox and zooms as the pack we are replacing.
+      expect(server.downloads.single.toBounds(), [-2.40, 51.30, -2.32, 51.45]);
+      expect(deleted.map((r) => r.path), [old.path]);
+      expect(await CoveragePrefs.readNotice(),
+          'Refreshed 1 map-detail pack.');
+      expect(await CoveragePrefs.readLastRefresh(), isNotNull);
+    });
+
+    test('runs at most once a week', () async {
+      final server = _FakeServer();
+      final deleted = <TilesRegion>[];
+      final service = refreshServiceWith(
+        installed: [pack('20250101')],
+        server: server,
+        deleted: deleted,
+      );
+
+      await service.processPendingOnAppOpen(networkState: 'wifi', now: now);
+      expect(server.downloads.length, 1);
+
+      // Past the 10-minute auto-run throttle, still inside the week.
+      await service.processPendingOnAppOpen(
+        networkState: 'wifi',
+        now: now.add(const Duration(minutes: 11)),
+      );
+      expect(server.downloads.length, 1);
+
+      await service.processPendingOnAppOpen(
+        networkState: 'wifi',
+        now: now.add(const Duration(days: 8)),
+      );
+      expect(server.downloads.length, 2);
+    });
+
+    test('rebuilds at most two packs per pass, oldest first', () async {
+      final server = _FakeServer();
+      final deleted = <TilesRegion>[];
+      final service = refreshServiceWith(
+        installed: [
+          pack('20250601', slug: 'lat+50.00_lon-001.00'),
+          pack('20240101', slug: 'lat+51.00_lon-001.00'),
+          pack('20250101', slug: 'lat+52.00_lon-001.00'),
+        ],
+        server: server,
+        deleted: deleted,
+      );
+
+      await service.processPendingOnAppOpen(networkState: 'wifi', now: now);
+
+      expect(server.downloads.length, 2);
+      expect(
+        deleted.map((r) => archiveDateFromName(r.name)).toList(),
+        [20240101, 20250101],
+      );
+      expect(await CoveragePrefs.readNotice(),
+          'Refreshed 2 map-detail packs.');
+    });
+
+    test('a pack already on the server planet build is left alone',
+        () async {
+      final server = _FakeServer()..planetDate = '20250101';
+      final deleted = <TilesRegion>[];
+      final service = refreshServiceWith(
+        installed: [pack('20250101')],
+        server: server,
+        deleted: deleted,
+      );
+
+      await service.processPendingOnAppOpen(networkState: 'wifi', now: now);
+
+      expect(server.dryRuns.length, 1);
+      expect(server.downloads, isEmpty);
+      expect(deleted, isEmpty);
+      expect(await CoveragePrefs.readNotice(), isNull);
+    });
+
+    test('a fresh pack is never dry-run at all', () async {
+      final server = _FakeServer();
+      final deleted = <TilesRegion>[];
+      final service = refreshServiceWith(
+        installed: [pack('20260801')],
+        server: server,
+        deleted: deleted,
+      );
+
+      await service.processPendingOnAppOpen(networkState: 'wifi', now: now);
+
+      expect(server.dryRuns, isEmpty);
+      expect(server.downloads, isEmpty);
+      // The weekly marker is not burnt when there was nothing to do.
+      expect(await CoveragePrefs.readLastRefresh(), isNull);
+    });
+
+    test('what the pending fetch spent comes off the same 20 MB cap',
+        () async {
+      // 18 MB for the new place leaves 2 MB, and the refresh needs 18.
+      await CoveragePrefs.addPending(38.72, -9.14);
+      final server = _FakeServer(bytesPerBox: 18 * 1024 * 1024);
+      final deleted = <TilesRegion>[];
+      final service = refreshServiceWith(
+        installed: [pack('20250101')],
+        server: server,
+        deleted: deleted,
+      );
+
+      await service.processPendingOnAppOpen(networkState: 'wifi', now: now);
+
+      // One download: the pending place, not the stale pack.
+      expect(server.downloads.length, 1);
+      expect(deleted, isEmpty);
+      final notice = await CoveragePrefs.readNotice();
+      expect(notice, 'Downloaded 1 area (18.0 MB).');
+    });
+
+    test('a pack with no probed bounds is skipped, not guessed at',
+        () async {
+      final old = pack('20250101');
+      final server = _FakeServer();
+      final deleted = <TilesRegion>[];
+      final service = serviceWith(
+        installed: [old],
+        probes: {old.path: _summary(old.path, minZoom: 7, maxZoom: 14)},
+        server: server,
+        deleted: deleted,
+      );
+
+      await service.processPendingOnAppOpen(networkState: 'wifi', now: now);
+
+      expect(server.dryRuns, isEmpty);
+      expect(deleted, isEmpty);
+    });
+
+    test('a failing refresh keeps the old pack and does not throw',
+        () async {
+      final old = pack('20250101');
+      final server = _FakeServer()..downloadError = StateError('disk full');
+      final deleted = <TilesRegion>[];
+      final service = refreshServiceWith(
+        installed: [old],
+        server: server,
+        deleted: deleted,
+      );
+
+      await service.processPendingOnAppOpen(networkState: 'wifi', now: now);
+
+      expect(server.downloads.length, 1);
+      expect(deleted, isEmpty);
+      expect(await CoveragePrefs.readNotice(), isNull);
+    });
+
+    test('the feature being off blocks the refresh too', () async {
+      await CoveragePrefs.writeSettings(const CoverageSettings(enabled: false));
+      final server = _FakeServer();
+      final deleted = <TilesRegion>[];
+      final service = refreshServiceWith(
+        installed: [pack('20250101')],
+        server: server,
+        deleted: deleted,
+      );
+
+      await service.processPendingOnAppOpen(networkState: 'wifi', now: now);
+
+      expect(server.dryRuns, isEmpty);
+      expect(await CoveragePrefs.readLastRefresh(), isNull);
     });
   });
 
