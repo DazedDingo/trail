@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:trail/services/passphrase_service.dart';
 
@@ -106,6 +106,29 @@ void main() {
   group('PassphraseService salt persistence', () {
     test('isEnabled returns false before salt is generated', () async {
       expect(await PassphraseService.isEnabled(), isFalse);
+    });
+
+    test('a salt directory that does not exist is a plain false', () async {
+      // A genuinely absent file is "backup is off" — that answer is
+      // still allowed to be quiet.
+      PassphraseService.setSaltDirForTest(
+        Directory('${tempDir.path}/never-created'),
+      );
+      expect(await PassphraseService.isEnabled(), isFalse);
+    });
+
+    test('a probe that cannot resolve its directory throws, never false',
+        () async {
+      // path_provider is not registered under `flutter test`, so this is
+      // the production "cannot look" path. `isEnabled` used to swallow
+      // it into `false`, which tells `KeystoreKey.getOrCreate` that
+      // passphrase mode is off and lets it mint a random key over a
+      // restored, still-encrypted log. "I could not check" is not "off".
+      PassphraseService.setSaltDirForTest(null);
+      await expectLater(
+        PassphraseService.isEnabled(),
+        throwsA(isA<MissingPluginException>()),
+      );
     });
 
     test('generateAndPersistSalt creates a 16-byte file', () async {

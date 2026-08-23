@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import 'providers/backup_provider.dart';
 import 'providers/onboarding_provider.dart';
+import 'providers/startup_provider.dart';
 import 'screens/archive_screen.dart';
 import 'screens/contacts_screen.dart';
 import 'screens/diagnostics_screen.dart';
@@ -17,6 +18,7 @@ import 'screens/passphrase_entry_screen.dart';
 import 'screens/places_screen.dart';
 import 'screens/regions_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/startup_failure_screen.dart';
 import 'screens/stats_screen.dart';
 import 'screens/trips_screen.dart';
 import 'screens/lock_screen.dart';
@@ -46,8 +48,9 @@ class TrailApp extends ConsumerWidget {
 
 /// The router's whole `redirect` rule, as a pure function.
 ///
-/// Every hard gate Trail has lives here: onboarding, the post-restore
-/// passphrase prompt, and the "key is gone entirely" recovery screen.
+/// Every hard gate Trail has lives here: the startup-failure screen,
+/// onboarding, the post-restore passphrase prompt, and the "key is gone
+/// entirely" recovery screen.
 /// Pure + top-level so the truth table can be asserted without mounting
 /// a router or a `ProviderScope` (CLAUDE.md gotcha 18) — see
 /// `test/startup_redirect_test.dart`. The provider below is the only
@@ -66,8 +69,18 @@ String? startupRedirect({
   required bool needsUnlock,
   required bool keyMissing,
   required bool notMigrated,
+  required bool startupFailed,
 }) {
   final loc = location;
+  // Startup failure is the outermost gate, ahead of onboarding: when
+  // `runStartupGates` could not answer, none of the flags below mean
+  // anything — they are defaults, not readings. `/diagnostics` is the one
+  // exemption, because it is the screen's own "Open diagnostics" button
+  // and it touches neither the DB nor secure storage on load.
+  if (startupFailed) {
+    if (loc == '/startup-failed' || loc == '/diagnostics') return null;
+    return '/startup-failed';
+  }
   // Two different diagnoses, one gate: the key is gone ([keyMissing]) or
   // this build cannot read the store release A never rewrote
   // ([notMigrated], `flutter_secure_storage` 11.x). `KeyRecoveryScreen`
@@ -109,6 +122,11 @@ String? startupRedirect({
   if (onboarded && !needsUnlock && loc == '/unlock') {
     return '/lock';
   }
+  // Last, so every gate above still gets its say: once the failure is
+  // cleared, /startup-failed is not a place to linger. Symmetric with
+  // /unlock and /recover — clearing the provider alone releases the app,
+  // so a missed `context.go` cannot strand the user on the crash screen.
+  if (loc == '/startup-failed') return '/lock';
   return null;
 }
 
@@ -125,8 +143,13 @@ final _routerProvider = Provider<GoRouter>((ref) {
       needsUnlock: ref.read(needsUnlockProvider),
       keyMissing: ref.read(keyMissingProvider),
       notMigrated: ref.read(notMigratedProvider),
+      startupFailed: ref.read(startupFailureProvider) != null,
     ),
     routes: [
+      GoRoute(
+        path: '/startup-failed',
+        builder: (_, __) => const StartupFailureScreen(),
+      ),
       GoRoute(path: '/onboarding', builder: (_, __) => const OnboardingFlow()),
       GoRoute(path: '/unlock', builder: (_, __) => const PassphraseEntryScreen()),
       GoRoute(path: '/recover', builder: (_, __) => const KeyRecoveryScreen()),

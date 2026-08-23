@@ -65,16 +65,24 @@ class KeystoreKey {
   /// Whether an encrypted `trail.db` is on disk. Public so the startup
   /// gate ([computeStartupKeyState]) can ask the same question through
   /// the same seam rather than duplicating the path logic.
+  ///
+  /// Never answers `false` for "I could not tell" — see
+  /// [_defaultDbFileExists].
   static Future<bool> dbFileExists() => _dbFileExists();
 
+  /// Throws [StateError] when the question cannot be answered at all
+  /// (path_provider unregistered, a storage-layer error). It used to
+  /// answer `false` there, which is the single most dangerous lie in
+  /// this file: "no DB on disk" is exactly the condition under which
+  /// [getOrCreate] is allowed to mint a fresh random key, so a failed
+  /// `stat` could orphan a real log. "I could not look" is not "there is
+  /// nothing there" — the caller (the startup gate, and through it
+  /// `runStartupGates`) turns the throw into `/startup-failed`.
   static Future<bool> _defaultDbFileExists() async {
     try {
       return await File(await TrailDatabase.dbPath()).exists();
-    } catch (_) {
-      // path_provider unavailable (unit tests) or a transient IO error.
-      // We cannot prove a log exists, so fall back to the pre-guard
-      // behaviour rather than locking a fresh install out of onboarding.
-      return false;
+    } catch (e) {
+      throw StateError('cannot determine whether trail.db exists: $e');
     }
   }
 
@@ -106,6 +114,11 @@ class KeystoreKey {
   /// unreadable *and* hide the fact that anything went wrong, so we
   /// refuse and let the caller offer the recovery screen. Creation stays
   /// allowed only on a genuinely fresh install (no DB file).
+  ///
+  /// Throws whatever the two probes throw, too: if [dbFileExists] or
+  /// [PassphraseService.isEnabled] cannot answer, this method must not
+  /// guess. Generating a key on a "probably fresh" install is the one
+  /// mistake that cannot be undone.
   static Future<String?> getOrCreate() async {
     final existing = await read();
     if (existing != null) return existing;

@@ -57,21 +57,24 @@ class PassphraseService {
   /// active". Callers use this to decide between legacy Keystore-random
   /// key generation and the derive-from-passphrase path.
   ///
-  /// Any filesystem / plugin failure is treated as "not enabled" so
-  /// unit tests without path_provider wired up (and production
-  /// devices with transient IO errors) fall through to the legacy
-  /// Keystore path rather than hard-failing at startup.
+  /// A missing salt file is `false`. A *failure to look* — path_provider
+  /// unregistered, a storage-layer error — is an exception, not a
+  /// `false`. This used to swallow both into "not enabled", which sends
+  /// `KeystoreKey.getOrCreate` down the mint-a-random-key path and can
+  /// orphan a restored log; "backup is off" and "I could not check" are
+  /// not the same answer.
+  ///
+  /// Callers: the two startup gates run inside `runStartupGates`, which
+  /// turns the throw into `/startup-failed`; every UI caller reads it
+  /// through `backupEnabledProvider` and already renders the
+  /// `AsyncError` (Settings' backup tile) or defaults to `false`
+  /// (`?? false` on the recovery + import screens).
   static Future<bool> isEnabled() async {
-    try {
-      final f = await _saltFile();
-      // `await` (not a bare `return f.exists()`) so an IO failure from the
-      // probe itself lands in the catch below rather than escaping as an
-      // unhandled rejection — the startup gate calls this before the DB is
-      // open and must never throw.
-      return await f.exists();
-    } catch (_) {
-      return false;
-    }
+    final f = await _saltFile();
+    // `await` (not a bare `return f.exists()`) so an IO failure from the
+    // probe surfaces to this method's caller rather than escaping as an
+    // unhandled rejection.
+    return await f.exists();
   }
 
   /// Returns the persisted salt, or null if passphrase mode has never

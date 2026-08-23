@@ -7,8 +7,9 @@ import 'package:trail/app.dart';
 /// function so the whole truth table can be asserted without mounting a
 /// GoRouter, a ProviderScope, or MapLibre.
 ///
-/// Three flags × the locations that matter. The rules, in the order the
+/// Four flags × the locations that matter. The rules, in the order the
 /// function applies them:
+///   0. startupFailed                     → /startup-failed (outermost)
 ///   1. not onboarded                     → /onboarding (hard gate)
 ///   2. onboarded, on onboarding          → the right gate for the key state
 ///   3. keyMissing OR notMigrated         → /recover (beats needsUnlock)
@@ -24,6 +25,7 @@ String? redirect(
   bool needsUnlock = false,
   bool keyMissing = false,
   bool notMigrated = false,
+  bool startupFailed = false,
 }) =>
     startupRedirect(
       location: location,
@@ -31,6 +33,7 @@ String? redirect(
       needsUnlock: needsUnlock,
       keyMissing: keyMissing,
       notMigrated: notMigrated,
+      startupFailed: startupFailed,
     );
 
 /// Every route a user can land on that is not itself a gate.
@@ -193,6 +196,58 @@ void main() {
 
     test('cleared → /unlock releases to /lock', () {
       expect(redirect('/unlock'), '/lock');
+    });
+  });
+
+  group('startupFailed → /startup-failed (the outermost gate)', () {
+    test('bounces every other route, gates included', () {
+      for (final loc in [
+        ..._ordinaryRoutes.where((r) => r != '/diagnostics'),
+        '/unlock',
+        '/recover',
+        '/onboarding',
+      ]) {
+        expect(redirect(loc, startupFailed: true), '/startup-failed',
+            reason: loc);
+      }
+    });
+
+    test('already on /startup-failed → stays (no redirect loop)', () {
+      expect(redirect('/startup-failed', startupFailed: true), isNull);
+    });
+
+    test('beats every other gate — the flags below it are defaults, '
+        'not readings', () {
+      expect(
+        redirect('/home',
+            startupFailed: true,
+            onboarded: false,
+            needsUnlock: true,
+            keyMissing: true,
+            notMigrated: true),
+        '/startup-failed',
+      );
+      expect(
+        redirect('/onboarding', startupFailed: true, onboarded: false),
+        '/startup-failed',
+      );
+    });
+
+    test('/diagnostics is the one exemption', () {
+      // The failure screen's "Open diagnostics" button would be a dead
+      // control otherwise. Diagnostics opens neither the DB nor secure
+      // storage on load; the integrity check is behind its own button.
+      expect(redirect('/diagnostics', startupFailed: true), isNull);
+    });
+
+    test('cleared → /startup-failed releases to /lock', () {
+      // What "Try again" does. Symmetric with /unlock and /recover:
+      // clearing the provider alone releases the app, so a missed
+      // `context.go` cannot strand the user on the failure screen.
+      expect(redirect('/startup-failed'), '/lock');
+      expect(redirect('/startup-failed', onboarded: false), '/onboarding');
+      expect(redirect('/startup-failed', needsUnlock: true), '/unlock');
+      expect(redirect('/startup-failed', keyMissing: true), '/recover');
     });
   });
 

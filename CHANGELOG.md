@@ -4,6 +4,15 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.17.6+108] — 2026-08-23
+
+### Fixed
+- **A startup failure now shows a screen instead of a frozen splash.** 0.17.5 could hang on the Android splash with no fingerprint prompt: the two checks Trail runs before its first screen (onboarding flag, encryption-key state) had no guard, so an error or a hang in the secure-storage plugin killed startup silently. Those checks now time out after 15 s and any failure lands on **"Trail couldn't start"** — the error text with *Copy details*, *Try again*, *Open diagnostics*, and *Use backup passphrase* where cloud backup is on. Nothing is deleted on that screen. The last startup error is kept and shown under Diagnostics → Startup.
+- Two places that swallowed errors into a misleading "false" now surface them: the "does the encrypted log exist?" probe and the "is cloud backup on?" probe. Previously a failing probe could let Trail create a fresh key over an existing log; now it stops and shows the error.
+
+### Note
+- This release exists to get the real error message off the phone. If you hit "Trail couldn't start", tap *Copy details* and send them.
+
 ## [0.17.5+107] — 2026-08-23
 
 ### Fixed

@@ -93,6 +93,15 @@ Future<bool> computeNeedsUnlock() async {
 /// `keyMissing` arm is the case that used to fall through to
 /// `KeystoreKey.getOrCreate` minting a fresh random key over a perfectly
 /// good (but now unreadable) log.
+///
+/// **May throw**, deliberately. Every probe it calls now reports "I could
+/// not look" as an exception rather than folding it into a cheerful
+/// `false`/`ok`: `KeystoreKey.read` (a Keystore unwrap failure),
+/// `PassphraseService.isEnabled` (the salt-file stat) and
+/// `KeystoreKey.dbFileExists` (the DB stat). `runStartupGates` is the
+/// only production caller and turns any of them into `/startup-failed`,
+/// which is a screen the user can act on — unlike the four silent
+/// mis-diagnoses the swallows used to produce.
 Future<StartupKeyState> computeStartupKeyState() async {
   if (await KeystoreKey.read() != null) {
     // The key reads back under 11.x's ciphers, so this install is on the

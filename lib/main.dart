@@ -7,12 +7,14 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 import 'app.dart';
 import 'providers/backup_provider.dart';
 import 'providers/onboarding_provider.dart';
+import 'providers/startup_provider.dart';
 import 'services/coverage/coverage_service.dart';
 import 'services/failed_photo_uris.dart';
 import 'services/memory_pressure.dart';
 import 'services/notification_service.dart';
 import 'services/scheduler/workmanager_scheduler.dart';
 import 'services/secure_storage_migration.dart';
+import 'services/startup_gates.dart';
 
 /// Entry point for Trail.
 ///
@@ -26,8 +28,45 @@ import 'services/secure_storage_migration.dart';
 /// ([_initDeferredServices]). Before 0.14.1 all five awaits ran serially
 /// ahead of `runApp` and cost ~150–400 ms of time-to-first-frame
 /// (docs/PERF_PLAN.md §3 #3).
-void main() async {
+///
+/// **`runApp` is now unconditional.** Both gates are
+/// `flutter_secure_storage` platform calls; either can throw (a Keystore
+/// unwrap failure arrives as a `PlatformException`) or never return, and
+/// until 0.17.6 either outcome killed `main` before the first frame — the
+/// Android splash stayed up forever with no Flutter UI and no biometric
+/// prompt. [runStartupGates] gives each gate 15 s and folds every failure
+/// into a value; the whole of `main` additionally runs under
+/// `runZonedGuarded` + `FlutterError.onError` so anything that escapes
+/// before the first frame lands on the same screen. The failure is
+/// persisted to SharedPreferences (`trail_last_startup_error_v1`) for the
+/// diagnostics screen, best-effort.
+void main() {
+  // The binding must be created in the same zone that later calls
+  // `runApp`, so `ensureInitialized` lives inside the guard rather than
+  // ahead of it.
+  runZonedGuarded(_bootstrap, _onStartupZoneError);
+}
+
+/// `runApp` has been called — a second one from the zone guard would
+/// replace a painting app with the failure screen.
+bool _appStarted = false;
+
+/// The first frame has rasterised. After this point a `FlutterError` is
+/// an ordinary in-app error, not a startup failure, and is left to
+/// `presentError` alone.
+bool _firstFrameRendered = false;
+
+Future<void> _bootstrap() async {
   WidgetsFlutterBinding.ensureInitialized();
+  final presentError = FlutterError.onError;
+  FlutterError.onError = (details) {
+    presentError?.call(details);
+    if (_firstFrameRendered) return;
+    _onStartupZoneError(
+      details.exception,
+      details.stack ?? StackTrace.current,
+    );
+  };
   // Image cache: 1 000 entries / 120 MB (0.14.1, down from 5 000 /
   // 250 MB). Sized so the slideshow's 100-frame warm-up + lookahead and
   // a month of 320 px thumbnails still fit — see memory_pressure.dart
@@ -57,26 +96,61 @@ void main() async {
   //     because flutter_secure_storage 11 cannot read a store the 10.x
   //     rewrite never touched (it reads back empty, nothing is deleted).
   // Both beat letting providers hit their exceptions one by one.
-  final onboardedFuture = OnboardingGate.isComplete();
-  final keyStateFuture = computeStartupKeyState();
-  final onboarded = await onboardedFuture;
-  final keyState = await keyStateFuture;
+  final outcome = await runStartupGates();
+  if (!outcome.ok) {
+    // Best-effort: the diagnostics screen's "Last startup error" line is
+    // the only record that survives a force-stop.
+    unawaited(persistStartupError(outcome.failure!));
+  }
   // Registered *before* `runApp` so it runs right after the first frame
   // is rasterised — ahead of any post-frame callback a screen registers
   // from its own `initState` (the lock screen's auto-unlock, for one).
   // Nothing below relies on that ordering, though: each deferred
-  // service is idempotent and awaited by its own call sites.
-  WidgetsBinding.instance.addPostFrameCallback((_) => _initDeferredServices());
+  // service is idempotent and awaited by its own call sites. Skipped
+  // entirely on a failed startup: the failure screen must stay inert.
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    _firstFrameRendered = true;
+    if (outcome.ok) _initDeferredServices();
+  });
+  _runTrailApp(outcome);
+}
+
+/// Anything that escaped `runStartupGates`: a plugin registrant, a
+/// `FlutterError` during the first build, `runApp` itself.
+///
+/// Always records the failure; only takes over the screen if `runApp`
+/// has not happened yet — replacing an app that is already painting
+/// would be worse than the error.
+void _onStartupZoneError(Object error, StackTrace stack) {
+  debugPrint('[startup] uncaught before first frame: $error');
+  final failure = StartupFailure(
+    stage: StartupStage.uncaught,
+    error: error,
+    stackTrace: stack,
+  );
+  unawaited(persistStartupError(failure));
+  if (_appStarted) return;
+  _runTrailApp(StartupOutcome.failed(failure));
+}
+
+/// The one `runApp` call. On [StartupOutcome.ready] the four router
+/// gates come from the probe; on [StartupOutcome.failed]
+/// `startupFailureProvider` is set and `startupRedirect` parks every
+/// route on `/startup-failed`.
+void _runTrailApp(StartupOutcome outcome) {
+  _appStarted = true;
+  final keyState = outcome.keyState;
   runApp(
     ProviderScope(
       overrides: [
-        onboardingCompleteProvider.overrideWith((_) => onboarded),
+        onboardingCompleteProvider.overrideWith((_) => outcome.onboarded),
         needsUnlockProvider
             .overrideWith((_) => keyState == StartupKeyState.needsUnlock),
         keyMissingProvider
             .overrideWith((_) => keyState == StartupKeyState.keyMissing),
         notMigratedProvider
             .overrideWith((_) => keyState == StartupKeyState.notMigrated),
+        startupFailureProvider.overrideWith((_) => outcome.failure),
       ],
       child: const TrailApp(),
     ),

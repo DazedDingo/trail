@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../db/database.dart';
 import '../services/scheduler/worker_run_log.dart';
 import '../services/secure_storage_migration.dart';
+import '../services/startup_gates.dart';
 import '../widgets/help_button.dart';
 
 /// Deep-diagnostics surface — not linked from the home screen, only
@@ -23,13 +24,17 @@ import '../widgets/help_button.dart';
 ///   3. **Secure storage** — whether the `flutter_secure_storage` 10.x
 ///      rewrite has been verified on this device, and how many of the
 ///      known secrets it found (see `secure_storage_migration.dart`).
-///   4. **Locked-aside logs** — any `trail.db.locked-*` file left by the
+///   4. **Last startup error** — the persisted record of the most recent
+///      time `main()` could not reach the first frame
+///      (`trail_last_startup_error_v1`, written by `startup_gates.dart`).
+///      "none" on a healthy install.
+///   5. **Locked-aside logs** — any `trail.db.locked-*` file left by the
 ///      `/recover` screen's "Start a new log", with its size. Only shown
 ///      when at least one exists.
-///   5. **Worker run log** — last 20 WorkManager dispatcher runs with
+///   6. **Worker run log** — last 20 WorkManager dispatcher runs with
 ///      task, outcome, and note. Mirrors the exact-alarm events on the
 ///      Settings screen but for the WorkManager pipeline.
-///   6. **Copy all** — bundles every signal into one blob for pasting
+///   7. **Copy all** — bundles every signal into one blob for pasting
 ///      into a bug report.
 class DiagnosticsScreen extends ConsumerStatefulWidget {
   const DiagnosticsScreen({super.key});
@@ -44,6 +49,7 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
   Map<String, PermissionStatus> _perms = const {};
   List<WorkerRun> _runs = const [];
   String _secureStorageLine = SecureStorageMigration.describeMarker(null);
+  String _startupErrorLine = describeLastStartupError(null);
   List<LockedLog> _lockedLogs = const [];
   bool _loading = true;
   String? _integrityResult;
@@ -79,6 +85,7 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
       WorkerRunLog.recent(),
       SecureStorageMigration.readMarker(),
       TrailDatabase.lockedAsideLogs(),
+      readLastStartupError(),
     ]);
     if (!mounted) return;
     setState(() {
@@ -94,6 +101,9 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
         results[6] as MigrationMarker?,
       );
       _lockedLogs = results[7] as List<LockedLog>;
+      _startupErrorLine = describeLastStartupError(
+        results[8] as LastStartupError?,
+      );
       _loading = false;
     });
   }
@@ -135,6 +145,8 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
       ..writeln('DB integrity: ${_integrityResult ?? "not run"}')
       ..writeln('')
       ..writeln(_secureStorageLine)
+      ..writeln('')
+      ..writeln(_startupErrorLine)
       ..writeln('')
       ..writeln('Locked-aside logs:');
     if (_lockedLogs.isEmpty) {
@@ -263,6 +275,18 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
                     'Trail re-writes every stored secret through the '
                     'current cipher after the first frame; this line is '
                     'the record that it succeeded.',
+                  ),
+                ),
+                const Divider(),
+                const _SectionHeader('Startup'),
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.rocket_launch_outlined),
+                  title: Text(_startupErrorLine),
+                  subtitle: const Text(
+                    'The last time Trail could not reach its first '
+                    'screen. Recorded even when the app recovered on the '
+                    'next launch.',
                   ),
                 ),
                 if (_lockedLogs.isNotEmpty) ...[

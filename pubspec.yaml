@@ -1,7 +1,7 @@
 name: trail
 description: "Trail — personal-safety GPS logger. Offline, encrypted, 4h-cadence background pings."
 publish_to: 'none'
-version: 0.17.5+107
+version: 0.17.6+108
 
 environment:
   sdk: ^3.5.0
@@ -123,9 +123,13 @@ dev_dependencies:
   # - path_provider_platform_interface + plugin_platform_interface:
   #   `mbtiles_service_test.dart` installs a fake platform provider so
   #   `getApplicationDocumentsDirectory()` points at a tempdir.
+  # - fake_async: `startup_gates_test.dart` drives the 15 s startup-gate
+  #   timeout against a Completer that never completes, without the suite
+  #   actually sleeping for 15 s.
   sqlite3: ^2.4.3
   path_provider_platform_interface: ^2.1.2
   plugin_platform_interface: ^2.1.8
+  fake_async: ^1.3.3
 
 flutter:
   uses-material-design: true

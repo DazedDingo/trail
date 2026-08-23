@@ -7,6 +7,7 @@ import 'package:trail/db/keystore_key.dart';
 import 'package:trail/providers/backup_provider.dart';
 import 'package:trail/services/passphrase_service.dart';
 import 'package:trail/services/secure_storage_migration.dart';
+import 'package:trail/services/startup_gates.dart';
 
 /// `computeStartupKeyState` is the one probe `main()` runs before the
 /// first frame; the router turns its answer into `/lock`, `/unlock` or
@@ -251,6 +252,78 @@ void main() {
       await PassphraseService.generateAndPersistSalt();
       expect(await computeNeedsUnlock(), isTrue);
       expect(await computeStartupKeyState(), StartupKeyState.needsUnlock);
+    });
+  });
+
+  group('a probe that cannot answer becomes a startup failure', () {
+    // The gate has four answers and each one sends the user somewhere
+    // different. A probe that cannot look must pick none of them: it
+    // used to be folded into `ok` (mint a key — the unrecoverable one)
+    // or `notMigrated` (send the user off to install 0.17.3 for no
+    // reason). Now it throws, and `runStartupGates` turns that into
+    // `/startup-failed`, which names the actual error.
+    test('the DB stat throws → computeStartupKeyState throws', () async {
+      KeystoreKey.setDbFileExistsForTest(
+        () async => throw StateError('cannot determine whether trail.db exists'),
+      );
+      await expectLater(computeStartupKeyState(), throwsA(isA<StateError>()));
+    });
+
+    test('… and runStartupGates reports failed(keyState) with that error',
+        () async {
+      final boom = StateError('cannot determine whether trail.db exists');
+      KeystoreKey.setDbFileExistsForTest(() async => throw boom);
+      final outcome = await runStartupGates(
+        readOnboarded: () async => true,
+        readKeyState: computeStartupKeyState,
+      );
+      expect(outcome.ok, isFalse);
+      expect(outcome.failure!.stage, StartupStage.keyState);
+      expect(outcome.failure!.error, same(boom));
+      expect(outcome.failure!.timedOut, isFalse);
+    });
+
+    test('the salt stat throws → failed(keyState), not a wrong diagnosis',
+        () async {
+      // With a DB on disk and no marker this would otherwise be reported
+      // as `notMigrated` → "install 0.17.3 first", which is advice for a
+      // problem the user does not have.
+      await dbFile.writeAsString('db');
+      PassphraseService.setSaltDirForTest(null);
+      final outcome = await runStartupGates(
+        readOnboarded: () async => true,
+        readKeyState: computeStartupKeyState,
+      );
+      expect(outcome.ok, isFalse);
+      expect(outcome.failure!.stage, StartupStage.keyState);
+      expect(outcome.failure!.error, isA<MissingPluginException>());
+    });
+
+    test('a readable key short-circuits both stats', () async {
+      // A healthy install must never be locked out by a filesystem
+      // hiccup: the gate returns on the first successful read.
+      fake.presetKey('stored-key');
+      KeystoreKey.setDbFileExistsForTest(() async => throw StateError('nope'));
+      PassphraseService.setSaltDirForTest(null);
+      expect(await computeStartupKeyState(), StartupKeyState.ok);
+    });
+
+    test('a Keystore read that throws is reported as keyState too',
+        () async {
+      // The most likely shape of the 0.17.5 field bug: fss 11 fails to
+      // unwrap and the whole of `main` used to die before `runApp`.
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(_channelName),
+        (call) async => throw PlatformException(code: 'Failed to unwrap key'),
+      );
+      final outcome = await runStartupGates(
+        readOnboarded: () async => true,
+        readKeyState: computeStartupKeyState,
+      );
+      expect(outcome.ok, isFalse);
+      expect(outcome.failure!.stage, StartupStage.keyState);
+      expect(outcome.failure!.error, isA<PlatformException>());
     });
   });
 }

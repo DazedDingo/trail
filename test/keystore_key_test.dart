@@ -55,8 +55,9 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   late _FakeSecureStorage fake;
+  late Directory saltDir;
 
-  setUp(() {
+  setUp(() async {
     fake = _FakeSecureStorage();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
@@ -67,10 +68,18 @@ void main() {
     // through path_provider, which is unavailable here. Individual tests
     // override it to exercise the guard.
     KeystoreKey.setDbFileExistsForTest(() async => false);
+    // Likewise for the salt probe. `PassphraseService.isEnabled` no
+    // longer swallows a path_provider failure into "backup is off"
+    // (that lie is what let `getOrCreate` mint a key over a restored
+    // log), so every test needs a real, empty directory to stat.
+    saltDir = await Directory.systemTemp.createTemp('trail_keystore_salt_');
+    PassphraseService.setSaltDirForTest(saltDir);
   });
 
-  tearDown(() {
+  tearDown(() async {
     KeystoreKey.setDbFileExistsForTest(null);
+    PassphraseService.setSaltDirForTest(null);
+    if (saltDir.existsSync()) await saltDir.delete(recursive: true);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
       const MethodChannel(_channelName),
@@ -379,12 +388,56 @@ void main() {
       expect(await KeystoreKey.dbFileExists(), isFalse);
     });
 
-    test('null resets to the production probe, which is false off-device',
+    test('null resets to the production probe, which throws off-device',
         () async {
-      // path_provider is not registered under `flutter test`; the default
-      // probe swallows that and answers "cannot prove a DB exists".
+      // path_provider is not registered under `flutter test`, so the
+      // production probe cannot answer. It used to swallow that into
+      // `false` — "no DB on disk" — which is precisely the condition
+      // that lets `getOrCreate` mint a fresh random key. "I could not
+      // look" must be loud.
       KeystoreKey.setDbFileExistsForTest(null);
-      expect(await KeystoreKey.dbFileExists(), isFalse);
+      await expectLater(
+        KeystoreKey.dbFileExists(),
+        throwsA(isA<StateError>().having((e) => e.message, 'message',
+            contains('cannot determine whether trail.db exists'))),
+      );
+    });
+  });
+
+  group('KeystoreKey.getOrCreate — a probe that cannot answer', () {
+    // The rule these pin: when Trail cannot tell whether a log exists,
+    // or whether passphrase mode is on, it refuses to guess. Guessing
+    // "fresh install" writes a random key that no restored DB will ever
+    // open again.
+    test('a throwing DB probe propagates and writes NOTHING', () async {
+      KeystoreKey.setDbFileExistsForTest(
+        () async => throw StateError('cannot determine whether trail.db exists'),
+      );
+      await expectLater(
+        KeystoreKey.getOrCreate(),
+        throwsA(isA<StateError>()),
+      );
+      expect(fake.calls.any((c) => c.method == 'write'), isFalse,
+          reason: 'a key minted here could orphan a real log');
+      expect(fake.current(), isNull);
+    });
+
+    test('a salt probe that cannot resolve its directory propagates',
+        () async {
+      // The production "path_provider is not registered" path.
+      PassphraseService.setSaltDirForTest(null);
+      await expectLater(KeystoreKey.getOrCreate(), throwsA(anything));
+      expect(fake.calls.any((c) => c.method == 'write'), isFalse);
+      expect(fake.current(), isNull);
+    });
+
+    test('an existing key short-circuits both probes', () async {
+      // `getOrCreate` reads first; a healthy install never reaches the
+      // probes, so a broken filesystem cannot lock it out.
+      fake.preset('already-here');
+      KeystoreKey.setDbFileExistsForTest(() async => throw StateError('nope'));
+      PassphraseService.setSaltDirForTest(null);
+      expect(await KeystoreKey.getOrCreate(), 'already-here');
     });
   });
 }
