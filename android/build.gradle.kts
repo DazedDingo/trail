@@ -25,6 +25,15 @@ subprojects {
             val androidExt = ext as com.android.build.gradle.BaseExtension
             androidExt.compileOptions.sourceCompatibility = JavaVersion.VERSION_17
             androidExt.compileOptions.targetCompatibility = JavaVersion.VERSION_17
+            // flutter_secure_storage 11 declares `compileSdk = 37`, which AGP
+            // 9.1 turns into the platform hash "android-37". No such package
+            // exists: Android 17 ships as `platforms;android-37.0` under the
+            // new minor-versioned naming, so the build dies with "Failed to
+            // find target with hash string 'android-37'". Re-point anything
+            // asking for the major-only hash at the one the SDK publishes.
+            if (androidExt.compileSdkVersion == "android-37") {
+                androidExt.compileSdkVersion("android-37.0")
+            }
         }
         tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
             compilerOptions {

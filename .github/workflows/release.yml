@@ -57,6 +57,25 @@ jobs:
 
       - run: flutter pub get
 
+      - name: Install Android SDK Platform 37.0
+        # flutter_secure_storage 11 compiles against API 37 and publishes AAR
+        # metadata forcing every consumer to do the same, so the app is on
+        # `compileSdk = 37` (android/app/build.gradle.kts). Android 17 ships
+        # ONLY under the new minor-versioned name `platforms;android-37.0` —
+        # there is no plain `platforms;android-37` package anywhere in the
+        # SDK repo — while AGP 9.1 asks the SDK for the hash "android-37".
+        # `android/build.gradle.kts` rewrites that request to "android-37.0"
+        # for every module; this step just guarantees the package is on the
+        # runner instead of trusting Gradle's mid-build auto-download.
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -1)
+          fi
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --install "platforms;android-37.0"
+          ls "$ANDROID_HOME/platforms"
+
       - name: Build APK
         # Per-ABI APKs (PERF_PLAN §3 #20): R8 + resource shrinking are now
         # enabled (android/app/build.gradle.kts), and --split-per-abi builds

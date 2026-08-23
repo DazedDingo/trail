@@ -4,6 +4,13 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.17.4+106] — 2026-08-23
+
+### Changed
+- **Secure storage — step 2 of 2.** The storage library moves to version 11, which only reads the new cipher. If this version starts on a phone that never ran 0.17.3, it stops on an "Update needed first" screen with a link to 0.17.3 — nothing is deleted, and no destructive options are offered there. A phone that did run 0.17.3 notices nothing.
+- **share_plus 13 and package_info_plus 10** — the last two plugins held back at the AGP 9 move; the file picker moved to 12 with them. Sharing exports/archives and the version line in Settings behave as before.
+- Android `compileSdk` 37 (required by the storage library).
+
 ## [0.17.3+105] — 2026-08-23
 
 ### Changed

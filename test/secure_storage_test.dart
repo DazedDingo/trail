@@ -9,8 +9,8 @@ import 'package:trail/services/secure_storage.dart';
 ///
 /// Every option is pinned here rather than trusted to the package's
 /// defaults, because `flutter_secure_storage` 10.0.0 changed several of
-/// them — most dangerously `resetOnError`, which now defaults to `true`
-/// ("wipe everything on any decrypt error").
+/// them — most dangerously `resetOnError`, which defaults to `true`
+/// ("wipe everything on any decrypt error") in both 10.x and 11.x.
 void main() {
   late Map<String, String> options;
 
@@ -18,22 +18,30 @@ void main() {
     options = secureStorage.aOptions.toMap();
   });
 
-  test('still asks 10.x to migrate the 9.2.4 Jetpack store', () {
-    // Deprecated upstream, removed in 11 — but it is the flag that tells
-    // 10.x there may be EncryptedSharedPreferences data to pick up.
-    expect(options['encryptedSharedPreferences'], 'true');
+  test('the deprecated Jetpack flag is gone — release B is on 11.x', () {
+    // 11.0.0 removed `encryptedSharedPreferences` (and every branch that
+    // could read 9.2.4's Jetpack store) along with `sharedPreferencesName`.
+    // Their absence from the option map is what proves this build is the
+    // one the `notMigrated` startup gate exists for.
+    expect(options.containsKey('encryptedSharedPreferences'), isFalse);
+    expect(options.containsKey('sharedPreferencesName'), isFalse);
+  });
+
+  test('migrateOnAlgorithmChange survives into 11.x and stays on', () {
+    // Still the only non-destructive answer if the saved algorithm
+    // markers ever disagree with the pair below; without it 11.x's
+    // key-mismatch handler has nothing left but deleteAll().
     expect(options['migrateOnAlgorithmChange'], 'true');
   });
 
   test('resetOnError is FALSE — never wipe the SQLCipher key', () {
-    // The single most important line in this file. 10.x defaults this to
-    // true; with the DB key in secure storage that would turn a transient
-    // Keystore hiccup into permanent loss of the user's location log.
+    // The single most important line in this file. 10.x and 11.x default
+    // this to true; with the DB key in secure storage that would turn a
+    // transient Keystore hiccup into permanent loss of the location log.
     expect(options['resetOnError'], 'false');
   });
 
-  test('ciphers are the pair that survives into flutter_secure_storage 11',
-      () {
+  test('ciphers are the pair flutter_secure_storage 11 still ships', () {
     expect(
       options['keyCipherAlgorithm'],
       KeyCipherAlgorithm.RSA_ECB_OAEPwithSHA_256andMGF1Padding.name,
@@ -42,6 +50,12 @@ void main() {
       options['storageCipherAlgorithm'],
       StorageCipherAlgorithm.AES_GCM_NoPadding.name,
     );
+  });
+
+  test('migrateWithBackup stays off — our marker is the safety net', () {
+    // It routes through a separate, less-travelled migration path;
+    // verify-and-rewrite plus the marker is what we actually test.
+    expect(options['migrateWithBackup'], 'false');
   });
 
   test('no biometric gate — the background isolate must read unattended',
@@ -53,9 +67,8 @@ void main() {
 
   test('prefs file + key prefix are left at the 9.2.4 defaults', () {
     // Changing either orphans every installed user's stored values —
-    // 10.x reads the same "FlutterSecureStorage" file with the same
+    // 11.x reads the same "FlutterSecureStorage" file with the same
     // prefix only while these stay empty.
-    expect(options['sharedPreferencesName'], '');
     expect(options['preferencesKeyPrefix'], '');
     expect(options['storageNamespace'], '');
   });

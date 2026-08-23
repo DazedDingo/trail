@@ -6,7 +6,13 @@ plugins {
 
 android {
     namespace = "com.dazeddingo.trail"
-    compileSdk = flutter.compileSdkVersion
+    // 37, not `flutter.compileSdkVersion` (36 on Flutter 3.47.1):
+    // flutter_secure_storage 11 sets `compileSdk = 37` and publishes AAR
+    // metadata demanding the same of anything that depends on it, so a 36
+    // app fails `checkAarMetadata` outright. AGP 9.1.0 only *recommends*
+    // 36 (a warning, suppressed below); targetSdk stays on Flutter's
+    // value, so no runtime behaviour changes.
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

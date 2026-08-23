@@ -158,10 +158,15 @@ class _ExportDialogState extends State<ExportDialog> {
 
       if (!mounted) return;
       Navigator.of(context).pop();
-      await Share.shareXFiles(
-        shareFiles.map(XFile.new).toList(),
-        subject: 'Trail export ($_rangeLabel)'
-            '${_encrypt ? ' — encrypted zip' : ''}',
+      // share_plus 13: `SharePlus.instance.share(ShareParams(...))`. The
+      // `ShareResult` is ignored — the files are on disk either way and a
+      // dismissed sheet is not an export failure.
+      await SharePlus.instance.share(
+        ShareParams(
+          files: shareFiles.map(XFile.new).toList(),
+          subject: 'Trail export ($_rangeLabel)'
+              '${_encrypt ? ' — encrypted zip' : ''}',
+        ),
       );
     } catch (e) {
       if (!mounted) return;

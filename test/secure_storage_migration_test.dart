@@ -259,6 +259,83 @@ void main() {
     });
   });
 
+  group('markVerified — the startup gate\'s "already fine" shortcut', () {
+    test('writes a marker when there is none', () async {
+      final wrote = await SecureStorageMigration.markVerified(
+        present: const ['trail_db_passphrase_v1'],
+        prefs: prefs,
+      );
+      expect(wrote, isTrue);
+      final marker = await SecureStorageMigration.readMarker(prefs: prefs);
+      expect(marker, isNotNull);
+      expect(marker!.present, ['trail_db_passphrase_v1']);
+      expect(
+        marker.at.difference(DateTime.now()).inMinutes.abs(),
+        lessThan(2),
+      );
+    });
+
+    test('never overwrites the richer marker verifyAndRewrite wrote',
+        () async {
+      for (final key in SecureStorageMigration.knownKeys) {
+        fake.preset(key, 'v');
+      }
+      await run();
+      final before = _decodeMarker(prefs);
+      final wrote = await SecureStorageMigration.markVerified(
+        present: const ['trail_db_passphrase_v1'],
+        prefs: prefs,
+      );
+      expect(wrote, isTrue, reason: 'a marker is on disk either way');
+      expect(_decodeMarker(prefs)['at'], before['at']);
+      expect(_decodeMarker(prefs)['present'],
+          SecureStorageMigration.knownKeys);
+    });
+
+    test('a second call is a no-op, timestamp and all', () async {
+      await SecureStorageMigration.markVerified(
+        present: const ['trail_db_passphrase_v1'],
+        prefs: prefs,
+      );
+      final first = _decodeMarker(prefs);
+      await SecureStorageMigration.markVerified(
+        present: const ['trail_onboarded_v1'],
+        prefs: prefs,
+      );
+      expect(_decodeMarker(prefs), first);
+    });
+
+    test('an empty present list is still a valid marker', () async {
+      expect(
+        await SecureStorageMigration.markVerified(
+            present: const [], prefs: prefs),
+        isTrue,
+      );
+      final marker = await SecureStorageMigration.readMarker(prefs: prefs);
+      expect(marker, isNotNull);
+      expect(marker!.present, isEmpty);
+    });
+
+    test('a malformed marker is replaced, not trusted', () async {
+      await prefs.setString(SecureStorageMigration.markerKey, '{oops');
+      await SecureStorageMigration.markVerified(
+        present: const ['trail_db_passphrase_v1'],
+        prefs: prefs,
+      );
+      final marker = await SecureStorageMigration.readMarker(prefs: prefs);
+      expect(marker, isNotNull);
+      expect(marker!.present, ['trail_db_passphrase_v1']);
+    });
+
+    test('touches secure storage not at all', () async {
+      await SecureStorageMigration.markVerified(
+        present: const ['trail_db_passphrase_v1'],
+        prefs: prefs,
+      );
+      expect(fake.calls, isEmpty);
+    });
+  });
+
   group('marker parsing + description', () {
     test('readMarker round-trips what verifyAndRewrite wrote', () async {
       fake.preset('trail_db_passphrase_v1', 'k');

@@ -325,12 +325,10 @@ extension _RegionsScreenInstall on RegionsScreen {
   }
 
   Future<void> _installRegion(BuildContext context, WidgetRef ref) async {
-    final result = await FilePicker.pickFiles(
-      type: FileType.any,
-      allowMultiple: false,
-    );
-    if (result == null || result.files.isEmpty) return;
-    final path = result.files.single.path;
+    // file_picker 12: `pickFile` is the single-file entry point (see
+    // import_timeline_screen.dart).
+    final result = await FilePicker.pickFile(type: FileType.any);
+    final path = result?.path;
     if (path == null) return;
     final lower = path.toLowerCase();
     if (!lower.endsWith('.pmtiles') && !lower.endsWith('.mbtiles')) {

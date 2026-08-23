@@ -51,7 +51,7 @@ class TrailApp extends ConsumerWidget {
 /// Pure + top-level so the truth table can be asserted without mounting
 /// a router or a `ProviderScope` (CLAUDE.md gotcha 18) — see
 /// `test/startup_redirect_test.dart`. The provider below is the only
-/// caller; it supplies the three flags from Riverpod and
+/// caller; it supplies the four flags from Riverpod and
 /// [location] from `state.matchedLocation`.
 ///
 /// Note there is no `locked` input: the biometric lock is a *screen*
@@ -65,8 +65,15 @@ String? startupRedirect({
   required bool onboarded,
   required bool needsUnlock,
   required bool keyMissing,
+  required bool notMigrated,
 }) {
   final loc = location;
+  // Two different diagnoses, one gate: the key is gone ([keyMissing]) or
+  // this build cannot read the store release A never rewrote
+  // ([notMigrated], `flutter_secure_storage` 11.x). `KeyRecoveryScreen`
+  // reads `notMigratedProvider` to pick the copy; the router only cares
+  // that neither may reach a screen that opens the DB.
+  final blocked = keyMissing || notMigrated;
   // Onboarding is a hard gate. Until it completes, the user cannot reach
   // any real screen — including the biometric lock, which would pop a
   // system dialog before the user has consented to the flow.
@@ -76,7 +83,7 @@ String? startupRedirect({
   if (onboarded && loc.startsWith('/onboarding')) {
     // After onboarding, if the DB was restored from backup the user
     // needs to unlock it before anything else touches the DB.
-    if (keyMissing) return '/recover';
+    if (blocked) return '/recover';
     return needsUnlock ? '/unlock' : '/lock';
   }
   // Key-missing gate: an encrypted trail.db exists but its key is
@@ -86,10 +93,10 @@ String? startupRedirect({
   // gate: the two are mutually exclusive by construction
   // (`computeStartupKeyState`), and if they ever both went true the
   // recovery screen is the one that can reach /unlock, not vice versa.
-  if (onboarded && keyMissing && loc != '/recover') {
+  if (onboarded && blocked && loc != '/recover') {
     return '/recover';
   }
-  if (onboarded && !keyMissing && loc == '/recover') {
+  if (onboarded && !blocked && loc == '/recover') {
     return '/lock';
   }
   // Post-restore gate: if passphrase mode is active but no key is
@@ -117,6 +124,7 @@ final _routerProvider = Provider<GoRouter>((ref) {
       onboarded: ref.read(onboardingCompleteProvider),
       needsUnlock: ref.read(needsUnlockProvider),
       keyMissing: ref.read(keyMissingProvider),
+      notMigrated: ref.read(notMigratedProvider),
     ),
     routes: [
       GoRoute(path: '/onboarding', builder: (_, __) => const OnboardingFlow()),

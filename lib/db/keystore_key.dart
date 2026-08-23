@@ -50,7 +50,11 @@ class KeyMissingException implements Exception {
 ///     derived key. Entering the passphrase re-derives and re-persists
 ///     the key, and history is recovered.
 class KeystoreKey {
-  static const _storageKey = 'trail_db_passphrase_v1';
+  /// The secure-storage key holding the SQLCipher passphrase. Public so
+  /// the startup gate can name it when it records the secure-storage
+  /// marker (`SecureStorageMigration.markVerified`) for an install that
+  /// is already on the new format.
+  static const storageKey = 'trail_db_passphrase_v1';
   static const _secure = secureStorage;
 
   /// Injectable "does the encrypted DB already exist?" probe. Production
@@ -83,7 +87,7 @@ class KeystoreKey {
   /// Use this when the caller needs to decide between "proceed" and
   /// "prompt for passphrase".
   static Future<String?> read() async {
-    final v = await _secure.read(key: _storageKey);
+    final v = await _secure.read(key: storageKey);
     if (v == null || v.isEmpty) return null;
     return v;
   }
@@ -113,7 +117,7 @@ class KeystoreKey {
     final rnd = Random.secure();
     final bytes = List<int>.generate(32, (_) => rnd.nextInt(256));
     final key = base64UrlEncode(bytes);
-    await _secure.write(key: _storageKey, value: key);
+    await _secure.write(key: storageKey, value: key);
     return key;
   }
 
@@ -122,7 +126,7 @@ class KeystoreKey {
   /// background isolate and future UI launches can read it back
   /// transparently.
   static Future<void> persist(String key) async {
-    await _secure.write(key: _storageKey, value: key);
+    await _secure.write(key: storageKey, value: key);
   }
 
   /// Whether a key is already stored. Callers interested in the broader
@@ -135,5 +139,5 @@ class KeystoreKey {
   /// Deletes the stored key. Caller is responsible for also deleting
   /// the DB file if they intend to start fresh — otherwise the app is
   /// stuck unable to decrypt an orphan DB.
-  static Future<void> reset() => _secure.delete(key: _storageKey);
+  static Future<void> reset() => _secure.delete(key: storageKey);
 }

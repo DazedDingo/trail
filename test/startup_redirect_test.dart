@@ -9,22 +9,28 @@ import 'package:trail/app.dart';
 ///
 /// Three flags × the locations that matter. The rules, in the order the
 /// function applies them:
-///   1. not onboarded            → /onboarding (hard gate)
-///   2. onboarded, on onboarding → the right gate for the key state
-///   3. keyMissing               → /recover (beats needsUnlock)
-///   4. needsUnlock              → /unlock
-///   5. otherwise                → null (allow)
+///   1. not onboarded                     → /onboarding (hard gate)
+///   2. onboarded, on onboarding          → the right gate for the key state
+///   3. keyMissing OR notMigrated         → /recover (beats needsUnlock)
+///   4. needsUnlock                       → /unlock
+///   5. otherwise                         → null (allow)
+///
+/// `notMigrated` (flutter_secure_storage 11 reading a store release A
+/// never rewrote) gates identically to `keyMissing`; only the copy on
+/// `KeyRecoveryScreen` differs.
 String? redirect(
   String location, {
   bool onboarded = true,
   bool needsUnlock = false,
   bool keyMissing = false,
+  bool notMigrated = false,
 }) =>
     startupRedirect(
       location: location,
       onboarded: onboarded,
       needsUnlock: needsUnlock,
       keyMissing: keyMissing,
+      notMigrated: notMigrated,
     );
 
 /// Every route a user can land on that is not itself a gate.
@@ -64,6 +70,10 @@ void main() {
         '/onboarding',
       );
       expect(
+        redirect('/recover', onboarded: false, notMigrated: true),
+        '/onboarding',
+      );
+      expect(
         redirect('/unlock', onboarded: false, needsUnlock: true),
         '/onboarding',
       );
@@ -78,6 +88,7 @@ void main() {
         '/recover',
         reason: 'keyMissing wins on the way out of onboarding too',
       );
+      expect(redirect('/onboarding', notMigrated: true), '/recover');
     });
   });
 
@@ -125,6 +136,50 @@ void main() {
     });
   });
 
+  group('notMigrated → /recover (the fss 11 gate)', () {
+    test('bounces every other route, exactly like keyMissing', () {
+      for (final loc in [..._ordinaryRoutes, '/unlock']) {
+        expect(redirect(loc, notMigrated: true), '/recover', reason: loc);
+      }
+    });
+
+    test('already on /recover → stays', () {
+      expect(redirect('/recover', notMigrated: true), isNull);
+    });
+
+    test('beats needsUnlock too', () {
+      expect(
+        redirect('/home', needsUnlock: true, notMigrated: true),
+        '/recover',
+      );
+    });
+
+    test('both flags at once still means one screen', () {
+      expect(
+        redirect('/home', keyMissing: true, notMigrated: true),
+        '/recover',
+      );
+      expect(
+        redirect('/recover', keyMissing: true, notMigrated: true),
+        isNull,
+      );
+    });
+
+    test('cleared → /recover releases to /lock', () {
+      // What "Try again" does once the user comes back from 0.17.3.
+      expect(redirect('/recover'), '/lock');
+    });
+
+    test('clearing only one of the two flags keeps the gate shut', () {
+      // The recovery screen re-points the diagnosis without opening the
+      // gate: keyMissing false + notMigrated true is still /recover.
+      expect(redirect('/home', keyMissing: false, notMigrated: true),
+          '/recover');
+      expect(redirect('/home', keyMissing: true, notMigrated: false),
+          '/recover');
+    });
+  });
+
   group('needsUnlock → /unlock', () {
     test('bounces every other route', () {
       for (final loc in _ordinaryRoutes) {
@@ -161,6 +216,7 @@ void main() {
       // A rule that bounced its own target would spin GoRouter forever.
       expect(redirect('/onboarding', onboarded: false), isNull);
       expect(redirect('/recover', keyMissing: true), isNull);
+      expect(redirect('/recover', notMigrated: true), isNull);
       expect(redirect('/unlock', needsUnlock: true), isNull);
       expect(redirect('/lock'), isNull);
     });

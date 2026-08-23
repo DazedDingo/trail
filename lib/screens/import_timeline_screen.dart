@@ -92,16 +92,15 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
   // --- steps -------------------------------------------------------------
 
   Future<void> _pickFile() async {
-    final picked = await FilePicker.pickFiles(
-      type: FileType.any,
-      allowMultiple: false,
-    );
-    if (picked == null || picked.files.isEmpty) return;
-    final path = picked.files.single.path;
-    if (path == null) return;
+    // file_picker 12 replaced the single-file `pickFiles(allowMultiple:
+    // false)` (which now returns a bare `List<PlatformFile>`) with
+    // `pickFile`, returning the one file or null on cancel.
+    final picked = await FilePicker.pickFile(type: FileType.any);
+    final path = picked?.path;
+    if (picked == null || path == null) return;
     setState(() {
       _path = path;
-      _fileName = picked.files.single.name;
+      _fileName = picked.name;
       _preview = null;
       _already = null;
       _result = null;

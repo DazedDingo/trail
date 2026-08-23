@@ -151,6 +151,35 @@ class SecureStorageMigration {
     return report;
   }
 
+  /// Records the marker for an install that is demonstrably already on
+  /// the new format — the startup gate calls this when the SQLCipher key
+  /// reads back fine but no marker is on disk (a device that skipped
+  /// release A, or one whose SharedPreferences were cleared).
+  ///
+  /// Never overwrites an existing marker: [verifyAndRewrite]'s is richer
+  /// and its `at` is meant to name the upgrade, not today. Returns whether
+  /// a marker is on disk afterwards, and never throws — a prefs failure
+  /// must not turn a working install into a blocked one.
+  static Future<bool> markVerified({
+    required List<String> present,
+    SharedPreferences? prefs,
+  }) async {
+    try {
+      final store = prefs ?? await SharedPreferences.getInstance();
+      if (parseMarker(store.getString(markerKey)) != null) return true;
+      return await store.setString(
+        markerKey,
+        jsonEncode({
+          'at': DateTime.now().millisecondsSinceEpoch,
+          'present': present,
+        }),
+      );
+    } catch (e) {
+      debugPrint('[SecureStorageMigration] markVerified failed: $e');
+      return false;
+    }
+  }
+
   /// The persisted marker, or `null` if no pass has fully succeeded yet.
   static Future<MigrationMarker?> readMarker({SharedPreferences? prefs}) async {
     try {

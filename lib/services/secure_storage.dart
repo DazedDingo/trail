@@ -10,36 +10,35 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 /// mismatch in namespace / prefix / cipher would silently read a
 /// *different* preferences file and report every key as missing).
 ///
-/// ## Why each option is pinned (release A of the 9.2.4 → 10.3.1 → 11.x
-/// migration)
+/// ## Why each option is pinned (release B: `flutter_secure_storage` 11.x)
 ///
-/// * `encryptedSharedPreferences: true` — **deprecated upstream but
-///   required here.** 10.x's native `initialize()` only looks for
-///   Jetpack-`EncryptedSharedPreferences` data (what 9.2.4 wrote) while
-///   the "already migrated" marker is absent; keeping the flag `true`
-///   also keeps the *fallback* branches alive, so a device whose Jetpack
-///   MasterKey still resolves reads the old store instead of silently
-///   presenting an empty one. Release B (the 11.x bump) removes the
-///   parameter entirely — only once the on-device migration marker
-///   written by `SecureStorageMigration` proves the rewrite happened.
-/// * `migrateOnAlgorithmChange: true` — the actual migration switch. With
-///   it off, 10.x refuses to touch the 9.2.4 data and the SQLCipher key
-///   reads back as `null`.
-/// * `resetOnError: false` — 10.x flipped this default to `true`, which
-///   means *any* decrypt error wipes the whole secure store. That store
-///   holds the only copy of the SQLCipher key for the user's encrypted
-///   location log. Never enable it.
-/// * `keyCipherAlgorithm` / `storageCipherAlgorithm` — pinned to the 11.x
-///   survivors (RSA-OAEP + AES-GCM) so the rewrite performed under 10.x
-///   lands in the format release B can still read. The 10.x defaults
-///   match, but defaults are not a contract.
+/// Release A (0.17.3+105) ran on 10.3.1 with `encryptedSharedPreferences:
+/// true` and rewrote every secret through the new ciphers, recording
+/// `SecureStorageMigration.markerKey` on success. 11.x **removed** the
+/// parameter — and with it every branch that could read 9.2.4's
+/// Jetpack-`EncryptedSharedPreferences` data — so the marker is now the
+/// gate: `computeStartupKeyState` refuses to mint a key on a device that
+/// never ran A (`StartupKeyState.notMigrated` → `/recover`).
+///
+/// * `migrateOnAlgorithmChange: true` — still present in 11.x. It is what
+///   re-encrypts data in place if the saved algorithm markers ever differ
+///   from the pair below; with it off, 11.x's `handleKeyMismatch` has
+///   only `resetOnError` (i.e. `deleteAll()`) left to offer.
+/// * `resetOnError: false` — 10.x flipped this default to `true` and 11.x
+///   keeps that default, which means *any* decrypt error wipes the whole
+///   secure store. That store holds the only copy of the SQLCipher key
+///   for the user's encrypted location log. Never enable it.
+/// * `keyCipherAlgorithm` / `storageCipherAlgorithm` — RSA-OAEP + AES-GCM,
+///   the only pair 11.x still ships, and the pair release A wrote with.
+///   The 11.x defaults match, but defaults are not a contract.
+/// * `storageNamespace` / `preferencesKeyPrefix` — deliberately unset. Both
+///   would move the prefs file / key names away from what 9.2.4 and 10.3.1
+///   used and orphan every installed user.
 ///
 /// Honest note on cost: sharing the Dart instance is hygiene, not a
 /// measured win — the native side re-runs its setup per call.
 const FlutterSecureStorage secureStorage = FlutterSecureStorage(
   aOptions: AndroidOptions(
-    // ignore: deprecated_member_use
-    encryptedSharedPreferences: true,
     migrateOnAlgorithmChange: true,
     resetOnError: false,
     keyCipherAlgorithm:

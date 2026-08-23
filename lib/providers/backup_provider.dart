@@ -1,8 +1,10 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../db/database.dart';
 import '../db/keystore_key.dart';
 import '../services/passphrase_service.dart';
+import '../services/secure_storage_migration.dart';
 
 /// Reflects whether the "cloud backup passphrase" mode is active on this
 /// install. Single source of truth is the salt file — this provider just
@@ -26,6 +28,13 @@ final needsUnlockProvider = StateProvider<bool>((ref) => false);
 /// hard-gate on `/recover`.
 final keyMissingProvider = StateProvider<bool>((ref) => false);
 
+/// Synchronous flag, overridden at startup exactly like
+/// [keyMissingProvider]. `true` = this build's `flutter_secure_storage`
+/// (11.x) cannot read what is on disk because the 0.17.3 rewrite never
+/// ran, so `/recover` shows the "install 0.17.3 first" variant instead of
+/// the generic key-loss copy.
+final notMigratedProvider = StateProvider<bool>((ref) => false);
+
 /// Seam for the recovery screen's "Try again" button. Overridden in
 /// widget tests so the three outcomes can be driven without a Keystore.
 final startupKeyStateProbeProvider =
@@ -39,7 +48,14 @@ final setAsideDbProvider = Provider<Future<String?> Function()>((ref) {
   return TrailDatabase.setAsideForRecovery;
 });
 
-/// The three ways startup can find the SQLCipher key.
+/// Seam for the recovery screen's "Get Trail 0.17.3" link. Overridden in
+/// widget tests so the variant can be exercised without a url_launcher
+/// platform channel.
+final launchUrlProvider = Provider<Future<bool> Function(Uri)>((ref) {
+  return (uri) => launchUrl(uri, mode: LaunchMode.externalApplication);
+});
+
+/// The four ways startup can find the SQLCipher key.
 enum StartupKeyState {
   /// A key is stored, or this is a clean first run with no DB to open.
   ok,
@@ -52,6 +68,16 @@ enum StartupKeyState {
   /// wipe, restore onto a new device, or a secure-storage upgrade that
   /// dropped the value. Route to `/recover`; never mint a new key.
   keyMissing,
+
+  /// Same shape as [keyMissing] — DB on disk, no key, no salt — but the
+  /// `SecureStorageMigration` marker is absent too, so the likely cause
+  /// is this build (`flutter_secure_storage` 11.x) reading a store that
+  /// release A never rewrote: 11.x dropped every branch that could read
+  /// 9.2.4's Jetpack data, and the old values simply read back as `null`.
+  /// Nothing is lost — the bytes are still in the prefs file — so the
+  /// recovery screen sends the user to install 0.17.3 first rather than
+  /// offering "start a new log".
+  notMigrated,
 }
 
 /// Computed at startup: the DB needs unlocking iff passphrase mode is
@@ -68,8 +94,28 @@ Future<bool> computeNeedsUnlock() async {
 /// `KeystoreKey.getOrCreate` minting a fresh random key over a perfectly
 /// good (but now unreadable) log.
 Future<StartupKeyState> computeStartupKeyState() async {
-  if (await KeystoreKey.read() != null) return StartupKeyState.ok;
+  if (await KeystoreKey.read() != null) {
+    // The key reads back under 11.x's ciphers, so this install is on the
+    // new format whatever the marker says. Record one if it is missing
+    // (a device that jumped straight to B and had nothing to migrate, or
+    // one whose SharedPreferences were cleared) — a working install must
+    // never be gated on a bookkeeping pref. Costs one prefs read on the
+    // happy path, next to two Keystore unwraps.
+    await SecureStorageMigration.markVerified(
+      present: const [KeystoreKey.storageKey],
+    );
+    return StartupKeyState.ok;
+  }
   if (await PassphraseService.isEnabled()) return StartupKeyState.needsUnlock;
-  if (await KeystoreKey.dbFileExists()) return StartupKeyState.keyMissing;
+  if (await KeystoreKey.dbFileExists()) {
+    // No key, no salt, but a log on disk. If release A's marker is absent
+    // this is very likely 11.x looking at an un-rewritten 9.2.4 store
+    // (reads come back `null`, nothing throws and nothing is deleted) —
+    // a different problem with a different, non-destructive answer.
+    if (await SecureStorageMigration.readMarker() == null) {
+      return StartupKeyState.notMigrated;
+    }
+    return StartupKeyState.keyMissing;
+  }
   return StartupKeyState.ok;
 }

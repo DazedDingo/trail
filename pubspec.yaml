@@ -1,7 +1,7 @@
 name: trail
 description: "Trail — personal-safety GPS logger. Offline, encrypted, 4h-cadence background pings."
 publish_to: 'none'
-version: 0.17.3+105
+version: 0.17.4+106
 
 environment:
   sdk: ^3.5.0
@@ -34,7 +34,7 @@ dependencies:
 
   # Storage (encrypted)
   sqflite_sqlcipher: ^3.1.0+1
-  flutter_secure_storage: ^10.3.1
+  flutter_secure_storage: ^11.0.0
   path: ^1.9.0
   path_provider: ^2.1.4
   # PBKDF2 for the "set a backup passphrase" flow — derives the SQLCipher
@@ -52,7 +52,7 @@ dependencies:
   permission_handler: ^11.3.1
 
   # UX helpers
-  share_plus: ^10.0.2
+  share_plus: ^13.3.0
   # Panic-receipt notification + continuous-panic persistent notification.
   # Silent for scheduled pings (PLAN.md: too frequent to notify); only the
   # panic path posts user-visible notifications.
@@ -67,13 +67,13 @@ dependencies:
   # already present transitively; pinned here because we import it.
   crypto: ^3.0.3
   intl: ^0.19.0
-  package_info_plus: ^9.0.1
+  package_info_plus: ^10.2.1
 
   # Offline-map region picker — `file_picker` lets the user install a
   # region by selecting a `.pmtiles` from storage; we copy it into the
   # app's documents dir so it survives uninstall-restore flows and SAF
   # permission expiry.
-  file_picker: ^11.0.2
+  file_picker: ^12.0.0
   shared_preferences: ^2.5.5
 
   # Vector-tile renderer for the offline map viewer. Reads sideloaded

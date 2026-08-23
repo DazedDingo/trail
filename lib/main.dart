@@ -52,6 +52,10 @@ void main() async {
   //   - keyMissing: a trail.db exists with neither key nor salt → the
   //     /recover screen, because minting a fresh key here would orphan
   //     the user's whole log.
+  //   - notMigrated: the same, plus release A's secure-storage marker is
+  //     absent → the /recover screen's "install 0.17.3 first" variant,
+  //     because flutter_secure_storage 11 cannot read a store the 10.x
+  //     rewrite never touched (it reads back empty, nothing is deleted).
   // Both beat letting providers hit their exceptions one by one.
   final onboardedFuture = OnboardingGate.isComplete();
   final keyStateFuture = computeStartupKeyState();
@@ -71,6 +75,8 @@ void main() async {
             .overrideWith((_) => keyState == StartupKeyState.needsUnlock),
         keyMissingProvider
             .overrideWith((_) => keyState == StartupKeyState.keyMissing),
+        notMigratedProvider
+            .overrideWith((_) => keyState == StartupKeyState.notMigrated),
       ],
       child: const TrailApp(),
     ),
@@ -95,8 +101,11 @@ void main() async {
 ///     label, then no-ops unless the feature is on, a server is
 ///     configured, and the connection is one the user allowed.
 ///   - [SecureStorageMigration.verifyAndRewrite] re-writes every Trail
-///     secret through `flutter_secure_storage` 10.x's new ciphers and
-///     records the success marker release B will require. Safe to run
+///     secret through the current ciphers and refreshes the marker the
+///     startup gate requires. Still worth running on 11.x: it is the only
+///     thing that keeps the marker in step with what is actually readable,
+///     and it cannot throw out here — each key is tried in its own
+///     try/catch and a failure only withholds the marker. Safe to run
 ///     alongside the DB open: it only reads and re-writes secure storage,
 ///     and writing an identical value back is a no-op for every consumer.
 ///   - [MapLibreMap.preWarm] builds the native renderer's shared

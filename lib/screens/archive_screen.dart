@@ -127,10 +127,16 @@ class _ArchiveScreenState extends ConsumerState<ArchiveScreen> {
         // offer an empty 2019 until the next app start).
         ..invalidate(pingYearsProvider);
       if (!mounted) return;
-      await Share.shareXFiles(
-        result.exportedFiles.map(XFile.new).toList(),
-        subject: 'Trail archive (before '
-            '${_cutoff.toLocal().toIso8601String().split("T").first})',
+      // share_plus 13: one `ShareParams` object instead of the static
+      // `shareXFiles`. The returned `ShareResult` is ignored on purpose —
+      // the archive is already written and deleted from the DB by this
+      // point, so a dismissed share sheet must not read as a failure.
+      await SharePlus.instance.share(
+        ShareParams(
+          files: result.exportedFiles.map(XFile.new).toList(),
+          subject: 'Trail archive (before '
+              '${_cutoff.toLocal().toIso8601String().split("T").first})',
+        ),
       );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
