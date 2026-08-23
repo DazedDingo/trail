@@ -1225,11 +1225,15 @@ class _GithubPatTileState extends State<_GithubPatTile> {
   }
 
   Future<void> _clear() async {
-    await GithubPatService.clear();
+    final error = await GithubPatService.tryClear();
     if (!mounted) return;
     setState(() {
-      _masked = null;
-      _status = 'Cleared';
+      if (error == null) {
+        _masked = null;
+        _status = 'Cleared';
+      } else {
+        _status = "Couldn't clear: $error";
+      }
     });
   }
 
@@ -1642,7 +1646,8 @@ class _MapDetailServerGroupState extends ConsumerState<_MapDetailServerGroup> {
       ),
     );
     if (entered == null) return;
-    await CoveragePrefs.writeServerUrl(entered);
+    final error = await CoveragePrefs.trySaveServerUrl(entered);
+    if (error != null) _snack("Couldn't save: $error");
     await _load();
   }
 
@@ -1683,15 +1688,24 @@ class _MapDetailServerGroupState extends ConsumerState<_MapDetailServerGroup> {
       ),
     );
     if (entered == null || entered.isEmpty) return;
-    await CoveragePrefs.writeToken(entered);
+    final error = await CoveragePrefs.trySaveToken(entered);
+    if (error != null) _snack("Couldn't save: $error");
     await _load();
   }
 
   Future<void> _clearToken() async {
-    await CoveragePrefs.clearToken();
+    final error = await CoveragePrefs.tryClearToken();
+    if (error != null) _snack("Couldn't clear: $error");
     await _load();
   }
 
+  /// Health is unauthenticated, so a working "Test connection" never
+  /// told the user whether a *token* they had just entered was actually
+  /// any good (0.17.10 incident: a token that failed to persist, or one
+  /// simply wrong, still passed this button). When a token is
+  /// configured, follow a successful [TileServerClient.health] with the
+  /// authenticated `/v1/planet` — a 401/403 there means the token itself
+  /// is the problem, not the server.
   Future<void> _testConnection() async {
     final url = _url;
     if (url == null) {
@@ -1699,13 +1713,40 @@ class _MapDetailServerGroupState extends ConsumerState<_MapDetailServerGroup> {
       return;
     }
     setState(() => _busy = true);
-    final client =
-        TileServerClient(baseUrl: url, token: await CoveragePrefs.readToken());
+    final token = await CoveragePrefs.readToken();
+    final client = TileServerClient(baseUrl: url, token: token);
     try {
       final health = await client.health();
-      _snack(health.ok
-          ? 'Connected — planet ${health.planetDate}'
-          : 'Server reachable but not ready.');
+      if (!health.ok) {
+        _snack(describeConnectionTest(healthOk: false));
+        return;
+      }
+      final tokenSet = token != null && token.isNotEmpty;
+      if (!tokenSet) {
+        _snack(describeConnectionTest(
+          healthOk: true,
+          planetDate: health.planetDate,
+        ));
+        return;
+      }
+      try {
+        final planet = await client.planet();
+        _snack(describeConnectionTest(
+          healthOk: true,
+          tokenSet: true,
+          planetDate: planet.date,
+        ));
+      } on TileServerException catch (e) {
+        if (e.isAuth) {
+          _snack(describeConnectionTest(
+            healthOk: true,
+            tokenSet: true,
+            planetStatus: e.status,
+          ));
+        } else {
+          _snack('Failed: ${e.message}');
+        }
+      }
     } on TileServerException catch (e) {
       _snack('Failed: ${e.message}');
     } catch (e) {
@@ -1865,3 +1906,30 @@ class _MapDetailServerGroupState extends ConsumerState<_MapDetailServerGroup> {
 /// O(points × clusters); 5 000 points is a year of 4 h pings several
 /// times over and still plans in milliseconds.
 const int _maxFetchPoints = 5000;
+
+/// Decides the "Test connection" snackbar text — a top-level pure
+/// function (same idiom as `filterPingsByRange` in `export_dialog.dart`)
+/// so the three decision branches are unit-testable without a socket.
+///
+///   * `healthOk == false` → server not ready, unchanged wording.
+///   * `healthOk` and no token configured → reports the (unauthenticated)
+///     planet date from `/v1/health` and says so plainly.
+///   * `healthOk`, a token configured, and [planetStatus] is 401/403 →
+///     the token itself was rejected.
+///   * `healthOk` and a token that the authenticated `/v1/planet` call
+///     accepted → reports its planet date as verified.
+String describeConnectionTest({
+  required bool healthOk,
+  String? planetDate,
+  bool tokenSet = false,
+  int? planetStatus,
+}) {
+  if (!healthOk) return 'Server reachable but not ready.';
+  if (planetStatus == 401 || planetStatus == 403) {
+    return 'Server reachable, but the token was rejected — re-enter it.';
+  }
+  final date = planetDate ?? '';
+  return tokenSet
+      ? 'Connected — planet $date · token OK'
+      : 'Connected — planet $date · no token set';
+}

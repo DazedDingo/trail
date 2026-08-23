@@ -15,6 +15,19 @@ class GithubPatService {
 
   static Future<void> clear() => secureStorage.delete(key: _key);
 
+  /// Attempts to clear the stored PAT, returning `null` on success or a
+  /// concise description of the failure otherwise. `clear()` can throw
+  /// (the secure store's Keystore alias can fail — 0.17.10), and the
+  /// Settings tile used to leave that Future unhandled.
+  static Future<String?> tryClear() async {
+    try {
+      await clear();
+      return null;
+    } catch (e) {
+      return '$e';
+    }
+  }
+
   /// Returns "ghp_…last4" so the settings tile can show the user that
   /// a token is configured without revealing its value.
   static String mask(String pat) {

@@ -123,6 +123,49 @@ void main() {
     });
   });
 
+  group('planet', () {
+    test('parses url + date and sends the bearer token', () async {
+      late Uri seenUrl;
+      Map<String, String>? seenHeaders;
+      final client = TileServerClient(
+        baseUrl: 'https://host:8443',
+        token: 'secret',
+        client: MockClient((req) async {
+          seenUrl = req.url;
+          seenHeaders = req.headers;
+          return http.Response(
+            '{"url":"https://planet.example/build","date":"20260822"}',
+            200,
+          );
+        }),
+      );
+      final planet = await client.planet();
+      expect(seenUrl.path, '/v1/planet');
+      expect(seenHeaders!['Authorization'], 'Bearer secret');
+      expect(planet.url, 'https://planet.example/build');
+      expect(planet.date, '20260822');
+      client.close();
+    });
+
+    test('401 becomes TileServerException(401) flagged as an auth failure',
+        () async {
+      final client = TileServerClient(
+        baseUrl: 'https://host:8443',
+        token: 'wrong',
+        client: MockClient(
+          (_) async => http.Response('{"error":"bad token"}', 401),
+        ),
+      );
+      await expectLater(
+        client.planet(),
+        throwsA(isA<TileServerException>()
+            .having((e) => e.status, 'status', 401)
+            .having((e) => e.isAuth, 'isAuth', isTrue)),
+      );
+      client.close();
+    });
+  });
+
   group('dryRun', () {
     test('parses tiles, bytes and planet date and sends the bearer token',
         () async {

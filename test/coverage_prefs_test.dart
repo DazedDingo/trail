@@ -1,7 +1,9 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:trail/services/coverage/coverage_planner.dart';
 import 'package:trail/services/coverage/coverage_prefs.dart';
+import 'package:trail_secure_store/trail_secure_store.dart';
 
 /// Cross-isolate prefs for the map-detail feature. Same contract as
 /// `WorkerRunLog` (CLAUDE.md gotcha 11): no caching, and malformed JSON
@@ -231,6 +233,71 @@ void main() {
       // read must degrade to "not configured", not blow up the settings
       // screen or the fetch path.
       expect(await CoveragePrefs.readToken(), isNull);
+    });
+  });
+
+  // Regression coverage for 0.17.10: `_editToken`/`_clearToken` in
+  // `settings_screen.dart` used to await `writeToken`/`clearToken`
+  // directly with no try/catch, so a thrown secure-store write (e.g. a
+  // Keystore alias that fails to GENERATE) died as an unhandled Future
+  // and the tile's subtitle silently stayed "Not set". `trySaveToken` /
+  // `tryClearToken` are the pure functions the screen now calls instead.
+  group('trySaveToken / tryClearToken (0.17.10)', () {
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(TrailSecureStore.channel, null);
+    });
+
+    test('trySaveToken returns null on a successful write', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+              TrailSecureStore.channel, (call) async => null);
+      expect(await CoveragePrefs.trySaveToken('abc123'), isNull);
+    });
+
+    test(
+        'trySaveToken reports a Keystore write failure instead of throwing',
+        () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(TrailSecureStore.channel, (call) async {
+        throw PlatformException(
+          code: 'KeyStoreException',
+          message: 'UNKNOWN_ERROR (-1000)',
+        );
+      });
+      final error = await CoveragePrefs.trySaveToken('abc123');
+      expect(error, isNotNull);
+      expect(error, contains('KeyStoreException'));
+    });
+
+    test('tryClearToken returns null on a successful delete', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+              TrailSecureStore.channel, (call) async => null);
+      expect(await CoveragePrefs.tryClearToken(), isNull);
+    });
+
+    test('tryClearToken reports a failure instead of throwing', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(TrailSecureStore.channel, (call) async {
+        throw PlatformException(
+          code: 'IllegalStateException',
+          message: 'could not persist',
+        );
+      });
+      final error = await CoveragePrefs.tryClearToken();
+      expect(error, isNotNull);
+      expect(error, contains('IllegalStateException'));
+    });
+  });
+
+  group('trySaveServerUrl (0.17.10)', () {
+    test('returns null and persists on success', () async {
+      expect(
+        await CoveragePrefs.trySaveServerUrl('https://host:8443'),
+        isNull,
+      );
+      expect(await CoveragePrefs.readServerUrl(), 'https://host:8443');
     });
   });
 }

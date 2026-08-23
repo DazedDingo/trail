@@ -92,4 +92,48 @@ void main() {
     expect(options['preferencesKeyPrefix'], '');
     expect(options['storageNamespace'], '');
   });
+
+  group('describeSecureStore (0.17.10)', () {
+    test('null status reads as "reading…"', () {
+      expect(describeSecureStore(null), 'Trail secure store: reading…');
+    });
+
+    test('a read error is reported verbatim, not swallowed into "0 entries"',
+        () {
+      expect(
+        describeSecureStore(
+          const SecureStoreStatus(error: 'MissingPluginException'),
+        ),
+        'Trail secure store: unavailable (MissingPluginException)',
+      );
+    });
+
+    test('a healthy store reports entry count + alias state', () {
+      expect(
+        describeSecureStore(
+          const SecureStoreStatus(aliasExists: true, entryCount: 5),
+        ),
+        'Trail secure store: 5 entries · Keystore alias present',
+      );
+    });
+
+    test('singular "entry" for a count of exactly one', () {
+      expect(
+        describeSecureStore(
+          const SecureStoreStatus(aliasExists: true, entryCount: 1),
+        ),
+        'Trail secure store: 1 entry · Keystore alias present',
+      );
+    });
+
+    test('a missing alias with existing entries is called out — this is '
+        'the "everything will throw on write" state', () {
+      expect(
+        describeSecureStore(
+          const SecureStoreStatus(aliasExists: false, entryCount: 3),
+        ),
+        'Trail secure store: 3 entries · alias MISSING',
+      );
+    });
+  });
 }

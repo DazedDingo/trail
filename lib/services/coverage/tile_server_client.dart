@@ -83,6 +83,9 @@ class TileServerClient implements CoverageTileServer {
 
   Uri healthUri() => Uri.parse('$baseUrl/v1/health');
 
+  /// The (authenticated) planet-info URL — `GET /v1/planet`.
+  Uri planetUri() => Uri.parse('$baseUrl/v1/planet');
+
   /// The extract URL for [box]. `dryRun` adds `dry_run=1`.
   Uri extractUri(
     CoverageBox box, {
@@ -106,6 +109,15 @@ class TileServerClient implements CoverageTileServer {
       planet: '${json['planet'] ?? ''}',
       planetDate: '${json['planetDate'] ?? ''}',
     );
+  }
+
+  /// Authenticated planet check — `GET /v1/planet`. Unlike [health] this
+  /// requires a valid bearer token, so a 401/403 here is the "the token
+  /// I have is wrong" signal the Settings tile's "Test connection" uses
+  /// to tell that apart from "the server itself is unreachable".
+  Future<({String url, String date})> planet() async {
+    final json = await _getJson(planetUri());
+    return (url: '${json['url'] ?? ''}', date: '${json['date'] ?? ''}');
   }
 
   @override

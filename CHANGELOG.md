@@ -4,6 +4,15 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.17.10+112] — 2026-08-23
+
+### Fixed
+- **Saving a token or URL can no longer fail silently.** Entering the map-detail server token on a phone whose Keystore refuses the save looked like nothing happened ("Not set" after Save). Every secret-saving action in Settings now reports "Couldn't save: …" when the write fails, and the list always re-reads the stored state afterwards.
+- **Test connection now proves the token, not just the URL.** The health check needs no token, so it could say "Connected" with a rejected token. With a token set, the test also calls an authenticated endpoint: "Connected — planet <date> · token OK" or "Server reachable, but the token was rejected — re-enter it."
+
+### Added
+- Diagnostics shows the Trail secure store's health ("N entries · Keystore alias present / missing / unavailable"), next to the key-escrow line.
+
 ## [0.17.9+111] — 2026-08-23
 
 ### Changed

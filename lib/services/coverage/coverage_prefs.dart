@@ -321,6 +321,47 @@ class CoveragePrefs {
 
   static Future<void> clearToken() => secureStorage.delete(key: tokenKey);
 
+  /// Attempts to persist [token], returning `null` on success or a
+  /// concise description of the failure otherwise.
+  ///
+  /// [writeToken] can throw — the secure store's Keystore alias can fail
+  /// to generate (a real-device incident: 0.17.10) — and the Settings
+  /// tile used to leave that Future unhandled, so the subtitle silently
+  /// stayed "Not set" with no indication anything went wrong. Exposed as
+  /// a pure function so that failure path is unit-testable without
+  /// mounting the Settings screen.
+  static Future<String?> trySaveToken(String token) async {
+    try {
+      await writeToken(token);
+      return null;
+    } catch (e) {
+      return '$e';
+    }
+  }
+
+  /// As [trySaveToken], for [clearToken].
+  static Future<String?> tryClearToken() async {
+    try {
+      await clearToken();
+      return null;
+    } catch (e) {
+      return '$e';
+    }
+  }
+
+  /// As [trySaveToken], for [writeServerUrl]. The URL itself lives in
+  /// plain prefs (not the secure store), but the write can still fail
+  /// (disk full, a broken prefs backend) and the Settings tile should
+  /// report that rather than silently keep the old value.
+  static Future<String?> trySaveServerUrl(String? url) async {
+    try {
+      await writeServerUrl(url);
+      return null;
+    } catch (e) {
+      return '$e';
+    }
+  }
+
   /// "abcd…wxyz" so the tile can show that a token is configured
   /// without revealing it. Same rule as `GithubPatService.mask`.
   static String maskToken(String token) {

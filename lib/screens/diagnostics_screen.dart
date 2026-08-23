@@ -4,9 +4,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:trail_secure_store/trail_secure_store.dart';
 
 import '../db/database.dart';
 import '../services/scheduler/worker_run_log.dart';
+import '../services/secure_storage.dart';
 import '../services/secure_storage_migration.dart';
 import '../services/startup_gates.dart';
 import '../widgets/help_button.dart';
@@ -51,6 +53,7 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
   Map<String, PermissionStatus> _perms = const {};
   List<WorkerRun> _runs = const [];
   String _secureStorageLine = SecureStorageMigration.describeMarker(null);
+  String _secureStoreLine = describeSecureStore(null);
   String _startupErrorLine = describeLastStartupError(null);
   bool _workerPaused = false;
   List<LockedLog> _lockedLogs = const [];
@@ -90,6 +93,7 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
       TrailDatabase.lockedAsideLogs(),
       readLastStartupError(),
       readStartupBlocked(),
+      secureStorage.status(),
     ]);
     if (!mounted) return;
     setState(() {
@@ -109,6 +113,7 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
         results[8] as LastStartupError?,
       );
       _workerPaused = results[9] as bool;
+      _secureStoreLine = describeSecureStore(results[10] as SecureStoreStatus);
       _loading = false;
     });
   }
@@ -150,6 +155,7 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
       ..writeln('DB integrity: ${_integrityResult ?? "not run"}')
       ..writeln('')
       ..writeln(_secureStorageLine)
+      ..writeln(_secureStoreLine)
       ..writeln('')
       ..writeln(_startupErrorLine)
       ..writeln(_workerPaused
@@ -288,6 +294,16 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
                 const SecureStorageRescueTile(),
                 const Divider(),
                 const _SectionHeader('Key escrow'),
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.storage_outlined),
+                  title: Text(_secureStoreLine),
+                  subtitle: const Text(
+                    'Trail\'s own Keystore-backed store for every secret '
+                    '(server token, GitHub PAT, the DB key\'s primary '
+                    'home). Independent of the escrow below.',
+                  ),
+                ),
                 const KeyEscrowTile(),
                 const Divider(),
                 const _SectionHeader('Startup'),

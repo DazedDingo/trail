@@ -88,3 +88,18 @@ const FlutterSecureStorage legacySecureStorage = FlutterSecureStorage(
     storageCipherAlgorithm: StorageCipherAlgorithm.AES_GCM_NoPadding,
   ),
 );
+
+/// The Diagnostics line for [TrailSecureStore.status] — the store's own
+/// health, independent of the legacy-migration marker
+/// ([SecureStorageMigration.describeMarker]) and the key escrow
+/// ([describeKeyEscrow]). Pure so it can be pinned by a unit test; the
+/// Diagnostics screen only renders it.
+String describeSecureStore(SecureStoreStatus? status) {
+  if (status == null) return 'Trail secure store: reading…';
+  if (status.error != null) {
+    return 'Trail secure store: unavailable (${status.error})';
+  }
+  final n = status.entryCount;
+  return 'Trail secure store: $n ${n == 1 ? 'entry' : 'entries'} · '
+      '${status.aliasExists ? 'Keystore alias present' : 'alias MISSING'}';
+}
