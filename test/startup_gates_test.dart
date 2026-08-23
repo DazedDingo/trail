@@ -252,6 +252,105 @@ void main() {
     });
   });
 
+  group('classifyStartupFailure — picking the failure-screen messaging', () {
+    test('the live incident: "Failed to unwrap key" classifies as keystore',
+        () {
+      expect(
+        classifyStartupFailure(
+          'Stage: encryption key state\nTimed out: false\n'
+          'Error: PlatformException(Failed to unwrap key, null, null)',
+        ),
+        StartupFailureKind.keystore,
+      );
+    });
+
+    for (final marker in [
+      'Failed to unwrap key',
+      'KeyStoreException',
+      'AndroidKeyStore',
+      'keystore2',
+      'UNKNOWN_ERROR',
+      'Migration failed after algorithm change',
+      'Key mismatch after algorithm change',
+    ]) {
+      test('"$marker" classifies as keystore', () {
+        expect(classifyStartupFailure('Error: boom ($marker)'),
+            StartupFailureKind.keystore);
+      });
+    }
+
+    test('a plain timeout (no keystore marker) classifies as timeout', () {
+      expect(
+        classifyStartupFailure(
+          'Stage: onboarding flag\nTimed out: true\n'
+          'Error: TimeoutException after 0:00:15.000000',
+        ),
+        StartupFailureKind.timeout,
+      );
+    });
+
+    test('a keystore marker wins over a timeout in the same text', () {
+      expect(
+        classifyStartupFailure(
+          'Stage: encryption key state\nTimed out: true\n'
+          'Error: PlatformException(Failed to unwrap key)',
+        ),
+        StartupFailureKind.keystore,
+      );
+    });
+
+    test('anything else classifies as other', () {
+      expect(
+        classifyStartupFailure(
+          'Stage: onboarding flag\nTimed out: false\n'
+          'Error: StateError(something unrelated)',
+        ),
+        StartupFailureKind.other,
+      );
+    });
+
+    test('"Timed out: false" alone never reads as a timeout', () {
+      expect(
+        classifyStartupFailure('Timed out: false\nError: whatever'),
+        isNot(StartupFailureKind.timeout),
+      );
+    });
+  });
+
+  group('startup-blocked flag — pausing the worker', () {
+    late SharedPreferences prefs;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      prefs = await SharedPreferences.getInstance();
+    });
+
+    test('unset reads as not blocked', () async {
+      expect(await readStartupBlocked(prefs: prefs), isFalse);
+    });
+
+    test('setStartupBlocked(true) is read back by readStartupBlocked',
+        () async {
+      expect(await setStartupBlocked(true, prefs: prefs), isTrue);
+      expect(await readStartupBlocked(prefs: prefs), isTrue);
+      expect(prefs.getBool(startupBlockedKey), isTrue);
+    });
+
+    test('setStartupBlocked(false) clears a previously-set flag', () async {
+      await setStartupBlocked(true, prefs: prefs);
+      expect(await setStartupBlocked(false, prefs: prefs), isTrue);
+      expect(await readStartupBlocked(prefs: prefs), isFalse);
+    });
+
+    test('writing never throws when the prefs backend is broken', () async {
+      expect(await setStartupBlocked(true, prefs: _ThrowingPrefs()), isFalse);
+    });
+
+    test('reading never throws when the prefs backend is broken', () async {
+      expect(await readStartupBlocked(prefs: _ThrowingPrefs()), isFalse);
+    });
+  });
+
   group('persistence — the diagnostics breadcrumb', () {
     late SharedPreferences prefs;
 

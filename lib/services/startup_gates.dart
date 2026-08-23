@@ -21,6 +21,21 @@ const startupGateTimeout = Duration(seconds: 15);
 /// `{at, stage, error, stack}`. Read by the diagnostics screen.
 const lastStartupErrorKey = 'trail_last_startup_error_v1';
 
+/// SharedPreferences key: `true` when the most recent [runStartupGates]
+/// call failed and has not yet succeeded again.
+///
+/// Read at the very top of the WorkManager dispatcher
+/// (`_callbackDispatcher` in `workmanager_scheduler.dart`), before any
+/// handler opens the DB or touches secure storage. The live incident this
+/// guards against: a `flutter_secure_storage` 11 Keystore read that fails
+/// with `Failed to unwrap key` / `KeyStoreException UNKNOWN_ERROR -1000`.
+/// Every plugin init is another chance for its `createRSAKeysIfNeeded` to
+/// see a transient null key and regenerate the RSA pair — which would
+/// orphan every stored secret for good. When the last launch could not
+/// even get past `runStartupGates`, the worker skips the tick entirely
+/// rather than risk one more init.
+const startupBlockedKey = 'trail_startup_blocked_v1';
+
 /// Cap on the persisted stack trace. A full Flutter stack is tens of KB
 /// and SharedPreferences is not a crash reporter.
 const maxPersistedStackChars = 2000;
@@ -88,6 +103,48 @@ class StartupFailure {
     }
     return buf.toString();
   }
+}
+
+/// Coarse cause bucket for a startup failure's diagnostic text, used to
+/// pick the failure screen's messaging above the generic error block.
+enum StartupFailureKind {
+  /// The text names Android's Keystore (or `keystore2`, or the specific
+  /// `flutter_secure_storage` 11 unwrap / algorithm-migration failures)
+  /// — the live incident this screen variant exists for.
+  keystore,
+
+  /// The gate hit [startupGateTimeout] before it heard back.
+  timeout,
+
+  /// Anything else — the generic failure card is enough.
+  other,
+}
+
+/// Pure: classify [errorText] into a [StartupFailureKind].
+///
+/// Callers pass [StartupFailure.details], which carries both the error's
+/// string form and the literal `Timed out: true`/`Timed out: false` line
+/// — so a single string argument is enough to answer both questions.
+/// Keystore text wins over a timeout match: a Keystore read can itself
+/// time out, and the Keystore-specific copy is still the more useful
+/// thing to show in that case.
+StartupFailureKind classifyStartupFailure(String errorText) {
+  const keystoreMarkers = [
+    'Failed to unwrap key',
+    'KeyStoreException',
+    'AndroidKeyStore',
+    'keystore2',
+    'UNKNOWN_ERROR',
+    'Migration failed after algorithm change',
+    'Key mismatch after algorithm change',
+  ];
+  if (keystoreMarkers.any(errorText.contains)) {
+    return StartupFailureKind.keystore;
+  }
+  if (errorText.contains('Timed out: true')) {
+    return StartupFailureKind.timeout;
+  }
+  return StartupFailureKind.other;
 }
 
 /// What `main()` learned before it called `runApp`.
@@ -295,6 +352,33 @@ String firstStackLines(StackTrace? stack, {int maxLines = 12}) {
   if (lines.length <= maxLines) return lines.join('\n');
   return '${lines.take(maxLines).join('\n')}\n… '
       '${lines.length - maxLines} more frames';
+}
+
+/// Writes [blocked] to [startupBlockedKey]. Best-effort, same contract as
+/// [persistStartupError]: this runs from `main()`'s critical path and the
+/// failure screen's "Try again", so a prefs failure must never become a
+/// second error. Returns whether the write landed.
+Future<bool> setStartupBlocked(bool blocked, {SharedPreferences? prefs}) async {
+  try {
+    final store = prefs ?? await SharedPreferences.getInstance();
+    return await store.setBool(startupBlockedKey, blocked);
+  } catch (e) {
+    debugPrint('[startup] could not persist the startup-blocked flag: $e');
+    return false;
+  }
+}
+
+/// Reads [startupBlockedKey] for the diagnostics screen. Best-effort:
+/// unlike the dispatcher's own read (which must fail safe by pausing —
+/// see [startupBlockedKey]), a broken prefs backend here should read as
+/// "not paused" rather than take down an otherwise-working screen.
+Future<bool> readStartupBlocked({SharedPreferences? prefs}) async {
+  try {
+    final store = prefs ?? await SharedPreferences.getInstance();
+    return store.getBool(startupBlockedKey) ?? false;
+  } catch (_) {
+    return false;
+  }
 }
 
 /// Pure: [stack] clipped to [maxChars] for persistence.

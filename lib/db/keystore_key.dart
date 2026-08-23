@@ -2,8 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 
+import '../services/key_escrow.dart';
 import '../services/secure_storage.dart';
 
 import '../services/passphrase_service.dart';
@@ -91,13 +92,90 @@ class KeystoreKey {
     _dbFileExists = probe ?? _defaultDbFileExists;
   }
 
+  /// [lastReadSource] when the key came straight out of secure storage.
+  static const sourceSecureStorage = 'secure storage';
+
+  /// [lastReadSource] when secure storage could not produce the key and
+  /// Trail's own escrow did (`lib/services/key_escrow.dart`).
+  static const sourceEscrow = 'escrow';
+
+  /// Where the most recent successful [read] got the key from — one of
+  /// [sourceSecureStorage] / [sourceEscrow], or `null` when nothing has
+  /// been read yet or nothing was found. Diagnostics renders it; nothing
+  /// branches on it.
+  static String? lastReadSource;
+
+  /// Text of the last secure-storage read that *threw*, kept for the same
+  /// Diagnostics line. A throw here is the 0.17.5 incident's signature.
+  static String? lastSecureStorageError;
+
+  /// Text of the last escrow read that reported an error (a bad GCM tag,
+  /// an invalidated alias, or `MissingPluginException` in the WorkManager
+  /// isolate, which has no handler for our channel).
+  static String? lastEscrowError;
+
   /// Returns the stored key, or `null` if none is stored. Never generates.
   /// Use this when the caller needs to decide between "proceed" and
   /// "prompt for passphrase".
+  ///
+  /// Two-source read since 0.17.6. Secure storage is still the primary,
+  /// but neither of its failure modes is trusted on its own:
+  ///
+  /// * a **throw** (the 0.17.5 incident — a read that threw/hung after
+  ///   the `flutter_secure_storage` 10 → 11 upgrade), and
+  /// * a **silent null**, which is what 11.x returns for data written by
+  ///   9.x and what a lost Jetpack master key returns for everything
+  ///   (gotcha 37) — indistinguishable from "no key was ever stored".
+  ///
+  /// Both fall through to [KeyEscrow], Trail's own copy. A hit is
+  /// best-effort written back into secure storage so the next launch is
+  /// a normal one; that write is allowed to fail silently, because the
+  /// escrow will simply serve the key again.
+  ///
+  /// A throw that the escrow **cannot** rescue is re-thrown, not turned
+  /// into `null`: gotcha 30's startup gate exists to route exactly that
+  /// to `/startup-failed`, and a swallowed throw would look to
+  /// [getOrCreate] like "no key was ever stored" — the one state in
+  /// which it is allowed to mint a fresh one.
   static Future<String?> read() async {
-    final v = await _secure.read(key: storageKey);
-    if (v == null || v.isEmpty) return null;
-    return v;
+    String? v;
+    try {
+      v = await _secure.read(key: storageKey);
+    } catch (e) {
+      debugPrint('secure storage read failed: $e');
+      lastSecureStorageError = '$e';
+      final rescued = await _readFromEscrow();
+      if (rescued != null) return rescued;
+      rethrow;
+    }
+    if (v != null && v.isNotEmpty) {
+      lastReadSource = sourceSecureStorage;
+      return v;
+    }
+    return _readFromEscrow();
+  }
+
+  /// Never throws: [KeyEscrow.load] is total, and the re-persist is
+  /// wrapped. Returns `null` for both "escrow is empty" and "escrow could
+  /// not be read" — the difference is recorded in [lastEscrowError] and
+  /// surfaced in Diagnostics, but neither is a key.
+  static Future<String?> _readFromEscrow() async {
+    final result = await KeyEscrow.instance.load();
+    if (result.error != null) {
+      lastEscrowError = result.error;
+      debugPrint('key escrow read failed: ${result.error}');
+      return null;
+    }
+    final key = result.key;
+    if (key == null || key.isEmpty) return null;
+    lastReadSource = sourceEscrow;
+    try {
+      await _secure.write(key: storageKey, value: key);
+    } catch (e) {
+      // Expected whenever secure storage is the thing that is broken.
+      debugPrint('secure storage re-persist from escrow failed: $e');
+    }
+    return key;
   }
 
   /// Returns the existing key, or generates + persists a new random one

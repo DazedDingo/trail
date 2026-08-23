@@ -101,6 +101,13 @@ Future<void> _bootstrap() async {
     // Best-effort: the diagnostics screen's "Last startup error" line is
     // the only record that survives a force-stop.
     unawaited(persistStartupError(outcome.failure!));
+    // Tells the WorkManager dispatcher to skip its next tick(s) entirely
+    // — see the doc on `startupBlockedKey`. Cleared below on a healthy
+    // startup, and by the failure screen's "Try again" on a successful
+    // re-probe.
+    unawaited(setStartupBlocked(true));
+  } else {
+    unawaited(setStartupBlocked(false));
   }
   // Registered *before* `runApp` so it runs right after the first frame
   // is rasterised — ahead of any post-frame callback a screen registers

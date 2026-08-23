@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
@@ -5,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
+import '../services/key_escrow.dart';
 import 'keystore_key.dart';
 
 /// One `trail.db.locked-*` file left behind by
@@ -121,7 +123,7 @@ class TrailDatabase {
 
   static Future<Database> _openWithKey(String passphrase) async {
     final path = await dbPath();
-    return openDatabase(
+    final db = await openDatabase(
       path,
       password: passphrase,
       version: _schemaVersion,
@@ -147,6 +149,26 @@ class TrailDatabase {
       // no longer touches the UI's.
       singleInstance: false,
     );
+    escrowKeyAfterOpen(passphrase);
+    return db;
+  }
+
+  /// Mirror [passphrase] into Trail's own key escrow, fire-and-forget.
+  ///
+  /// Called only once `openDatabase` has returned — SQLCipher surfaces a
+  /// wrong key as a throw on the first query, so "the open succeeded" is
+  /// the only proof we get that this key really decrypts this file, and
+  /// escrowing an unverified key would just enshrine a bad one.
+  ///
+  /// Deliberately **not awaited**: the escrow is a hedge, not a
+  /// dependency, and the open path is on the startup critical path
+  /// (gotcha 30 — two awaits, everything else post-frame).
+  /// [KeyEscrow.mirrorAfterOpen] swallows every failure, including the
+  /// `MissingPluginException` the WorkManager isolate raises because our
+  /// channel handler lives in `MainActivity` and that isolate has none.
+  @visibleForTesting
+  static void escrowKeyAfterOpen(String passphrase) {
+    unawaited(KeyEscrow.instance.mirrorAfterOpen(passphrase));
   }
 
   /// UI-isolate handle. Memoised on first call — subsequent callers share the

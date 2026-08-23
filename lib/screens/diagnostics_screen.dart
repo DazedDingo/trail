@@ -10,6 +10,7 @@ import '../services/scheduler/worker_run_log.dart';
 import '../services/secure_storage_migration.dart';
 import '../services/startup_gates.dart';
 import '../widgets/help_button.dart';
+import '../widgets/key_escrow_tile.dart';
 
 /// Deep-diagnostics surface — not linked from the home screen, only
 /// reachable from Settings → Diagnostics. Surfaces the things a user
@@ -50,6 +51,7 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
   List<WorkerRun> _runs = const [];
   String _secureStorageLine = SecureStorageMigration.describeMarker(null);
   String _startupErrorLine = describeLastStartupError(null);
+  bool _workerPaused = false;
   List<LockedLog> _lockedLogs = const [];
   bool _loading = true;
   String? _integrityResult;
@@ -86,6 +88,7 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
       SecureStorageMigration.readMarker(),
       TrailDatabase.lockedAsideLogs(),
       readLastStartupError(),
+      readStartupBlocked(),
     ]);
     if (!mounted) return;
     setState(() {
@@ -104,6 +107,7 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
       _startupErrorLine = describeLastStartupError(
         results[8] as LastStartupError?,
       );
+      _workerPaused = results[9] as bool;
       _loading = false;
     });
   }
@@ -147,6 +151,9 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
       ..writeln(_secureStorageLine)
       ..writeln('')
       ..writeln(_startupErrorLine)
+      ..writeln(_workerPaused
+          ? 'Background worker: paused until the next successful start'
+          : 'Background worker: not paused')
       ..writeln('')
       ..writeln('Locked-aside logs:');
     if (_lockedLogs.isEmpty) {
@@ -278,6 +285,9 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
                   ),
                 ),
                 const Divider(),
+                const _SectionHeader('Key escrow'),
+                const KeyEscrowTile(),
+                const Divider(),
                 const _SectionHeader('Startup'),
                 ListTile(
                   dense: true,
@@ -289,6 +299,21 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
                     'next launch.',
                   ),
                 ),
+                if (_workerPaused)
+                  const ListTile(
+                    dense: true,
+                    leading: Icon(Icons.pause_circle_outline),
+                    title: Text(
+                      'Background worker: paused until the next '
+                      'successful start',
+                    ),
+                    subtitle: Text(
+                      'Trail skips scheduled pings while the last startup '
+                      'failed, so a flaky Keystore read cannot regenerate '
+                      'the encryption key. It resumes automatically the '
+                      'next time the app starts successfully.',
+                    ),
+                  ),
                 if (_lockedLogs.isNotEmpty) ...[
                   const Divider(),
                   const _SectionHeader('Locked-aside logs'),

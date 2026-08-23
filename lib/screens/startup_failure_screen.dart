@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -83,6 +85,11 @@ class _StartupFailureScreenState extends ConsumerState<StartupFailureScreen> {
           'after a restart, or send the copied details to the developer.');
       return;
     }
+    // The worker is allowed to run again — this re-probe just proved
+    // `runStartupGates` succeeds now. Fire-and-forget: best-effort by
+    // contract (same as `persistStartupError`), and nothing on this
+    // screen needs to wait for it.
+    unawaited(setStartupBlocked(false));
     // Flip every router gate before navigating, the same way
     // `KeyRecoveryScreen` does — `redirect` reads them synchronously and
     // would otherwise bounce us straight back here.
@@ -97,6 +104,20 @@ class _StartupFailureScreenState extends ConsumerState<StartupFailureScreen> {
     context.go('/lock');
   }
 
+  /// Unlike `KeyRecoveryScreen`'s equivalent shortcut, this screen's
+  /// [StartupOutcome.failed] defaults `onboarded` to `false` regardless of
+  /// what the onboarding gate actually read (`runStartupGates` never
+  /// consults it once either gate fails). A salt only exists once Settings
+  /// → Enable cloud backup has run, which is only reachable after
+  /// onboarding — so it is safe to flip the flag here rather than bounce
+  /// to `/onboarding`.
+  void _useBackupPassphrase() {
+    ref.read(onboardingCompleteProvider.notifier).state = true;
+    ref.read(needsUnlockProvider.notifier).state = true;
+    ref.read(startupFailureProvider.notifier).state = null;
+    context.go('/unlock');
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -106,6 +127,10 @@ class _StartupFailureScreenState extends ConsumerState<StartupFailureScreen> {
     // the gate and `context.go` landing, but a null-crash on the crash
     // screen would be a poor joke.
     final details = failure?.details ?? 'No details were recorded.';
+    final kind = failure != null
+        ? classifyStartupFailure(failure.details)
+        : StartupFailureKind.other;
+    final saltPresent = ref.watch(backupEnabledProvider).value ?? false;
     return Scaffold(
       appBar: AppBar(title: const Text("Trail couldn't start")),
       body: SafeArea(
@@ -129,6 +154,51 @@ class _StartupFailureScreenState extends ConsumerState<StartupFailureScreen> {
                   style: theme.textTheme.bodyMedium
                       ?.copyWith(color: scheme.error),
                   textAlign: TextAlign.center,
+                ),
+              ],
+              if (kind == StartupFailureKind.keystore) ...[
+                const SizedBox(height: 16),
+                Card(
+                  color: scheme.surfaceContainerHigh,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(Icons.phonelink_lock_outlined,
+                                color: scheme.primary),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                "Android couldn't use the key that "
+                                'protects your secrets',
+                                style: theme.textTheme.titleSmall,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          "This is the phone's Keystore, not your data — "
+                          'nothing has been deleted. It is often '
+                          'temporary: restart the phone, then tap Try '
+                          'again. If it keeps failing and you enabled '
+                          'cloud backup, use your passphrase below.',
+                          style: theme.textTheme.bodySmall,
+                        ),
+                        if (saltPresent) ...[
+                          const SizedBox(height: 12),
+                          OutlinedButton(
+                            onPressed:
+                                _working ? null : _useBackupPassphrase,
+                            child: const Text('Use backup passphrase'),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
                 ),
               ],
               const SizedBox(height: 16),

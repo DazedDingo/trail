@@ -21,6 +21,7 @@ class MainActivity : FlutterFragmentActivity() {
         PanicMethodChannel.register(flutterEngine, applicationContext)
         SchedulerMethodChannel.register(flutterEngine, applicationContext)
         EncryptedZipPlugin.register(flutterEngine)
+        KeyEscrowPlugin.register(flutterEngine, applicationContext)
         // Must register *before* the first MapLibreMap mounts so the
         // logger override catches early style/source errors. Cheap to
         // install (a single LoggerDefinition swap) and falls through

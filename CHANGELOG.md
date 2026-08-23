@@ -4,6 +4,15 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.17.7+109] — 2026-08-23
+
+### Added
+- **Trail keeps its own encrypted copy of the database key** (escrow). After every successful open, the key is stored under a Trail-owned Android Keystore key in a separate file, independent of the secure-storage plugin. If the plugin's read ever fails or comes back empty — as it did on 2026-08-23, when Android's Keystore refused to unwrap the plugin's key — Trail falls back to the escrow and starts normally, then repairs the plugin's copy. Diagnostics shows "Key escrow: present since …" and which source the last read came from. (The escrow only fills after a successful open, so it protects from the first start after this update onward.)
+- **The startup-failure screen explains the Keystore case**: "Android couldn't use the key that protects your secrets — this is the phone's Keystore, not your data; restart the phone and tap Try again; if you enabled cloud backup, use your passphrase."
+
+### Changed
+- **The background worker pauses while startup is failing.** Each attempt to read secure storage is another chance for a misbehaving Keystore to regenerate the plugin's key; the worker now skips its ticks ("paused" in Diagnostics → worker log) until the app has started successfully once. Panic still composes the SMS.
+
 ## [0.17.6+108] — 2026-08-23
 
 ### Fixed

@@ -11,6 +11,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
 
 import '../../db/area_photo_dao.dart';
 import '../../db/database.dart';
+import '../../db/keystore_key.dart';
 import '../../db/ping_dao.dart';
 import '../../db/ping_photo_dao.dart';
 import '../../models/area_photo.dart';
@@ -25,6 +26,7 @@ import '../notification_service.dart';
 import '../online_photo_service.dart';
 import '../panic/panic_service.dart';
 import '../photo_shuffle_prefs.dart';
+import '../startup_gates.dart';
 import 'scheduler_mode.dart';
 import 'scheduler_policy.dart';
 import 'worker_run_log.dart';
@@ -198,6 +200,39 @@ class WorkmanagerScheduler {
   }
 }
 
+/// True when the last [runStartupGates] call (in `main()`, or the failure
+/// screen's "Try again") failed and has not yet succeeded again — see the
+/// doc on [startupBlockedKey]. Pure function of an already-loaded
+/// [SharedPreferences] so it can be unit-tested without driving
+/// `Workmanager().executeTask` (which wraps a closure the native plugin
+/// invokes, and is not otherwise reachable from a test).
+@visibleForTesting
+bool shouldPauseWorker(SharedPreferences prefs) =>
+    prefs.getBool(startupBlockedKey) ?? false;
+
+/// Records the dispatcher's 'paused' outcome for [taskName] and returns
+/// `true` (WorkManager success) WITHOUT touching secure storage or the
+/// DB. Called at the very top of [_callbackDispatcher], ahead of the
+/// `switch` — including for [PanicService.panicTaskName]: the
+/// background continuous-panic tick (`_handlePanic`) has no DB-free
+/// sub-path to preserve. Composing the SMS via
+/// `PanicService.openPanicSms`/`autoSendSms` only ever happens in the UI
+/// isolate, from `home_screen.dart`, after a fix has already been
+/// written — the background tick itself must open the DB just to log the
+/// panic row before it can post the receipt notification, so pausing it
+/// entirely (rather than trying to salvage a partial run) is the safe
+/// choice here.
+@visibleForTesting
+Future<bool> pauseWorkerForStartupFailure(String taskName) async {
+  await WorkerRunLog.record(
+    task: taskName,
+    outcome: 'paused',
+    note: 'startup failed on last launch — skipped to protect the '
+        'encryption key',
+  );
+  return true;
+}
+
 /// Top-level entry point for every background task.
 ///
 /// MUST be top-level (not a static method) because the plugin re-resolves it
@@ -206,6 +241,15 @@ class WorkmanagerScheduler {
 void _callbackDispatcher() {
   Workmanager().executeTask((taskName, inputData) async {
     WidgetsFlutterBinding.ensureInitialized();
+    // Guard first, ahead of every handler (including panic — see
+    // `pauseWorkerForStartupFailure`): a startup that could not even get
+    // through `runStartupGates` means the Keystore may be misbehaving, and
+    // every further plugin init here is one more chance to regenerate the
+    // RSA key pair over a still-good log.
+    final prefs = await SharedPreferences.getInstance();
+    if (shouldPauseWorker(prefs)) {
+      return await pauseWorkerForStartupFailure(taskName);
+    }
     try {
       switch (taskName) {
         case WorkmanagerScheduler.periodicTaskName:
@@ -230,6 +274,22 @@ void _callbackDispatcher() {
       await WorkerRunLog.record(
         task: taskName,
         outcome: 'awaiting_passphrase',
+      );
+      return true;
+    } on KeyMissingException {
+      // The DB key was not readable in THIS isolate. Trail's key escrow
+      // (`lib/services/key_escrow.dart`) is the UI-isolate's fallback and
+      // cannot help here: its MethodChannel handler is registered by
+      // `MainActivity`, and the WorkManager isolate has no activity — the
+      // call raises `MissingPluginException` and `KeystoreKey.read`
+      // reports "no key". Skip the tick rather than mint anything; the
+      // next UI launch takes the escrow path and re-persists the key,
+      // after which the worker reads it normally again.
+      debugPrint('[scheduler] Skipping ping — DB key unavailable.');
+      await WorkerRunLog.record(
+        task: taskName,
+        outcome: 'key_unavailable',
+        note: 'key unavailable — escrow fallback is UI-isolate only',
       );
       return true;
     } catch (e) {

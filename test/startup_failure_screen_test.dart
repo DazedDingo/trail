@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:trail/providers/backup_provider.dart';
 import 'package:trail/providers/onboarding_provider.dart';
@@ -24,15 +25,25 @@ Future<ProviderContainer> _pump(
   WidgetTester tester, {
   StartupFailure? failure = _failure,
   Future<StartupOutcome> Function()? probe,
+  bool? saltPresent,
 }) async {
   final container = ProviderContainer(
     overrides: [
       startupFailureProvider.overrideWith((_) => failure),
       onboardingCompleteProvider.overrideWith((_) => false),
       if (probe != null) startupGatesProbeProvider.overrideWithValue(probe),
+      if (saltPresent != null)
+        backupEnabledProvider.overrideWith((_) async => saltPresent),
     ],
   );
   addTearDown(container.dispose);
+  // The keystore card (shown for the default `_failure`) pushes the
+  // action buttons below the default 800×600 test surface, which then
+  // fail `tap()`'s hit-test even though the column scrolls. A taller
+  // surface keeps every button on-screen without needing
+  // `ensureVisible()` at each call site.
+  await tester.binding.setSurfaceSize(const Size(800, 1400));
+  addTearDown(() => tester.binding.setSurfaceSize(null));
   final router = GoRouter(
     initialLocation: '/startup-failed',
     routes: [
@@ -43,6 +54,10 @@ Future<ProviderContainer> _pump(
       GoRoute(
         path: '/lock',
         builder: (_, __) => const Scaffold(body: Text('lock stub')),
+      ),
+      GoRoute(
+        path: '/unlock',
+        builder: (_, __) => const Scaffold(body: Text('unlock stub')),
       ),
       GoRoute(
         path: '/diagnostics',
@@ -136,6 +151,94 @@ void main() {
     });
   });
 
+  group('the keystore card — the live-incident variant', () {
+    testWidgets('shown above the error block for a Keystore failure',
+        (tester) async {
+      // The default `_failure` is exactly the live incident: a
+      // "Failed to unwrap key" error at the keyState stage.
+      await _pump(tester);
+      expect(
+        find.text(
+          "Android couldn't use the key that protects your secrets",
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining("This is the phone's Keystore, not your data"),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('not shown for a timeout with no Keystore marker',
+        (tester) async {
+      await _pump(
+        tester,
+        failure: const StartupFailure(
+          stage: StartupStage.onboarding,
+          error: 'TimeoutException after 0:00:15.000000',
+          timedOut: true,
+        ),
+      );
+      expect(
+        find.text(
+          "Android couldn't use the key that protects your secrets",
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets('not shown for an unrelated error', (tester) async {
+      await _pump(
+        tester,
+        failure: const StartupFailure(
+          stage: StartupStage.onboarding,
+          error: 'StateError(something unrelated)',
+        ),
+      );
+      expect(
+        find.text(
+          "Android couldn't use the key that protects your secrets",
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets('no "Use backup passphrase" button when no salt exists',
+        (tester) async {
+      await _pump(tester, saltPresent: false);
+      expect(
+        find.widgetWithText(OutlinedButton, 'Use backup passphrase'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('"Use backup passphrase" appears when a salt exists',
+        (tester) async {
+      await _pump(tester, saltPresent: true);
+      expect(
+        find.widgetWithText(OutlinedButton, 'Use backup passphrase'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets(
+        'tapping it releases the gate, flips needsUnlock and lands on '
+        '/unlock', (tester) async {
+      final container = await _pump(tester, saltPresent: true);
+      await tester.tap(
+        find.widgetWithText(OutlinedButton, 'Use backup passphrase'),
+      );
+      await tester.pumpAndSettle();
+
+      expect(container.read(startupFailureProvider), isNull);
+      expect(container.read(needsUnlockProvider), isTrue);
+      expect(container.read(onboardingCompleteProvider), isTrue,
+          reason: 'a salt only exists post-onboarding, so this shortcut '
+              'must not bounce to /onboarding');
+      expect(find.text('unlock stub'), findsOneWidget);
+    });
+  });
+
   group('Copy details', () {
     testWidgets('puts the stage and error on the clipboard', (tester) async {
       final copied = <String>[];
@@ -167,6 +270,39 @@ void main() {
   });
 
   group('Try again', () {
+    setUp(() {
+      // A successful re-probe must clear `startupBlockedKey` too — the
+      // WorkManager dispatcher pauses on it.
+      SharedPreferences.setMockInitialValues({startupBlockedKey: true});
+    });
+
+    testWidgets('success also releases the worker-pause flag',
+        (tester) async {
+      await _pump(
+        tester,
+        probe: () async => const StartupOutcome.ready(
+          onboarded: true,
+          keyState: StartupKeyState.ok,
+        ),
+      );
+      await tester.tap(find.widgetWithText(OutlinedButton, 'Try again'));
+      await tester.pumpAndSettle();
+      expect(await readStartupBlocked(), isFalse);
+    });
+
+    testWidgets(
+        'a failed re-probe leaves the worker-pause flag set', (tester) async {
+      await _pump(
+        tester,
+        probe: () async => const StartupOutcome.failed(
+          StartupFailure(stage: StartupStage.onboarding, error: 'still bad'),
+        ),
+      );
+      await tester.tap(find.widgetWithText(OutlinedButton, 'Try again'));
+      await tester.pumpAndSettle();
+      expect(await readStartupBlocked(), isTrue);
+    });
+
     testWidgets('success clears the gate and lands on /lock', (tester) async {
       final container = await _pump(
         tester,

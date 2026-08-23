@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:trail/db/keystore_key.dart';
+import 'package:trail/services/key_escrow.dart';
 import 'package:trail/services/passphrase_service.dart';
 
 /// [KeystoreKey] calls `flutter_secure_storage` which internally talks to a
@@ -438,6 +439,216 @@ void main() {
       KeystoreKey.setDbFileExistsForTest(() async => throw StateError('nope'));
       PassphraseService.setSaltDirForTest(null);
       expect(await KeystoreKey.getOrCreate(), 'already-here');
+    });
+  });
+
+  group('KeystoreKey.read — key escrow fallback (0.17.6)', () {
+    // The 0.17.5 incident: a secure-storage read that threw left the app
+    // with no key at all, and the key is the only way into the user's
+    // whole log. Trail now keeps its own escrowed copy
+    // (`lib/services/key_escrow.dart`, MethodChannel `trail/key_escrow`)
+    // and `read` consults it on BOTH secure-storage failure modes — a
+    // throw, and a silent null (which is what fss 11 returns for 9.x data
+    // and what a lost Jetpack master key returns for everything).
+    const escrowChannel = 'trail/key_escrow_keystore_test';
+
+    late List<MethodCall> escrowCalls;
+    late List<MethodCall> secureCalls;
+    String? escrowedKey;
+    String? escrowFailure;
+
+    void installEscrow() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(escrowChannel),
+        (call) async {
+          escrowCalls.add(call);
+          if (escrowFailure != null) {
+            throw PlatformException(code: escrowFailure!);
+          }
+          switch (call.method) {
+            case 'load':
+              final key = escrowedKey;
+              return key == null ? null : Uint8List.fromList(utf8.encode(key));
+            case 'status':
+              return <String, Object?>{
+                'present': escrowedKey != null,
+                'storedAt': escrowedKey == null ? null : 1755900000000,
+                'aliasExists': escrowedKey != null,
+                'keySha256': escrowedKey == null
+                    ? null
+                    : KeyEscrow.fingerprintOf(escrowedKey!),
+              };
+            default:
+              return null;
+          }
+        },
+      );
+    }
+
+    /// Replaces the outer fake with one whose `read` throws — the exact
+    /// shape of the incident this feature exists for.
+    void makeSecureStorageReadThrow() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(_channelName),
+        (call) async {
+          secureCalls.add(call);
+          if (call.method == 'read') {
+            throw PlatformException(
+              code: 'Exception encountered',
+              message: 'accessing FlutterSecureStorage',
+            );
+          }
+          return null;
+        },
+      );
+    }
+
+    setUp(() {
+      escrowCalls = [];
+      secureCalls = [];
+      escrowedKey = null;
+      escrowFailure = null;
+      KeystoreKey.lastReadSource = null;
+      KeystoreKey.lastSecureStorageError = null;
+      KeystoreKey.lastEscrowError = null;
+      installEscrow();
+      KeyEscrow.setInstanceForTest(
+        const KeyEscrow(channel: MethodChannel(escrowChannel)),
+      );
+    });
+
+    tearDown(() {
+      KeyEscrow.setInstanceForTest(null);
+      KeystoreKey.lastReadSource = null;
+      KeystoreKey.lastSecureStorageError = null;
+      KeystoreKey.lastEscrowError = null;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(escrowChannel),
+        null,
+      );
+    });
+
+    test('secure storage throws + escrow has the key → key is returned',
+        () async {
+      escrowedKey = 'escrowed-key-abc';
+      makeSecureStorageReadThrow();
+      expect(await KeystoreKey.read(), 'escrowed-key-abc');
+    });
+
+    test('a throw records the source as escrow and keeps the error text',
+        () async {
+      escrowedKey = 'escrowed-key-abc';
+      makeSecureStorageReadThrow();
+      await KeystoreKey.read();
+      expect(KeystoreKey.lastReadSource, KeystoreKey.sourceEscrow);
+      expect(KeystoreKey.lastSecureStorageError, contains('PlatformException'));
+    });
+
+    test('a throw re-persists the escrowed key back into secure storage',
+        () async {
+      escrowedKey = 'escrowed-key-abc';
+      makeSecureStorageReadThrow();
+      await KeystoreKey.read();
+      final writes = secureCalls.where((c) => c.method == 'write').toList();
+      expect(writes, hasLength(1),
+          reason: 'best-effort heal so the next launch is a normal one');
+      final args = (writes.single.arguments as Map).cast<String, Object?>();
+      expect(args['key'], 'trail_db_passphrase_v1');
+      expect(args['value'], 'escrowed-key-abc');
+    });
+
+    test('a re-persist that also throws still returns the key', () async {
+      escrowedKey = 'escrowed-key-abc';
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(_channelName),
+        (call) async {
+          secureCalls.add(call);
+          throw PlatformException(code: 'Exception encountered');
+        },
+      );
+      expect(await KeystoreKey.read(), 'escrowed-key-abc',
+          reason: 'a broken store must not veto the escrow');
+    });
+
+    test('secure storage returns null + escrow has the key → key', () async {
+      // fss 11 reads 9.x data as a silent null (gotcha 37) — never assume
+      // null means "the user never had a key".
+      escrowedKey = 'silently-lost-key';
+      expect(await KeystoreKey.read(), 'silently-lost-key');
+      expect(KeystoreKey.lastReadSource, KeystoreKey.sourceEscrow);
+      expect(fake.current(), 'silently-lost-key',
+          reason: 'the silent-null path heals secure storage too');
+    });
+
+    test('secure storage null + escrow empty → null', () async {
+      expect(await KeystoreKey.read(), isNull);
+      expect(KeystoreKey.lastReadSource, isNull);
+      expect(escrowCalls.map((c) => c.method), contains('load'));
+    });
+
+    test('secure storage null + escrow empty still hits the DB-present '
+        'guard', () async {
+      // The escrow must not weaken the "never mint a key over an existing
+      // log" rule — with nothing anywhere, getOrCreate still refuses.
+      KeystoreKey.setDbFileExistsForTest(() async => true);
+      await expectLater(
+        KeystoreKey.getOrCreate(),
+        throwsA(isA<KeyMissingException>()),
+      );
+      expect(fake.current(), isNull);
+    });
+
+    test('a throw the escrow cannot rescue is re-thrown, never nulled',
+        () async {
+      // Gotcha 30: a read that FAILED is not a read that found nothing.
+      // Swallowing it would look to getOrCreate like a fresh install and
+      // hide the failure from the /startup-failed gate.
+      makeSecureStorageReadThrow();
+      await expectLater(KeystoreKey.read(), throwsA(isA<PlatformException>()));
+      expect(KeystoreKey.lastReadSource, isNull);
+    });
+
+    test('a throw with an unreadable escrow is re-thrown too', () async {
+      escrowFailure = 'AEADBadTagException';
+      makeSecureStorageReadThrow();
+      await expectLater(KeystoreKey.read(), throwsA(isA<PlatformException>()));
+      expect(KeystoreKey.lastEscrowError, contains('AEADBadTagException'));
+    });
+
+    test('an escrow that errors is not treated as "no key ever existed"',
+        () async {
+      escrowFailure = 'AEADBadTagException';
+      expect(await KeystoreKey.read(), isNull);
+      expect(KeystoreKey.lastEscrowError, contains('AEADBadTagException'));
+      expect(KeystoreKey.lastReadSource, isNull);
+    });
+
+    test('no escrow handler (WorkManager isolate) degrades to null, '
+        'no throw', () async {
+      KeyEscrow.setInstanceForTest(
+        const KeyEscrow(channel: MethodChannel('trail/key_escrow_absent')),
+      );
+      expect(await KeystoreKey.read(), isNull);
+      expect(KeystoreKey.lastEscrowError, 'MissingPluginException');
+    });
+
+    test('secure storage answers → the escrow is never consulted', () async {
+      fake.preset('healthy-key');
+      expect(await KeystoreKey.read(), 'healthy-key');
+      expect(KeystoreKey.lastReadSource, KeystoreKey.sourceSecureStorage);
+      expect(escrowCalls, isEmpty,
+          reason: 'the hot path must not pay for the hedge');
+    });
+
+    test('getOrCreate served from the escrow does not mint a new key',
+        () async {
+      escrowedKey = 'escrowed-key-abc';
+      KeystoreKey.setDbFileExistsForTest(() async => true);
+      expect(await KeystoreKey.getOrCreate(), 'escrowed-key-abc');
     });
   });
 }
