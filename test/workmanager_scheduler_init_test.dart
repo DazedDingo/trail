@@ -1,7 +1,22 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:plugin_platform_interface/plugin_platform_interface.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:trail/services/scheduler/workmanager_scheduler.dart';
+import 'package:workmanager/workmanager.dart';
+
+/// Swallows every platform call. Without it the enqueue paths below reach
+/// `workmanager_linux` (endorsed since workmanager 0.10, and `flutter
+/// test`'s host platform IS Linux), which writes real systemd user timers
+/// into `~/.config/systemd/user`. Same `noSuchMethod` shape as the fake in
+/// `workmanager_scheduler_marker_test.dart`.
+class _NoopWorkmanagerPlatform
+    with MockPlatformInterfaceMixin
+    implements WorkmanagerPlatform {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => Future<void>.value();
+}
 
 /// `WorkmanagerScheduler.initialize()` left the startup critical path in
 /// 0.14.1 (it now runs in a post-first-frame callback), which only works
@@ -15,11 +30,18 @@ void main() {
   late int nativeCalls;
 
   setUp(() {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    SharedPreferences.setMockInitialValues({});
     WorkmanagerScheduler.resetInitializationForTest();
     nativeCalls = 0;
     WorkmanagerScheduler.nativeInitialize = () async {
       nativeCalls++;
     };
+    // `Workmanager()`'s constructor resets `WorkmanagerPlatform.instance`
+    // to the host implementation, so warm the singleton first and install
+    // the no-op afterwards.
+    Workmanager();
+    WorkmanagerPlatform.instance = _NoopWorkmanagerPlatform();
   });
 
   tearDown(WorkmanagerScheduler.resetInitializationForTest);
@@ -52,9 +74,9 @@ void main() {
     final gate = Completer<void>();
     WorkmanagerScheduler.nativeInitialize = () => gate.future;
     var settled = false;
-    // Without a platform implementation the register call itself throws
-    // `UnimplementedError` — which is exactly the signal we want: it can
-    // only be reached *after* the gate opens.
+    // The register call goes to `_NoopWorkmanagerPlatform` and completes
+    // immediately, so `settled` flipping is proof the gate opened — it can
+    // only be reached *after* `initialize` resolves.
     final pending = WorkmanagerScheduler.enqueuePeriodic(
       frequency: const Duration(hours: 4),
     ).then<void>((_) => settled = true, onError: (_) => settled = true);

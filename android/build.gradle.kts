@@ -34,6 +34,31 @@ subprojects {
     }
 }
 
+// Make sure every Android library subproject really has a Kotlin plugin.
+//
+// We run AGP 9 with `android.builtInKotlin=false` (what Flutter's 3.47 template
+// sets, so the plugins that still apply KGP themselves keep working). In that
+// mode Flutter's Gradle plugin is supposed to apply `kotlin-android` to any
+// plugin module that doesn't apply it itself — but it decides that by *regex
+// scanning the build script text*, and several packages now guard their apply
+// with `if (agpMajor < 9) { apply plugin: 'kotlin-android' }`. Flutter sees the
+// (dead) line and skips them, so on AGP 9 they end up with no Kotlin plugin at
+// all. Two different failure modes we actually hit:
+//   - maplibre_gl 0.27.0: its top-level `kotlin { compilerOptions { … } }`
+//     block dies with "Could not find method kotlin()".
+//   - file_picker 11.0.2: configures fine but silently compiles none of
+//     `src/main/kotlin`, so the app fails at GeneratedPluginRegistrant with
+//     "cannot find symbol: class FilePickerPlugin".
+// Applying KGP here — as soon as a subproject applies AGP, and therefore before
+// the rest of its build script runs — fixes both. `pluginManager.apply` is
+// idempotent, so modules that go on to apply it themselves are unaffected.
+// Drop this block once `android.builtInKotlin=true` is viable for every plugin.
+subprojects {
+    plugins.withId("com.android.library") {
+        pluginManager.apply("kotlin-android")
+    }
+}
+
 subprojects {
     project.evaluationDependsOn(":app")
 }

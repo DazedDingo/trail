@@ -10,14 +10,14 @@ import 'package:workmanager/workmanager.dart';
 /// hasn't changed (`SchedulerPolicy.shouldReenqueuePeriodic`, tested in
 /// `scheduler_worker_policy_test.dart`).
 ///
-/// Under `flutter test` `WorkmanagerPlatform.instance` defaults to a
-/// placeholder that throws `UnimplementedError` on every method (see
-/// `workmanager_scheduler_init_test.dart`), so `registerPeriodicTask`
-/// never actually succeeds there. Here we install a fake
-/// `WorkmanagerPlatform` (the package's own plugin-platform-interface
-/// pattern — extend without overriding the constructor, which mints a
-/// valid verification token automatically) so the call succeeds and the
-/// marker write is genuinely exercised end to end.
+/// Under `flutter test` the host platform is Linux, and workmanager 0.10
+/// endorses `workmanager_linux` — whose `registerPeriodicTask` writes a
+/// real systemd **user timer** to `~/.config/systemd/user`. So we install
+/// a fake `WorkmanagerPlatform` (the package's own
+/// plugin-platform-interface pattern — extend without overriding the
+/// constructor, which mints a valid verification token automatically):
+/// the call succeeds, the marker write is genuinely exercised end to end,
+/// and the developer's session manager is left alone.
 class _FakeWorkmanagerPlatform
     with MockPlatformInterfaceMixin
     implements WorkmanagerPlatform {
@@ -47,6 +47,12 @@ void main() {
     // Skip the real native `initialize` round-trip — same seam
     // `workmanager_scheduler_init_test.dart` uses.
     WorkmanagerScheduler.nativeInitialize = () async {};
+    // Construct the `Workmanager()` singleton BEFORE installing the fake:
+    // its private constructor runs `_ensurePlatformImplementation`, which
+    // overwrites `WorkmanagerPlatform.instance` with the host (Linux)
+    // implementation. It only runs once per isolate, so warming it here
+    // means the fake below survives.
+    Workmanager();
     fakePlatform = _FakeWorkmanagerPlatform();
     WorkmanagerPlatform.instance = fakePlatform;
   });

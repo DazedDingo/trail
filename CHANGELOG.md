@@ -4,6 +4,14 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.17.2+104] — 2026-08-23
+
+### Changed
+- **Android Gradle Plugin 9.1.0** (from 8.11.1), Kotlin 2.4.0, Flutter 3.47.1 — the toolchain now matches Flutter's current template, so CI's "support ending soon" warnings are gone. Plugin updates that ride along: workmanager 0.10.9 (the background-ping worker; Android 16 fixes), battery_plus 7.1.1, geocoding 4.0.0 (place names under pins), image_picker 1.2.3, pmtiles 2.2.0. Two plugins were deliberately left alone — share_plus and package_info_plus — because their newer majors force a secure-storage library upgrade that discards existing keys, i.e. your encrypted database's key; that migration will be done separately and carefully.
+
+### Fixed
+- Auto-fetched map detail could abort mid-download when Trail had opened the HTTP connection itself (a missing `await` closed it early). Caught by the new SDK's analyzer; covered by two new tests.
+
 ## [0.17.1+103] — 2026-08-23
 
 ### Changed

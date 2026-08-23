@@ -29,6 +29,12 @@ class _FakeServer implements CoverageTileServer {
   final List<CoverageBox> downloads = [];
   int closes = 0;
 
+  /// Snapshot of [closes] taken after [downloadExtract] has yielded once.
+  /// `fetchForPoints` owns the client when the caller passes no `server:`,
+  /// so a non-zero value here means the client was closed while a download
+  /// was still in flight.
+  int? closesDuringDownload;
+
   @override
   Future<({bool ok, String planet, String planetDate})> health() async =>
       (ok: true, planet: 'protomaps', planetDate: planetDate);
@@ -55,6 +61,10 @@ class _FakeServer implements CoverageTileServer {
     TileDownloadCancelToken? cancelToken,
   }) async {
     downloads.add(box);
+    // Yield so a test can observe whether the owning caller closed us
+    // before the download finished.
+    await Future<void>.delayed(Duration.zero);
+    closesDuringDownload ??= closes;
     final err = downloadError;
     if (err != null) throw err;
     if (cancelToken?.isCancelled ?? false) throw const TileDownloadCancelled();
@@ -372,6 +382,32 @@ void main() {
           .fetchForPoints(const [], confirmLarge: true, server: server);
       expect(result.downloaded, 0);
       expect(server.dryRuns, isEmpty);
+    });
+
+    test('a client it opened itself stays open until the fetch finishes',
+        () async {
+      final server = _FakeServer();
+      // No `server:` argument — the service builds (and therefore owns)
+      // the client via serverFactory, so its `finally` is what closes it.
+      final result = await serviceWith(server: server).fetchForPoints(
+        bath,
+        confirmLarge: true,
+      );
+      expect(result.downloaded, 1);
+      expect(server.closesDuringDownload, 0,
+          reason: 'owned client must not be closed mid-download');
+      expect(server.closes, 1);
+    });
+
+    test('a caller-supplied client is never closed by fetchForPoints',
+        () async {
+      final server = _FakeServer();
+      await serviceWith(server: server).fetchForPoints(
+        bath,
+        confirmLarge: true,
+        server: server,
+      );
+      expect(server.closes, 0);
     });
   });
 

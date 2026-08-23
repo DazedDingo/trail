@@ -64,7 +64,11 @@ class PassphraseService {
   static Future<bool> isEnabled() async {
     try {
       final f = await _saltFile();
-      return f.exists();
+      // `await` (not a bare `return f.exists()`) so an IO failure from the
+      // probe itself lands in the catch below rather than escaping as an
+      // unhandled rejection — the startup gate calls this before the DB is
+      // open and must never throw.
+      return await f.exists();
     } catch (_) {
       return false;
     }

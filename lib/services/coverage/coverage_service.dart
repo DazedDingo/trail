@@ -447,7 +447,9 @@ class CoverageService {
           exceededCap: true,
         );
       }
-      return fetchPlan(
+      // Must be awaited: the `finally` below owns the client, and
+      // returning the future unawaited closed it mid-download.
+      return await fetchPlan(
         plan,
         onProgress: onProgress,
         cancelToken: cancelToken,

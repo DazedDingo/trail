@@ -1,7 +1,7 @@
 name: trail
 description: "Trail — personal-safety GPS logger. Offline, encrypted, 4h-cadence background pings."
 publish_to: 'none'
-version: 0.17.1+103
+version: 0.17.2+104
 
 environment:
   sdk: ^3.5.0
@@ -20,10 +20,17 @@ dependencies:
   # place name ("Cambridge, MA") alongside raw lat/lon on history screens.
   # Offline-capable where the device has cached geocoder data; returns
   # empty results (not errors) on no-network gaps.
-  geocoding: ^3.0.0
-  # Pinned to ^0.9.0+3 — earlier 0.5.x referenced Flutter v1 embedding
-  # (ShimPluginRegistry) which is gone in Flutter 3.41+ and broke CI.
-  workmanager: ^0.9.0+3
+  # Floor at ^4.0.0: geocoding_android 3.x compiles against SDK 33, which
+  # AGP 9 turns into a hard `checkAarMetadata` failure (its own androidx
+  # deps demand 34+). 4.x moved to compileSdk 35 and keeps the same
+  # top-level Dart API; 5.x is the one that wraps it in a `Geocoding` class.
+  geocoding: ^4.0.0
+  # Floor at ^0.10.9 — 0.10.6 is the first release whose Android module
+  # applies `kotlin-android` only when built-in Kotlin is off, which is
+  # what lets the app build on AGP 9 (see gotcha 32). Earlier 0.5.x
+  # referenced Flutter v1 embedding (ShimPluginRegistry), gone since
+  # Flutter 3.41.
+  workmanager: ^0.10.9
 
   # Storage (encrypted)
   sqflite_sqlcipher: ^3.1.0+1
@@ -37,7 +44,7 @@ dependencies:
   pointycastle: ^3.9.1
 
   # Device sensors / status
-  battery_plus: ^6.0.3
+  battery_plus: ^7.1.1
   connectivity_plus: ^6.0.5
 
   # Auth / permissions
@@ -79,7 +86,7 @@ dependencies:
   # `MapLibreMapController.addLine/addCircle/addLayer` rather than
   # declarative `layers:`.
   maplibre_gl: ^0.27.0
-  pmtiles: ^2.0.0
+  pmtiles: ^2.2.0
 
   # HTTP client — for the Wikimedia Commons GeoSearch lookups powering
   # the auto-photo feature (schema v2). Trail is otherwise offline-only,
@@ -92,7 +99,7 @@ dependencies:
   # "Add your photo" flow on the pin detail sheet. Permission stage on
   # Android 13+: CAMERA (for camera path) + READ_MEDIA_IMAGES (for
   # gallery path); image_picker handles the prompt internally.
-  image_picker: ^1.1.2
+  image_picker: ^1.2.3
   # Disk cache + in-flight dedupe for the online photo thumbnails. The
   # gallery sheet pages through 20+ images per pin during picture-mode
   # playback, so an LRU cache keyed by URL keeps the network round-trip
