@@ -3,6 +3,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../db/database.dart';
 import '../db/keystore_key.dart';
+import '../services/passphrase_recovery_service.dart';
 import '../services/passphrase_service.dart';
 import '../services/secure_storage_migration.dart';
 
@@ -34,6 +35,13 @@ final keyMissingProvider = StateProvider<bool>((ref) => false);
 /// ran, so `/recover` shows the "install 0.17.3 first" variant instead of
 /// the generic key-loss copy.
 final notMigratedProvider = StateProvider<bool>((ref) => false);
+
+/// Seam for the passphrase-entry screen's unlock action — the whole
+/// derive → verify → persist → rebuild-secure-storage flow. Overridden in
+/// widget tests so it can be driven without a Keystore or SQLCipher.
+final passphraseRecoveryProvider = Provider<PassphraseRecoveryService>((ref) {
+  return PassphraseRecoveryService();
+});
 
 /// Seam for the recovery screen's "Try again" button. Overridden in
 /// widget tests so the three outcomes can be driven without a Keystore.

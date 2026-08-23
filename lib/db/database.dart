@@ -121,6 +121,26 @@ class TrailDatabase {
   static Future<Database> openWithKey(String passphrase) =>
       _openWithKey(passphrase);
 
+  /// One-shot "does this key open the log?" probe: open, run the cheapest
+  /// query that forces SQLCipher to touch a page, close. Returns normally
+  /// on success and throws whatever SQLCipher raised otherwise — a wrong
+  /// key surfaces as `file is not a database` on the first query, not on
+  /// the open.
+  ///
+  /// The unlock/recovery flows must not persist a key they have not
+  /// proven, so this is deliberately the only thing that happens before
+  /// `KeystoreKey.persist`. The handle is closed in a `finally`: leaving
+  /// a second connection open on the same file races the shared handle's
+  /// key derivation (see `_openWithKey`).
+  static Future<void> openWithKeyForVerification(String passphrase) async {
+    final db = await _openWithKey(passphrase);
+    try {
+      await db.rawQuery('SELECT count(*) FROM pings');
+    } finally {
+      await db.close();
+    }
+  }
+
   static Future<Database> _openWithKey(String passphrase) async {
     final path = await dbPath();
     final db = await openDatabase(

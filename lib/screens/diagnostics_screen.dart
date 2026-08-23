@@ -11,6 +11,7 @@ import '../services/secure_storage_migration.dart';
 import '../services/startup_gates.dart';
 import '../widgets/help_button.dart';
 import '../widgets/key_escrow_tile.dart';
+import '../widgets/secure_storage_rescue_tile.dart';
 
 /// Deep-diagnostics surface — not linked from the home screen, only
 /// reachable from Settings → Diagnostics. Surfaces the things a user
@@ -284,6 +285,7 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
                     'the record that it succeeded.',
                   ),
                 ),
+                const SecureStorageRescueTile(),
                 const Divider(),
                 const _SectionHeader('Key escrow'),
                 const KeyEscrowTile(),

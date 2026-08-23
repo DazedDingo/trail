@@ -52,6 +52,28 @@ class _FakeSecureStorage {
   String? current() => _store[_storageKey];
 }
 
+/// Records what `KeystoreKey.persist` asks of the escrow, and can refuse
+/// like a Keystore whose alias has gone. Shares [events] with the secure-
+/// storage fake so the ORDER of the two writes can be asserted — the
+/// escrow must go first (see the doc on `KeystoreKey.persist`).
+class _RecordingEscrow extends KeyEscrow {
+  _RecordingEscrow(this.events)
+      : super(channel: const MethodChannel('trail/key_escrow_persist_test'));
+
+  final List<String> events;
+  final List<String> stored = [];
+  bool throws = false;
+
+  @override
+  Future<void> store(String key) async {
+    events.add('escrow');
+    if (throws) {
+      throw PlatformException(code: 'KeyStoreException', message: 'nope');
+    }
+    stored.add(key);
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -651,4 +673,143 @@ void main() {
       expect(await KeystoreKey.getOrCreate(), 'escrowed-key-abc');
     });
   });
+
+  group('KeystoreKey.persist — two homes (0.17.8)', () {
+    // gotcha 38: the DB key lives in secure storage AND Trail's own
+    // escrow. `persist` is where the second copy is made, and it is the
+    // probe the passphrase-recovery flow uses to decide whether the
+    // plugin is the broken part.
+    late List<String> events;
+    late _RecordingEscrow escrow;
+
+    void secureStorageWritesThrow() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(_channelName),
+        (call) async {
+          if (call.method == 'write') {
+            events.add('secure');
+            throw PlatformException(
+              code: 'Exception encountered',
+              message: 'Failed to unwrap key',
+            );
+          }
+          return null;
+        },
+      );
+    }
+
+    setUp(() {
+      events = [];
+      escrow = _RecordingEscrow(events);
+      KeyEscrow.setInstanceForTest(escrow);
+      KeystoreKey.lastSecureStorageError = null;
+      KeystoreKey.lastEscrowError = null;
+      // Wrap the outer fake so the happy path records its ordering too.
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(_channelName),
+        (call) async {
+          if (call.method == 'write') events.add('secure');
+          return fake.handle(call);
+        },
+      );
+    });
+
+    tearDown(() {
+      KeyEscrow.setInstanceForTest(null);
+      KeystoreKey.lastSecureStorageError = null;
+      KeystoreKey.lastEscrowError = null;
+    });
+
+    test('stores in both homes', () async {
+      await KeystoreKey.persist('derived-key-abc');
+      expect(escrow.stored, ['derived-key-abc']);
+      expect(fake.current(), 'derived-key-abc');
+    });
+
+    test('escrows FIRST — every plugin call is a chance to lose the store',
+        () async {
+      await KeystoreKey.persist('derived-key-abc');
+      expect(events, ['escrow', 'secure']);
+    });
+
+    test('a secure-storage write that throws is swallowed when the escrow '
+        'took it', () async {
+      secureStorageWritesThrow();
+      await KeystoreKey.persist('derived-key-abc');
+      expect(escrow.stored, ['derived-key-abc'],
+          reason: 'the surviving copy is the whole point');
+    });
+
+    test('… and the failure is recorded for the recovery flow to branch on',
+        () async {
+      secureStorageWritesThrow();
+      await KeystoreKey.persist('derived-key-abc');
+      expect(KeystoreKey.lastSecureStorageError, contains('PlatformException'));
+    });
+
+    test('a successful write CLEARS a stale secure-storage error', () async {
+      KeystoreKey.lastSecureStorageError = 'PlatformException(from a read)';
+      await KeystoreKey.persist('derived-key-abc');
+      expect(KeystoreKey.lastSecureStorageError, isNull,
+          reason: 'the store demonstrably works now; a stale error would '
+              'send the recovery flow into a needless rebuild');
+    });
+
+    test('an escrow that refuses does not stop the secure-storage write',
+        () async {
+      escrow.throws = true;
+      await KeystoreKey.persist('derived-key-abc');
+      expect(fake.current(), 'derived-key-abc');
+      expect(KeystoreKey.lastEscrowError, contains('KeyStoreException'));
+    });
+
+    test('BOTH failing throws KeyPersistException', () async {
+      escrow.throws = true;
+      secureStorageWritesThrow();
+      await expectLater(
+        KeystoreKey.persist('derived-key-abc'),
+        throwsA(isA<KeyPersistException>()),
+      );
+    });
+
+    test('the KeyPersistException names both failures', () async {
+      escrow.throws = true;
+      secureStorageWritesThrow();
+      try {
+        await KeystoreKey.persist('derived-key-abc');
+        fail('expected a throw');
+      } on KeyPersistException catch (e) {
+        expect(e.toString(), contains('KeyStoreException'));
+        expect(e.toString(), contains('Failed to unwrap key'));
+      }
+    });
+
+    test('a key persisted only to the escrow still reads back', () async {
+      // The end-to-end promise: an unlock that could not reach secure
+      // storage must still survive into the next `read()`.
+      secureStorageWritesThrow();
+      await KeystoreKey.persist('derived-key-abc');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(_channelName),
+        (call) async => throw PlatformException(code: 'Exception encountered'),
+      );
+      KeyEscrow.setInstanceForTest(_ServingEscrow('derived-key-abc'));
+      expect(await KeystoreKey.read(), 'derived-key-abc');
+    });
+  });
+}
+
+/// A [KeyEscrow] that simply hands back the key it was built with — used
+/// to close the loop on "persisted to the escrow only, still readable".
+class _ServingEscrow extends KeyEscrow {
+  _ServingEscrow(this.key)
+      : super(channel: const MethodChannel('trail/key_escrow_serving_test'));
+
+  final String key;
+
+  @override
+  Future<EscrowResult> load() async => EscrowResult(key: key);
 }

@@ -10,6 +10,13 @@ import '../providers/onboarding_provider.dart';
 import '../providers/startup_provider.dart';
 import '../services/startup_gates.dart';
 
+/// Sub-label under the primary "Use backup passphrase" action. Pinned by
+/// a widget test — it is the one line that tells the user their log is
+/// not lost and that continuing will fix the store.
+const backupPassphraseSubtitle =
+    'Your log can be unlocked with the cloud-backup passphrase; Trail '
+    'will then rebuild its secure storage.';
+
 /// The screen that exists so the Android splash can never be the last
 /// thing a user sees.
 ///
@@ -22,7 +29,15 @@ import '../services/startup_gates.dart';
 /// user gets the stage, the error and a stack they can paste into a bug
 /// report.
 ///
-/// Three deliberate actions, in the same shape as `KeyRecoveryScreen`:
+/// Four deliberate actions, in the same shape as `KeyRecoveryScreen`:
+///
+///   * **Use backup passphrase** — shown, and *primary*, whenever the
+///     salt file exists. That user's log can be opened right now, and
+///     `/unlock` also rebuilds the broken secure store on the way
+///     through (`PassphraseRecoveryService`), so it beats every other
+///     button on this screen. It is deliberately not gated on the
+///     Keystore card's classification: a plugin that fails a different
+///     way is still a plugin the passphrase route repairs.
 ///
 ///   * **Copy details** — the whole block onto the clipboard.
 ///   * **Try again** — re-runs the gates. A transient Keystore failure or
@@ -188,14 +203,6 @@ class _StartupFailureScreenState extends ConsumerState<StartupFailureScreen> {
                           'cloud backup, use your passphrase below.',
                           style: theme.textTheme.bodySmall,
                         ),
-                        if (saltPresent) ...[
-                          const SizedBox(height: 12),
-                          OutlinedButton(
-                            onPressed:
-                                _working ? null : _useBackupPassphrase,
-                            child: const Text('Use backup passphrase'),
-                          ),
-                        ],
                       ],
                     ),
                   ),
@@ -230,13 +237,39 @@ class _StartupFailureScreenState extends ConsumerState<StartupFailureScreen> {
                 ),
               ],
               const SizedBox(height: 24),
-              FilledButton.icon(
-                onPressed: failure == null || _working
-                    ? null
-                    : () => _copyDetails(failure),
-                icon: const Icon(Icons.copy_all_outlined),
-                label: const Text('Copy details'),
-              ),
+              // The primary action whenever a salt exists: this user CAN
+              // get in, and the passphrase is the route that also repairs
+              // the store. Copy details steps down to secondary there —
+              // with no salt it is still the most useful thing on screen.
+              if (saltPresent) ...[
+                FilledButton.icon(
+                  onPressed: _working ? null : _useBackupPassphrase,
+                  icon: const Icon(Icons.vpn_key_outlined),
+                  label: const Text('Use backup passphrase'),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  backupPassphraseSubtitle,
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: scheme.onSurfaceVariant),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 16),
+                OutlinedButton.icon(
+                  onPressed: failure == null || _working
+                      ? null
+                      : () => _copyDetails(failure),
+                  icon: const Icon(Icons.copy_all_outlined),
+                  label: const Text('Copy details'),
+                ),
+              ] else
+                FilledButton.icon(
+                  onPressed: failure == null || _working
+                      ? null
+                      : () => _copyDetails(failure),
+                  icon: const Icon(Icons.copy_all_outlined),
+                  label: const Text('Copy details'),
+                ),
               const SizedBox(height: 12),
               OutlinedButton(
                 onPressed: _working ? null : _tryAgain,

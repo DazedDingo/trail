@@ -1,9 +1,11 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:trail/db/keystore_key.dart';
+import 'package:trail/services/key_escrow.dart';
 import 'package:trail/providers/backup_provider.dart';
 import 'package:trail/services/passphrase_service.dart';
 import 'package:trail/services/secure_storage_migration.dart';
@@ -324,6 +326,103 @@ void main() {
       expect(outcome.ok, isFalse);
       expect(outcome.failure!.stage, StartupStage.keyState);
       expect(outcome.failure!.error, isA<PlatformException>());
+    });
+  });
+
+  group('a thrown read that the escrow can rescue (0.17.7/0.17.8)', () {
+    // The 2026-08-23 incident, one launch later: secure storage still
+    // throws on every read, but Trail's own escrow holds the DB key. The
+    // gate must come back `ok` — the key IS available — rather than
+    // taking the whole app to /startup-failed for a store nobody needs
+    // any more.
+    const escrowChannel = 'trail/key_escrow_startup_state_test';
+    String? escrowedKey;
+
+    void installEscrow() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(escrowChannel),
+        (call) async {
+          switch (call.method) {
+            case 'load':
+              final key = escrowedKey;
+              return key == null ? null : Uint8List.fromList(utf8.encode(key));
+            default:
+              return null;
+          }
+        },
+      );
+    }
+
+    void makeSecureStorageThrow() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(_channelName),
+        (call) async => throw PlatformException(
+          code: 'Exception encountered',
+          message: 'Failed to unwrap key',
+        ),
+      );
+    }
+
+    setUp(() {
+      escrowedKey = null;
+      installEscrow();
+      KeyEscrow.setInstanceForTest(
+        const KeyEscrow(channel: MethodChannel(escrowChannel)),
+      );
+    });
+
+    tearDown(() {
+      KeyEscrow.setInstanceForTest(null);
+      KeystoreKey.lastReadSource = null;
+      KeystoreKey.lastSecureStorageError = null;
+      KeystoreKey.lastEscrowError = null;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(escrowChannel),
+        null,
+      );
+    });
+
+    test('secure storage throws + escrow has the key + DB on disk → ok',
+        () async {
+      escrowedKey = 'escrowed-db-key';
+      await dbFile.writeAsString('db');
+      makeSecureStorageThrow();
+      expect(await computeStartupKeyState(), StartupKeyState.ok);
+      expect(KeystoreKey.lastReadSource, KeystoreKey.sourceEscrow);
+    });
+
+    test('… and runStartupGates reports a healthy startup', () async {
+      escrowedKey = 'escrowed-db-key';
+      await dbFile.writeAsString('db');
+      makeSecureStorageThrow();
+      final outcome = await runStartupGates(
+        readOnboarded: () async => true,
+        readKeyState: computeStartupKeyState,
+      );
+      expect(outcome.ok, isTrue);
+      expect(outcome.keyState, StartupKeyState.ok);
+    });
+
+    test('a salt as well does not send the user to /unlock', () async {
+      // The key is available; passphrase mode is irrelevant here.
+      escrowedKey = 'escrowed-db-key';
+      await PassphraseService.generateAndPersistSalt();
+      await dbFile.writeAsString('db');
+      makeSecureStorageThrow();
+      expect(await computeStartupKeyState(), StartupKeyState.ok);
+    });
+
+    test('an empty escrow still rethrows — /startup-failed, never ok',
+        () async {
+      await dbFile.writeAsString('db');
+      makeSecureStorageThrow();
+      await expectLater(
+        computeStartupKeyState(),
+        throwsA(isA<PlatformException>()),
+      );
     });
   });
 }

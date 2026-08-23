@@ -203,20 +203,61 @@ void main() {
       );
     });
 
-    testWidgets('no "Use backup passphrase" button when no salt exists',
-        (tester) async {
+  });
+
+  group('"Use backup passphrase" — the primary action when a salt exists', () {
+    testWidgets('absent when no salt exists', (tester) async {
       await _pump(tester, saltPresent: false);
       expect(
-        find.widgetWithText(OutlinedButton, 'Use backup passphrase'),
+        find.widgetWithText(FilledButton, 'Use backup passphrase'),
         findsNothing,
+      );
+      expect(find.text(backupPassphraseSubtitle), findsNothing);
+      expect(
+        find.widgetWithText(FilledButton, 'Copy details'),
+        findsOneWidget,
+        reason: 'with no salt, Copy details is still the primary action',
       );
     });
 
-    testWidgets('"Use backup passphrase" appears when a salt exists',
+    testWidgets('is the FILLED (primary) button when a salt exists',
         (tester) async {
       await _pump(tester, saltPresent: true);
       expect(
-        find.widgetWithText(OutlinedButton, 'Use backup passphrase'),
+        find.widgetWithText(FilledButton, 'Use backup passphrase'),
+        findsOneWidget,
+      );
+      expect(
+        find.widgetWithText(OutlinedButton, 'Copy details'),
+        findsOneWidget,
+        reason: 'Copy details steps down to secondary',
+      );
+    });
+
+    testWidgets('carries the "your log can be unlocked" subtitle',
+        (tester) async {
+      await _pump(tester, saltPresent: true);
+      expect(find.text(backupPassphraseSubtitle), findsOneWidget);
+    });
+
+    testWidgets('is offered for a NON-keystore failure too', (tester) async {
+      // A plugin that fails a different way is still one the passphrase
+      // route repairs — the button must not hide behind the Keystore
+      // card's classification.
+      await _pump(
+        tester,
+        saltPresent: true,
+        failure: const StartupFailure(
+          stage: StartupStage.onboarding,
+          error: 'StateError(something unrelated)',
+        ),
+      );
+      expect(
+        find.text("Android couldn't use the key that protects your secrets"),
+        findsNothing,
+      );
+      expect(
+        find.widgetWithText(FilledButton, 'Use backup passphrase'),
         findsOneWidget,
       );
     });
@@ -226,7 +267,7 @@ void main() {
         '/unlock', (tester) async {
       final container = await _pump(tester, saltPresent: true);
       await tester.tap(
-        find.widgetWithText(OutlinedButton, 'Use backup passphrase'),
+        find.widgetWithText(FilledButton, 'Use backup passphrase'),
       );
       await tester.pumpAndSettle();
 

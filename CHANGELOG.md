@@ -4,6 +4,13 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.17.8+110] — 2026-08-23
+
+### Fixed
+- **Recovery from the Keystore failure, for cloud-backup users.** *Use backup passphrase* on the startup-failure screen now re-derives the database key from your passphrase, proves it by opening the log, stores it in Trail's own escrow, and then repairs the secure-storage plugin: it first tries to rescue the old store by decrypting its key through other Keystore code paths (the call the plugin uses is the one Android broke), then moves the unreadable store aside — kept on the phone, never deleted — so the plugin starts clean, and re-saves everything it recovered. A result sheet lists which settings came back and which need re-entering (at worst: the GitHub token and the map-detail server token).
+- **The onboarding check can no longer kill startup.** If the secure-storage plugin throws, Trail falls back to a mirror flag and, failing that, to the existence of your log — a phone with a log is onboarded.
+- Saving the database key now always goes to the escrow as well; a plugin failure on that write is tolerated when the escrow succeeded.
+
 ## [0.17.7+109] — 2026-08-23
 
 ### Added

@@ -20,6 +20,25 @@ class KeyMissingException implements Exception {
       'KeyMissingException: trail.db exists but its encryption key is gone';
 }
 
+/// Thrown by [KeystoreKey.persist] when neither secure storage nor the
+/// key escrow would accept the key. Both homes failing at once is the
+/// only state in which the caller must NOT report a successful unlock:
+/// the DB opened, but nothing on the device remembers how.
+class KeyPersistException implements Exception {
+  const KeyPersistException({
+    required this.secureStorageError,
+    required this.escrowError,
+  });
+
+  final String secureStorageError;
+  final String escrowError;
+
+  @override
+  String toString() => 'KeyPersistException: neither secure storage nor the '
+      'key escrow stored the database key '
+      '(secure storage: $secureStorageError; escrow: $escrowError)';
+}
+
 /// Manages the DB passphrase that SQLCipher uses to encrypt `trail.db`.
 ///
 /// Two modes, chosen by the presence of the [PassphraseService] salt file:
@@ -212,12 +231,45 @@ class KeystoreKey {
     return key;
   }
 
-  /// Persists a caller-supplied key. Used by the passphrase setup and
+  /// Persists a caller-supplied key to **both** homes (gotcha 38): the
+  /// escrow first, then secure storage. Used by the passphrase setup and
   /// recovery flows: derive → verify by opening the DB → persist so the
   /// background isolate and future UI launches can read it back
   /// transparently.
+  ///
+  /// Escrow first on purpose. In the 2026-08-23 incident every
+  /// `flutter_secure_storage` call is a chance for its
+  /// `createRSAKeysIfNeeded` to regenerate the RSA pair and orphan the
+  /// store for good; the verified key must already be somewhere safe
+  /// before we poke it. A secure-storage write that throws is then
+  /// **swallowed** (logged, and recorded in [lastSecureStorageError] —
+  /// which is also how `PassphraseRecoveryService` detects "the plugin is
+  /// the broken part") as long as the escrow accepted the key. A
+  /// successful write clears that field: the store demonstrably works
+  /// now, so a stale read error must not keep claiming otherwise.
+  ///
+  /// Throws [KeyPersistException] only when **neither** home took it —
+  /// the one case where the caller must not tell the user their log is
+  /// unlocked, because the next launch would find no key at all.
   static Future<void> persist(String key) async {
-    await _secure.write(key: storageKey, value: key);
+    Object? escrowError;
+    try {
+      await KeyEscrow.instance.store(key);
+    } catch (e) {
+      escrowError = e;
+      lastEscrowError = '$e';
+      debugPrint('key escrow persist failed: $e');
+    }
+    try {
+      await _secure.write(key: storageKey, value: key);
+      lastSecureStorageError = null;
+    } catch (e) {
+      debugPrint('secure storage persist failed: $e');
+      lastSecureStorageError = '$e';
+      if (escrowError != null) {
+        throw KeyPersistException(secureStorageError: '$e', escrowError: '$escrowError');
+      }
+    }
   }
 
   /// Whether a key is already stored. Callers interested in the broader
