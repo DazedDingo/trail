@@ -126,6 +126,81 @@ void main() {
       expect(progress.last.current, lessThanOrEqualTo(progress.last.total!));
     });
 
+    test('reports a per-year breakdown and the file\'s own range',
+        () async {
+      final preview = await service.preview(
+        _fixture('android_small.json'),
+        ImportPreset.normal,
+      );
+
+      // The fixture is one day, so one row — 6 path + 2 visit endpoints
+      // + 2 activity endpoints + 1 raw = 11 candidates, 8 kept.
+      final row = preview.byYear.single;
+      expect(row.year, DateTime.utc(2026, 3, 1, 9).toLocal().year);
+      expect(row.candidatesInFile, 11);
+      expect(row.keptAfterThinning, 8);
+      expect(row.skippedAsDuplicate, 0);
+      expect(row.pathPoints, 6);
+      expect(row.visits, 2);
+      expect(row.activities, 2);
+      expect(row.rawPositions, 1);
+      expect(row.thinnedToNothing, isFalse);
+      expect(
+        DateTime.fromMillisecondsSinceEpoch(row.firstTsUtcMs, isUtc: true),
+        DateTime.utc(2026, 3, 1, 9),
+      );
+      expect(
+        DateTime.fromMillisecondsSinceEpoch(row.lastTsUtcMs, isUtc: true),
+        DateTime.utc(2026, 3, 1, 13, 20),
+      );
+
+      expect(preview.fileRange, isNotNull);
+      expect(
+        DateTime.fromMillisecondsSinceEpoch(
+          preview.fileRange!.firstUtcMs,
+          isUtc: true,
+        ),
+        DateTime.utc(2026, 3, 1, 9),
+      );
+      expect(
+        DateTime.fromMillisecondsSinceEpoch(
+          preview.fileRange!.lastUtcMs,
+          isUtc: true,
+        ),
+        DateTime.utc(2026, 3, 1, 13, 20),
+      );
+      expect(preview.alreadyImported, isNull);
+    });
+
+    test('duplicates land on the year that owns them', () async {
+      await pings.insert(Ping(
+        timestampUtc: DateTime.utc(2026, 3, 1, 9, 0, 30),
+        lat: 51.5074,
+        lon: -0.1278,
+        source: PingSource.scheduled,
+      ));
+      final preview = await service.preview(
+        _fixture('android_small.json'),
+        ImportPreset.normal,
+      );
+      final row = preview.byYear.single;
+      expect(row.candidatesInFile, 11);
+      expect(row.keptAfterThinning, 7);
+      expect(row.skippedAsDuplicate, 1);
+    });
+
+    test('a file with no candidates has no year rows and no range',
+        () async {
+      final dir = await Directory.systemTemp.createTemp('trail_import_years');
+      addTearDown(() => dir.delete(recursive: true));
+      final path = '${dir.path}/empty.json';
+      await File(path).writeAsString('{ "semanticSegments": [] }');
+      final preview = await service.preview(path, ImportPreset.normal);
+      expect(preview.projection.candidates, 0);
+      expect(preview.byYear, isEmpty);
+      expect(preview.fileRange, isNull);
+    });
+
     test('the Coarse preset keeps fewer rows than Normal', () async {
       final coarse = await service.preview(
         _fixture('android_small.json'),
@@ -135,6 +210,24 @@ void main() {
       // the activity end and the first afternoon path point survive.
       expect(coarse.projection.kept, 5);
       expect(coarse.projection.candidates, 11);
+      // The file's range is what the export holds, not what survives:
+      // the last kept row is 13:00, the file runs to 13:20.
+      expect(
+        DateTime.fromMillisecondsSinceEpoch(
+          coarse.projection.tsMaxUtcMs!,
+          isUtc: true,
+        ),
+        DateTime.utc(2026, 3, 1, 13),
+      );
+      expect(
+        DateTime.fromMillisecondsSinceEpoch(
+          coarse.fileRange!.lastUtcMs,
+          isUtc: true,
+        ),
+        DateTime.utc(2026, 3, 1, 13, 20),
+      );
+      expect(coarse.byYear.single.candidatesInFile, 11);
+      expect(coarse.byYear.single.keptAfterThinning, 5);
     });
 
     test('the Full preset keeps every candidate', () async {
@@ -244,23 +337,52 @@ void main() {
       expect((await pings.fixesByDateRange()).length, 8);
     });
 
-    test('re-previewing the same file refuses it', () async {
+    test('re-previewing the same file still reports what it contains',
+        () async {
       final preview = await service.preview(
         _fixture('android_small.json'),
         ImportPreset.normal,
       );
       final result = await service.commit(preview);
 
+      // The preview is the only place the per-year audit lives, so an
+      // already-imported file must still parse and report — the refusal
+      // moved to commit.
+      final again = await service.preview(
+        _fixture('android_small.json'),
+        ImportPreset.normal,
+      );
+      expect(again.alreadyImported, isNotNull);
+      expect(again.alreadyImported!.id, result.importId);
+      expect(again.alreadyImported!.rowCount, 8);
+      expect(again.byYear.single.candidatesInFile, 11);
+      expect(again.fileRange, isNotNull);
+      // Every row is now a duplicate of the rows the first import wrote.
+      expect(again.byYear.single.keptAfterThinning, 0);
+      expect(again.byYear.single.skippedAsDuplicate, 8);
+      expect(again.byYear.single.thinnedToNothing, isFalse);
+    });
+
+    test('committing an already-imported preview is refused', () async {
+      final preview = await service.preview(
+        _fixture('android_small.json'),
+        ImportPreset.normal,
+      );
+      final result = await service.commit(preview);
+      final again = await service.preview(
+        _fixture('android_small.json'),
+        ImportPreset.normal,
+      );
+
       try {
-        await service.preview(
-          _fixture('android_small.json'),
-          ImportPreset.normal,
-        );
+        await service.commit(again);
         fail('expected AlreadyImportedException');
       } on AlreadyImportedException catch (e) {
         expect(e.record.id, result.importId);
-        expect(e.record.rowCount, 8);
       }
+      // Refused before anything was written: no second record, no rows.
+      expect((await imports.all()).length, 1);
+      expect(await pings.count(), 8);
     });
 
     test('a different file still imports next to the first', () async {

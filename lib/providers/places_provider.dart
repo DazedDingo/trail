@@ -16,8 +16,13 @@ final placesProvider = FutureProvider<List<PlaceSummary>>((ref) async {
   return buildPlaces(await PingDao(db).importedVisits());
 });
 
-/// Every visit to one place ([PlaceSummary.key]), oldest-first — the
-/// detail sheet's list.
+/// Every visit to one place, oldest-first — the detail sheet's list.
+///
+/// The family argument is [PlaceSummary.visitsKey], not `key`: a row on
+/// the Places screen may be several original places merged together
+/// (nearby ones by `buildPlaces`, same-named ones by `mergeByLabel`),
+/// and the sheet has to list all of their visits or its list wouldn't
+/// add up to the count on the row.
 ///
 /// Deliberately a second read rather than a cached row→visit map: the
 /// sheet is an explicit tap, the read is the same bounded query, and
@@ -25,7 +30,10 @@ final placesProvider = FutureProvider<List<PlaceSummary>>((ref) async {
 /// cost more memory than it saves work. `autoDispose` so the list dies
 /// with the sheet.
 final placeVisitsProvider =
-    FutureProvider.autoDispose.family<List<Visit>, String>((ref, key) async {
+    FutureProvider.autoDispose.family<List<Visit>, String>((ref, keys) async {
   final db = await TrailDatabase.shared();
-  return visitsForPlace(await PingDao(db).importedVisits(), key);
+  return visitsForPlaceKeys(
+    await PingDao(db).importedVisits(),
+    keys.split(kPlaceKeySep),
+  );
 });

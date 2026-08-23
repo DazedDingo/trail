@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:collection';
+
 import 'package:geocoding/geocoding.dart';
 
 import 'bounded_map.dart';
@@ -43,12 +46,23 @@ extension GeocodeKeyCoords on GeocodeKey {
 /// platform round-trip. Only non-null labels are cached — a `null` is
 /// usually "offline right now" and should be retried later. Concurrent
 /// lookups for the same key share one in-flight future.
+///
+/// Concurrency (0.17.5): every platform call goes through one FIFO
+/// limiter, so at most [defaultMaxConcurrent] are in flight no matter
+/// how many callers are asking. The Places screen watches one label per
+/// place at once (300 rows = 300 asks); firing those at the OEM
+/// geocoder together produced "Service not Available" storms, and a cap
+/// inside `reverseLookupAll` alone couldn't see them. The limiter is
+/// per instance, which is app-wide in practice: `geocodingServiceProvider`
+/// hands every screen the same service. Cache hits and in-flight
+/// dedupe never take a slot — they cost no platform call.
 class GeocodingService {
   /// Default LRU size. 512 labels × ~40 bytes is nothing; a household's
   /// distinct 11 m cells over a year is a few hundred.
   static const defaultCacheCapacity = 512;
 
-  /// Upper bound on simultaneous platform calls from [reverseLookupAll].
+  /// Upper bound on simultaneous platform calls, both from
+  /// [reverseLookupAll] and across every other caller of one service.
   /// Firing 30 at once (the old Top Places burst) produced "Service not
   /// Available" storms on some OEM geocoders; four hides the per-call
   /// latency without tripping them.
@@ -60,14 +74,32 @@ class GeocodingService {
   final LruCache<GeocodeKey, String> _cache;
   final _inFlight = <GeocodeKey, Future<String?>>{};
 
+  /// Platform calls allowed in flight at once — see [_withSlot].
+  final int _maxConcurrent;
+
+  /// Callers holding a slot right now.
+  int _active = 0;
+
+  /// Callers waiting for one, oldest first.
+  final _waiting = Queue<Completer<void>>();
+
   GeocodingService({
     Future<List<Placemark>> Function(double lat, double lon)? lookup,
     int cacheCapacity = defaultCacheCapacity,
+    int maxConcurrent = defaultMaxConcurrent,
   })  : _lookup = lookup ?? placemarkFromCoordinates,
-        _cache = LruCache(cacheCapacity);
+        _maxConcurrent = maxConcurrent,
+        _cache = LruCache(cacheCapacity),
+        assert(maxConcurrent > 0, 'maxConcurrent must be > 0');
 
   /// Number of labels currently memoised. Diagnostics / tests.
   int get cachedLabels => _cache.length;
+
+  /// Platform calls in flight right now. Diagnostics / tests.
+  int get activeLookups => _active;
+
+  /// Callers queued behind the limiter right now. Diagnostics / tests.
+  int get queuedLookups => _waiting.length;
 
   /// Returns a short "Locality, Region" label for ([lat], [lon]), or `null`
   /// if the system geocoder has nothing useful (no cache, no network, or
@@ -81,7 +113,7 @@ class GeocodingService {
 
   Future<String?> _lookupAndCache(GeocodeKey key, double lat, double lon) async {
     try {
-      final marks = await _lookup(lat, lon);
+      final marks = await _withSlot(() => _lookup(lat, lon));
       final label = marks.isEmpty ? null : _format(marks.first);
       if (label != null) _cache.put(key, label);
       return label;
@@ -94,9 +126,12 @@ class GeocodingService {
     }
   }
 
-  /// [reverseLookup] over many coordinates with at most [maxConcurrent]
-  /// platform calls in flight. Results are in [coords] order; each is
-  /// `null` on the same terms as [reverseLookup].
+  /// [reverseLookup] over many coordinates. Results are in [coords]
+  /// order; each is `null` on the same terms as [reverseLookup].
+  ///
+  /// The in-flight cap is the service-wide limiter's, which this shares
+  /// with every other caller — [maxConcurrent] only lets one batch ask
+  /// for something TIGHTER than that (it can never widen it).
   Future<List<String?>> reverseLookupAll(
     List<({double lat, double lon})> coords, {
     int maxConcurrent = defaultMaxConcurrent,
@@ -106,6 +141,32 @@ class GeocodingService {
         (c) => reverseLookup(c.lat, c.lon),
         maxConcurrent: maxConcurrent,
       );
+
+  /// Runs [task] holding one of the [_maxConcurrent] slots, queueing
+  /// FIFO when they are all taken.
+  ///
+  /// A finished task HANDS its slot to the next waiter instead of
+  /// releasing it and re-counting: dropping [_active] first would let a
+  /// caller arriving in that gap take the same slot the woken waiter
+  /// already owns, and the cap would drift up by one per handover.
+  Future<T> _withSlot<T>(Future<T> Function() task) async {
+    if (_active >= _maxConcurrent) {
+      final gate = Completer<void>();
+      _waiting.add(gate);
+      await gate.future; // resumes owning a slot
+    } else {
+      _active++;
+    }
+    try {
+      return await task();
+    } finally {
+      if (_waiting.isEmpty) {
+        _active--;
+      } else {
+        _waiting.removeFirst().complete();
+      }
+    }
+  }
 
   /// Picks the most location-specific pair of fields available. Prefers
   /// `locality + administrativeArea` (city + state/region); falls back

@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:maplibre_gl/maplibre_gl.dart';
+
 import '../../models/ping.dart';
 
 /// Pure helpers behind the map panel's native pin layers.
@@ -525,6 +527,50 @@ PinStyle buildPinStyle({
     ],
   );
 }
+
+/// Data-driven paint properties for the heatmap layer, built from the
+/// theme's tertiary colour. `HeatmapLayerProperties` is a plain Dart data
+/// holder (no platform channel involved in constructing it), so this can
+/// be built and asserted on without a `MapLibreMap` (gotcha 18).
+///
+/// **Why every colour in the ramp is expression-form, never a string.**
+/// Through maplibre_gl 0.26.0 a CSS colour string (`'rgba(r,g,b,a)'`,
+/// `'#rrggbb'`) as an `interpolate` stop rendered fine. 0.27.0's upgraded
+/// native colour parser stopped accepting those inside a style
+/// expression — a heatmap built with string stops now mounts without
+/// error but paints with no colouring at all. The upstream CHANGELOG's
+/// own fix for the identical bug in the plugin's example app: "Fix
+/// heatmap color expressions in example app to use proper
+/// `Expressions.rgba`/`Expressions.rgb` syntax." Those two constants are
+/// just the operator name strings `'rgba'` / `'rgb'` (see
+/// `layer_expressions.dart`), so `[Expressions.rgba, r, g, b, a]` IS
+/// `['rgba', r, g, b, a]` — an expression array, not a formatted string.
+/// Every stop below uses that form. Ramp: transparent → 40% tertiary →
+/// solid tertiary → white, matching the pre-regression look.
+HeatmapLayerProperties buildHeatmapProperties({
+  required int r,
+  required int g,
+  required int b,
+}) =>
+    HeatmapLayerProperties(
+      heatmapRadius: 30,
+      heatmapWeight: 1,
+      heatmapIntensity: 1,
+      heatmapOpacity: 0.7,
+      heatmapColor: [
+        'interpolate',
+        ['linear'],
+        ['heatmap-density'],
+        0.0,
+        ['rgba', r, g, b, 0],
+        0.2,
+        ['rgba', r, g, b, 0.4],
+        0.6,
+        ['rgb', r, g, b],
+        1.0,
+        ['rgb', 255, 255, 255],
+      ],
+    );
 
 /// Coerces whatever the platform hands back as a feature id into an
 /// `int`. `queryRenderedFeatures` round-trips through native

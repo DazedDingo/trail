@@ -19,6 +19,11 @@ class PhotoBackfillProgress {
   final int total;
   final int photosAdded;
   final int cellCacheHits;
+
+  /// How many of [total] are Timeline-imported pins. Reported so the
+  /// backfill sheet can say "N pings without photos — M of them
+  /// imported" instead of silently sending imported coordinates.
+  final int importedTotal;
   final bool finished;
   final String? error;
 
@@ -27,6 +32,7 @@ class PhotoBackfillProgress {
     required this.total,
     required this.photosAdded,
     this.cellCacheHits = 0,
+    this.importedTotal = 0,
     this.finished = false,
     this.error,
   });
@@ -40,18 +46,19 @@ class PhotoBackfillProgress {
 /// yet. User-supplied photos don't block an eligible status — a manual
 /// shot doesn't replace what the auto-fetcher would have found.
 ///
-/// Timeline-imported rows (schema v5, `PingSource.imported`) are never
-/// eligible by default: their coordinates must not leave the device via
-/// the Wikimedia lookup (CLAUDE.md gotcha 21, docs/TIMELINE_IMPORT.md
-/// exclusions). Belt-and-braces with the DB-level default in
-/// `PingDao.allPings()`, which already excludes imports before this
-/// function ever sees them.
+/// Timeline-imported rows (schema v5, `PingSource.imported`) stay
+/// excluded by default so no accidental caller ships imported
+/// coordinates to Wikimedia (CLAUDE.md gotcha 21).
 ///
-/// [includeImported] is the ONE opt-in: the per-import "Photos…" action
-/// in the Timeline imports sheet, where the user has read what gets sent
-/// and tapped Fetch for that one import. Only [PhotoBackfillService.run]
-/// with `onlyImportId` set passes it, and it passes rows that already
-/// come from a single `import_id` — never the whole table.
+/// [includeImported] is the opt-in, and every path that passes it is a
+/// deliberate user tap that has been told what gets sent:
+///   - the per-import "Photos…" action (`onlyImportId`), and
+///   - the manual backfill sheet (0.17.5, commander's call on
+///     2026-08-23: "make sure they work on imported ones too") — its
+///     privacy subtitle says imported pins are included.
+/// Automatic paths never pass it: the worker's post-fix fetch only ever
+/// sees the ping it just wrote, and an import still never fetches on
+/// its own.
 List<Ping> selectEligibleForBackfill(
   List<Ping> pings,
   Set<int> pingIdsWithWikimedia, {
@@ -90,12 +97,14 @@ class PhotoBackfillService {
   /// caller — the next inter-ping pause checks it and exits cleanly.
   ///
   /// [onlyImportId] restricts the walk to one Timeline import batch —
-  /// the per-import "Photos…" action, the only path on which imported
-  /// coordinates are allowed to reach Wikimedia (CLAUDE.md gotcha 21:
-  /// explicit, per import, after a dialog that says what gets sent).
-  /// Leave it null and imports are excluded exactly as before; the
-  /// `area_photos` cell cache and the "already has wikimedia rows"
-  /// skip apply on both paths.
+  /// the per-import "Photos…" action, which asks first and reports per
+  /// import. Leave it null and the walk covers the whole table,
+  /// imported rows included (0.17.5): the backfill sheet is a manual
+  /// tap whose subtitle says so, and the commander asked for photos on
+  /// imported pins too. Both paths keep the `area_photos` cell cache
+  /// and the "already has wikimedia rows" skip, so re-running is cheap
+  /// and idempotent. Automatic paths (the worker's post-fix fetch, an
+  /// import commit) never call this — gotcha 21 still holds there.
   Stream<PhotoBackfillProgress> run({
     Completer<void>? cancel,
     int? onlyImportId,
@@ -107,15 +116,17 @@ class PhotoBackfillService {
     final salt = await PhotoShufflePrefs.getSalt();
 
     final all = onlyImportId == null
-        ? await pingDao.allPings()
+        ? await pingDao.allPings(includeImported: true)
         : await pingDao.pingsByImportId(onlyImportId);
     final wikimediaIds = await _idsWithWikimediaPhotos(db);
     final eligible = selectEligibleForBackfill(
       all,
       wikimediaIds,
-      includeImported: onlyImportId != null,
+      includeImported: true,
     );
     final total = eligible.length;
+    final importedTotal =
+        eligible.where((p) => p.source == PingSource.imported).length;
     var processed = 0;
     var added = 0;
     var cacheHits = 0;
@@ -124,6 +135,7 @@ class PhotoBackfillService {
       processed: 0,
       total: total,
       photosAdded: 0,
+      importedTotal: importedTotal,
     );
 
     if (total == 0) {
@@ -211,6 +223,7 @@ class PhotoBackfillService {
           total: total,
           photosAdded: added,
           cellCacheHits: cacheHits,
+          importedTotal: importedTotal,
         );
         // Throttle only when we actually hit Wikimedia; cache hits are
         // free, so re-backfills cruise.
@@ -223,6 +236,7 @@ class PhotoBackfillService {
         total: total,
         photosAdded: added,
         cellCacheHits: cacheHits,
+        importedTotal: importedTotal,
         finished: true,
       );
     } catch (e) {
@@ -231,6 +245,7 @@ class PhotoBackfillService {
         total: total,
         photosAdded: added,
         cellCacheHits: cacheHits,
+        importedTotal: importedTotal,
         finished: true,
         error: e.toString(),
       );

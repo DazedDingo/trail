@@ -14,6 +14,12 @@ import '../services/stats/places_service.dart';
 /// "visit", so the screen is empty until a Timeline import lands. The
 /// roll-up + every string is a pure function in
 /// `services/stats/places_service.dart` (gotcha 18).
+///
+/// Duplicate rows for one real place are collapsed twice over (0.17.5):
+/// `buildPlaces` merges what is within ~120 m before the screen sees
+/// it, and `mergeByLabel` collapses whatever the reverse geocoder then
+/// gives the same name within a kilometre — the second pass re-runs on
+/// every build as labels land.
 class PlacesScreen extends ConsumerStatefulWidget {
   const PlacesScreen({super.key});
 
@@ -35,7 +41,18 @@ class _PlacesScreenState extends ConsumerState<PlacesScreen> {
         error: (e, _) => Center(child: Text('Error loading places: $e')),
         data: (places) {
           if (places.isEmpty) return const _EmptyState();
-          final sorted = sortPlaces(places, _sort);
+          // Watched here rather than inside the tile because the label
+          // is an INPUT to the merge: two rows can only collapse once
+          // both names have resolved. Each member is a memoised ~11 m
+          // cell shared with every other screen (gotcha 29), and the
+          // list is one entry per place, not per ping.
+          final labels = {
+            for (final p in places)
+              p.key: ref
+                  .watch(approxLocationProvider(geocodeKey(p.lat, p.lon)))
+                  .valueOrNull,
+          };
+          final sorted = sortPlaces(mergeByLabel(places, labels), _sort);
           return Column(
             children: [
               Padding(
@@ -67,7 +84,10 @@ class _PlacesScreenState extends ConsumerState<PlacesScreen> {
                     height: 1,
                     color: scheme.outlineVariant.withValues(alpha: 0.4),
                   ),
-                  itemBuilder: (_, i) => _PlaceTile(place: sorted[i]),
+                  itemBuilder: (_, i) => _PlaceTile(
+                    place: sorted[i],
+                    title: placeTitle(sorted[i], labels[sorted[i].key]),
+                  ),
                 ),
               ),
             ],
@@ -78,21 +98,30 @@ class _PlacesScreenState extends ConsumerState<PlacesScreen> {
   }
 }
 
-class _PlaceTile extends ConsumerWidget {
+/// The row's headline: the reverse-geocoded name once it lands, else
+/// the semantic type, else raw coordinates. Top-level so the screen can
+/// compute it next to the merge and hand it to the tile.
+String placeTitle(PlaceSummary place, String? label) =>
+    label ?? place.semanticType ?? _coords(place);
+
+class _PlaceTile extends StatelessWidget {
   final PlaceSummary place;
-  const _PlaceTile({required this.place});
+  final String title;
+  const _PlaceTile({required this.place, required this.title});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final geo = ref
-        .watch(approxLocationProvider(geocodeKey(place.lat, place.lon)))
-        .valueOrNull;
-    final title = geo ?? place.semanticType ?? _coords(place);
-    // The chip only earns its space when it says something the title
+    // A chip only earns its space when it says something the title
     // doesn't — a "Home" row with no geocoded name is already labelled.
-    final chipLabel = place.semanticType == title ? null : place.semanticType;
+    // A merged row carries every member's type, usually still one.
+    final spots = formatSpotsHint(place);
+    final chips = [
+      for (final type in place.semanticTypes)
+        if (type != title) type,
+      if (spots != null) spots,
+    ];
     return ListTile(
       onTap: () => showPlaceVisitsSheet(context, place, title),
       leading: Container(
@@ -115,9 +144,9 @@ class _PlaceTile extends ConsumerWidget {
               overflow: TextOverflow.ellipsis,
             ),
           ),
-          if (chipLabel != null) ...[
+          for (final chip in chips) ...[
             const SizedBox(width: 8),
-            _TypeChip(label: chipLabel),
+            _TypeChip(label: chip),
           ],
         ],
       ),
@@ -188,7 +217,8 @@ class _PlaceVisitsSheet extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
-    final visitsAsync = ref.watch(placeVisitsProvider(place.key));
+    final visitsAsync = ref.watch(placeVisitsProvider(place.visitsKey));
+    final merged = formatMergedPlaces(place);
     return SizedBox(
       height: MediaQuery.sizeOf(context).height * 0.7,
       child: Column(
@@ -207,6 +237,15 @@ class _PlaceVisitsSheet extends ConsumerWidget {
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
                 ),
+                if (merged != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    merged,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
                 if (place.longestVisit > Duration.zero) ...[
                   const SizedBox(height: 2),
                   Text(

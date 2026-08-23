@@ -4,6 +4,17 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.17.5+107] — 2026-08-23
+
+### Fixed
+- **Heatmap colour ramp restored.** The ramp was written with CSS colour strings inside the map expression; the map engine that came with 0.15.0 stopped honouring those (the plugin's own example app had to make the same change). It now uses expression-form colours — same transparent → teal → white look as before.
+- **Places no longer lists the same spot several times.** Visits without a Google place id were keyed on coordinates rounded to ~11 m, so GPS jitter split one shop into many rows. Visits within ~120 m are now one place, and rows that resolve to the same name within 1 km are combined ("×3 spots").
+
+- **Photos fetched by a backfill now appear without restarting the app.** Any pin you had already opened kept its cached "no photos" for the rest of the session (and after Re-shuffle showed photos that no longer existed) — the backfill, the per-import *Photos…* action and picture mode now refresh their reads when a walk finishes. **The backfill also covers imported pins now** (still a manual tap — imported pins never fetch on their own); the sheet says how many of the pins without photos are imported.
+
+### Added
+- **The import preview shows a per-year table** — points in the file, rows kept, duplicates skipped — plus the date range the export actually covers, and it works on a file you've already imported. This is how to tell whether missing history was absent from Google's export or dropped by Trail.
+
 ## [0.17.4+106] — 2026-08-23
 
 ### Changed

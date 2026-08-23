@@ -323,3 +323,152 @@ void _requireSortedFixes(List<ExistingFix> list, String name) {
     }
   }
 }
+
+/// One calendar year of an import, as the dry-run preview reports it —
+/// the answer to "did the export actually contain 2024, or did the
+/// import drop it?".
+///
+/// The year is the **local** calendar year of the timestamp (the same
+/// reading as the map, History and the year chips), so an instant at
+/// 23:30 UTC on 31 December belongs to the next year in UTC+1.
+class ImportYearRow {
+  const ImportYearRow({
+    required this.year,
+    required this.candidatesInFile,
+    required this.keptAfterThinning,
+    required this.skippedAsDuplicate,
+    required this.pathPoints,
+    required this.visits,
+    required this.activities,
+    required this.rawPositions,
+    required this.firstTsUtcMs,
+    required this.lastTsUtcMs,
+  });
+
+  /// Local calendar year.
+  final int year;
+
+  /// Candidates the mappers produced for this year, before thinning —
+  /// "what the export contained".
+  final int candidatesInFile;
+
+  /// Rows that would actually be inserted for this year.
+  final int keptAfterThinning;
+
+  /// Candidates thinning kept but the dedupe dropped, because Trail
+  /// already had that fix (±60 s, < 25 m).
+  final int skippedAsDuplicate;
+
+  /// Per-kind split of [candidatesInFile]. Counted per *candidate*, so a
+  /// visit contributes 2 (start + end) and so does an activity; the four
+  /// always add up to [candidatesInFile].
+  final int pathPoints;
+  final int visits;
+  final int activities;
+  final int rawPositions;
+
+  /// First/last candidate the file has for this year (epoch ms, UTC).
+  final int firstTsUtcMs;
+  final int lastTsUtcMs;
+
+  /// The bug detector: the export had points for this year, none were
+  /// kept and none were duplicates. Thinning always keeps at least the
+  /// first candidate of a run, so this should be impossible — when it
+  /// shows up on the preview card, the import dropped the year.
+  bool get thinnedToNothing =>
+      candidatesInFile > 0 && keptAfterThinning == 0 && skippedAsDuplicate == 0;
+
+  @override
+  String toString() => 'ImportYearRow($year: inFile=$candidatesInFile '
+      'kept=$keptAfterThinning dup=$skippedAsDuplicate '
+      'path=$pathPoints visits=$visits activities=$activities '
+      'raw=$rawPositions range=$firstTsUtcMs..$lastTsUtcMs)';
+}
+
+/// Local calendar year of an epoch-millisecond UTC timestamp.
+int importYearOf(int tsUtcMs) =>
+    DateTime.fromMillisecondsSinceEpoch(tsUtcMs).year;
+
+/// Per-year accounting for one import: what the file held, what survived
+/// thinning + dedupe, and what the dedupe dropped.
+///
+/// [candidates] is everything the mappers produced, [keptBeforeDedupe]
+/// the survivors of [thinCandidates] and [kept] the survivors of
+/// [dedupeAgainstExisting] — the three lists the worker has in hand at
+/// preview time. Duplicates are `keptBeforeDedupe − kept` per year
+/// (the dedupe only ever removes), so the three counts stay consistent
+/// with [ImportProjection]'s totals.
+///
+/// Rows come back newest year first. Years with no candidates at all are
+/// absent — a missing 2024 row and a `2024 · 0 · 0 · 0` row mean
+/// different things (nothing in the export vs. everything dropped).
+List<ImportYearRow> yearBreakdown({
+  required List<ImportCandidate> candidates,
+  required List<ImportCandidate> keptBeforeDedupe,
+  required List<ImportCandidate> kept,
+}) {
+  final acc = <int, _YearAcc>{};
+  _YearAcc bucket(int tsUtcMs) =>
+      acc.putIfAbsent(importYearOf(tsUtcMs), () => _YearAcc(tsUtcMs));
+
+  for (final c in candidates) {
+    final year = bucket(c.tsUtcMs)..touch(c.tsUtcMs);
+    year.inFile++;
+    switch (c.kind) {
+      case ImportKind.path:
+        year.path++;
+      case ImportKind.visitStart:
+      case ImportKind.visitEnd:
+        year.visits++;
+      case ImportKind.activityStart:
+      case ImportKind.activityEnd:
+        year.activities++;
+      case ImportKind.raw:
+        year.raw++;
+    }
+  }
+  for (final c in keptBeforeDedupe) {
+    (bucket(c.tsUtcMs)..touch(c.tsUtcMs)).thinned++;
+  }
+  for (final c in kept) {
+    (bucket(c.tsUtcMs)..touch(c.tsUtcMs)).kept++;
+  }
+
+  return <ImportYearRow>[
+    for (final entry in acc.entries)
+      ImportYearRow(
+        year: entry.key,
+        candidatesInFile: entry.value.inFile,
+        keptAfterThinning: entry.value.kept,
+        skippedAsDuplicate: entry.value.thinned - entry.value.kept,
+        pathPoints: entry.value.path,
+        visits: entry.value.visits,
+        activities: entry.value.activities,
+        rawPositions: entry.value.raw,
+        firstTsUtcMs: entry.value.firstTs,
+        lastTsUtcMs: entry.value.lastTs,
+      ),
+  ]..sort((a, b) => b.year.compareTo(a.year));
+}
+
+/// Mutable accumulator behind [yearBreakdown].
+class _YearAcc {
+  _YearAcc(int ts)
+      : firstTs = ts,
+        lastTs = ts;
+
+  int inFile = 0;
+  int thinned = 0;
+  int kept = 0;
+  int path = 0;
+  int visits = 0;
+  int activities = 0;
+  int raw = 0;
+  int firstTs;
+  int lastTs;
+
+  void touch(int ts) {
+    if (ts < firstTs) firstTs = ts;
+    if (ts > lastTs) lastTs = ts;
+  }
+}

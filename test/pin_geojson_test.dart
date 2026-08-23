@@ -880,4 +880,99 @@ void main() {
       );
     });
   });
+
+  group('buildHeatmapProperties', () {
+    // Same float32 round-trip check as the "float32 safety" group above —
+    // maplibre-android narrows every numeric literal in a style
+    // expression, so an interpolate stop must survive it exactly.
+    bool exact(num v) => v == Float32List.fromList([v.toDouble()])[0];
+
+    Iterable<Object?> flatten(Object? e) sync* {
+      if (e is List) {
+        for (final x in e) {
+          yield* flatten(x);
+        }
+      } else {
+        yield e;
+      }
+    }
+
+    test('pinned radius / weight / intensity / opacity', () {
+      final props = buildHeatmapProperties(r: 77, g: 182, b: 172);
+      expect(props.heatmapRadius, 30);
+      expect(props.heatmapWeight, 1);
+      expect(props.heatmapIntensity, 1);
+      expect(props.heatmapOpacity, 0.7);
+    });
+
+    test('the colour ramp uses ONLY expression-form colours — no CSS '
+        'strings anywhere (the 0.27.0 regression)', () {
+      final color = buildHeatmapProperties(r: 77, g: 182, b: 172).heatmapColor
+          as List;
+      final allowedStrings = {
+        'interpolate',
+        'linear',
+        'heatmap-density',
+        'rgba',
+        'rgb',
+      };
+      for (final v in flatten(color)) {
+        if (v is String) {
+          expect(allowedStrings, contains(v),
+              reason: 'unexpected string literal in ramp: $v');
+        }
+      }
+    });
+
+    test('stops are ascending 0 → 1: transparent, 40% tint, solid tint, '
+        'white', () {
+      final color = buildHeatmapProperties(r: 77, g: 182, b: 172).heatmapColor
+          as List;
+      // ['interpolate', ['linear'], ['heatmap-density'], stop, colour, ...]
+      final stops = <double>[];
+      for (var i = 3; i < color.length; i += 2) {
+        stops.add((color[i] as num).toDouble());
+      }
+      expect(stops, [0.0, 0.2, 0.6, 1.0]);
+      expect(color[4], ['rgba', 77, 182, 172, 0]);
+      expect(color[6], ['rgba', 77, 182, 172, 0.4]);
+      expect(color[8], ['rgb', 77, 182, 172]);
+      expect(color[10], ['rgb', 255, 255, 255]);
+    });
+
+    test('r/g/b are echoed verbatim into every colour stop that carries '
+        'them', () {
+      final color = buildHeatmapProperties(r: 1, g: 2, b: 3).heatmapColor
+          as List;
+      expect(color[4], ['rgba', 1, 2, 3, 0]);
+      expect(color[6], ['rgba', 1, 2, 3, 0.4]);
+      expect(color[8], ['rgb', 1, 2, 3]);
+    });
+
+    test('integer literals (r/g/b, alpha 0, density stops) are '
+        'float32-exact; the fractional alpha/stop is within a visually '
+        'invisible tolerance', () {
+      // Same split as the "float32 safety" group above: whole numbers used
+      // as r/g/b channels or comparison-adjacent stops must be bit-exact,
+      // but a fractional alpha/density like 0.4 is only ever blended into
+      // a continuous interpolation — a sub-1e-6 wobble is imperceptible,
+      // same tolerance the pin-style ramp opacities use.
+      final color = buildHeatmapProperties(r: 77, g: 182, b: 172).heatmapColor
+          as List;
+      for (final v in flatten(color)) {
+        if (v is int) {
+          expect(exact(v), isTrue, reason: 'literal $v is not float32-exact');
+        } else if (v is double) {
+          final narrowed = Float32List.fromList([v])[0];
+          expect((narrowed - v).abs(), lessThan(1e-6),
+              reason: 'literal $v narrows badly');
+        }
+      }
+    });
+
+    test('jsonEncodes cleanly (what addHeatmapLayer ships)', () {
+      final props = buildHeatmapProperties(r: 77, g: 182, b: 172);
+      expect(() => jsonEncode(props.toJson()), returnsNormally);
+    });
+  });
 }

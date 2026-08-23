@@ -213,6 +213,162 @@ void main() {
     });
   });
 
+  group('GeocodingService concurrency limiter', () {
+    /// A lookup that counts how many calls overlap and answers after a
+    /// short delay, so the peak is observable without hand-driving
+    /// completers.
+    ({
+      GeocodingService svc,
+      int Function() peak,
+      int Function() calls,
+    }) counting({
+      int maxConcurrent = GeocodingService.defaultMaxConcurrent,
+      Duration Function(double lat)? delay,
+    }) {
+      var inFlight = 0, peak = 0, calls = 0;
+      final svc = GeocodingService(
+        maxConcurrent: maxConcurrent,
+        lookup: (lat, _) async {
+          calls++;
+          inFlight++;
+          if (inFlight > peak) peak = inFlight;
+          await Future<void>.delayed(
+            delay?.call(lat) ?? const Duration(milliseconds: 2),
+          );
+          inFlight--;
+          return [_placemark(locality: 'P${lat.toInt()}', country: 'C')];
+        },
+      );
+      return (svc: svc, peak: () => peak, calls: () => calls);
+    }
+
+    test('20 misses fired at once never put more than 4 in flight',
+        () async {
+      final h = counting();
+      final labels = await Future.wait([
+        for (var i = 0; i < 20; i++) h.svc.reverseLookup(i.toDouble(), 0),
+      ]);
+      expect(labels, [for (var i = 0; i < 20; i++) 'P$i, C']);
+      expect(h.peak(), GeocodingService.defaultMaxConcurrent);
+      expect(h.calls(), 20);
+      // Everything drained: no slot or waiter left behind.
+      expect(h.svc.activeLookups, 0);
+      expect(h.svc.queuedLookups, 0);
+    });
+
+    test('the order the platform answers in does not matter', () async {
+      // Later coordinates answer FIRST, so slots free out of order.
+      final h = counting(
+        delay: (lat) => Duration(milliseconds: (20 - lat).toInt()),
+      );
+      final labels = await Future.wait([
+        for (var i = 0; i < 20; i++) h.svc.reverseLookup(i.toDouble(), 0),
+      ]);
+      expect(labels, [for (var i = 0; i < 20; i++) 'P$i, C']);
+      expect(h.peak(), lessThanOrEqualTo(4));
+      expect(h.svc.activeLookups, 0);
+      expect(h.svc.queuedLookups, 0);
+    });
+
+    test('a cache hit never waits for a slot', () async {
+      final gate = Completer<List<Placemark>>();
+      var calls = 0;
+      final svc = GeocodingService(lookup: (lat, _) {
+        calls++;
+        if (lat == 99) {
+          return Future.value([_placemark(locality: 'Home', country: 'C')]);
+        }
+        return gate.future;
+      });
+      // Warm the cache, then jam every slot with pending misses.
+      expect(await svc.reverseLookup(99, 0), 'Home, C');
+      final jammed = [
+        for (var i = 0; i < 6; i++) svc.reverseLookup(i.toDouble(), 0),
+      ];
+      expect(svc.activeLookups, 4);
+      expect(svc.queuedLookups, 2);
+
+      String? hit;
+      unawaited(svc.reverseLookup(99, 0).then((v) => hit = v));
+      await Future<void>.delayed(Duration.zero); // flush microtasks only
+
+      expect(hit, 'Home, C', reason: 'served from memory, not the queue');
+      expect(calls, 5, reason: 'no extra platform call for the cached cell');
+
+      gate.complete([_placemark(locality: 'X', country: 'C')]);
+      await Future.wait(jammed);
+      expect(svc.activeLookups, 0);
+      expect(svc.queuedLookups, 0);
+    });
+
+    test('a second caller for an in-flight cell takes no second slot',
+        () async {
+      final gate = Completer<List<Placemark>>();
+      var calls = 0;
+      final svc = GeocodingService(lookup: (_, __) {
+        calls++;
+        return gate.future;
+      });
+      final first = [
+        for (var i = 0; i < 4; i++) svc.reverseLookup(i.toDouble(), 0),
+      ];
+      expect(svc.activeLookups, 4);
+
+      final piggyback = svc.reverseLookup(0.00001, 0);
+      expect(svc.queuedLookups, 0, reason: 'deduped, never queued');
+      expect(calls, 4);
+
+      gate.complete([_placemark(locality: 'X', country: 'C')]);
+      expect(await piggyback, 'X, C');
+      await Future.wait(first);
+      expect(calls, 4);
+      expect(svc.activeLookups, 0);
+    });
+
+    test('a throwing lookup hands its slot on', () async {
+      final gate = Completer<List<Placemark>>();
+      var calls = 0;
+      final svc = GeocodingService(lookup: (lat, _) {
+        calls++;
+        if (lat < 4) return Future<List<Placemark>>.error(Exception('boom'));
+        return gate.future;
+      });
+      final failures = [
+        for (var i = 0; i < 4; i++) svc.reverseLookup(i.toDouble(), 0),
+      ];
+      final queued = svc.reverseLookup(9, 0);
+      expect(await Future.wait(failures), [null, null, null, null]);
+
+      gate.complete([_placemark(locality: 'X', country: 'C')]);
+      expect(await queued, 'X, C');
+      expect(calls, 5);
+      expect(svc.activeLookups, 0);
+      expect(svc.queuedLookups, 0);
+    });
+
+    test('maxConcurrent: 1 serialises the platform calls', () async {
+      final h = counting(maxConcurrent: 1);
+      await Future.wait([
+        for (var i = 0; i < 5; i++) h.svc.reverseLookup(i.toDouble(), 0),
+      ]);
+      expect(h.peak(), 1);
+    });
+
+    test('the cap holds across callers — a batch plus loose lookups',
+        () async {
+      final h = counting();
+      await Future.wait([
+        h.svc.reverseLookupAll([
+          for (var i = 0; i < 8; i++) (lat: i.toDouble(), lon: 0.0),
+        ]),
+        for (var i = 8; i < 20; i++) h.svc.reverseLookup(i.toDouble(), 0),
+      ]);
+      expect(h.peak(), GeocodingService.defaultMaxConcurrent);
+      expect(h.svc.activeLookups, 0);
+      expect(h.svc.queuedLookups, 0);
+    });
+  });
+
   group('GeocodingService.reverseLookupAll', () {
     test('preserves input order and caps in-flight calls at 4', () async {
       var inFlight = 0, peak = 0;

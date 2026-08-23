@@ -13,6 +13,7 @@ import '../providers/backup_provider.dart';
 import '../providers/home_location_provider.dart';
 import '../providers/import_provider.dart';
 import '../providers/mbtiles_provider.dart';
+import '../providers/photos_provider.dart';
 import '../services/coverage/coverage_flow.dart';
 import '../services/coverage/coverage_planner.dart';
 import '../services/home_location_service.dart';
@@ -135,19 +136,16 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
         },
       );
       if (!mounted) return;
+      // A file Trail already has still previews (the per-year table is
+      // exactly what someone asking "where is my 2024?" needs); only the
+      // Import button is off, and the card above it says why.
       setState(() {
         _preview = preview;
+        _already = preview.alreadyImported;
         _previewing = false;
         _progress = null;
       });
       await _refreshGoogleHome(preview.frequentPlaces);
-    } on AlreadyImportedException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _already = e.record;
-        _previewing = false;
-        _progress = null;
-      });
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -503,6 +501,7 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
               '${skipped == 0 ? '' : ', $skipped skipped'}',
               style: theme.textTheme.bodySmall,
             ),
+            _yearBreakdown(preview),
             if (projection.exceedsWarnThreshold) ...[
               const SizedBox(height: 12),
               _note(
@@ -515,12 +514,103 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
             ],
             const SizedBox(height: 16),
             FilledButton.icon(
-              onPressed: projection.kept == 0 ? null : _commit,
+              onPressed: projection.kept == 0 || preview.alreadyImported != null
+                  ? null
+                  : _commit,
               icon: const Icon(Icons.download_done_outlined),
               label: Text('Import ${projection.kept} rows'),
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// The per-year audit under the preview: what the export contained,
+  /// what thinning kept, what the dedupe skipped — one row per calendar
+  /// year, newest first.
+  ///
+  /// This exists because "I don't see 2024 on the map" is otherwise
+  /// unanswerable: it could be an export that never had 2024 or an
+  /// import that dropped it, and the totals on the card above cannot
+  /// tell those apart.
+  Widget _yearBreakdown(ImportPreview preview) {
+    final rows = preview.byYear;
+    if (rows.isEmpty) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    final range = preview.fileRange;
+    final digits = theme.textTheme.bodySmall?.copyWith(
+      fontFeatures: const [FontFeature.tabularFigures()],
+    );
+    final header = theme.textTheme.labelSmall?.copyWith(
+      color: theme.colorScheme.onSurfaceVariant,
+    );
+    final empty = <int>[for (final r in rows) if (r.thinnedToNothing) r.year];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 12),
+        if (range != null)
+          Text(
+            'File covers ${_formatDay(range.firstUtcMs)} – '
+            '${_formatDay(range.lastUtcMs)}',
+            style: theme.textTheme.bodySmall,
+          ),
+        const SizedBox(height: 6),
+        Table(
+          columnWidths: const {
+            0: IntrinsicColumnWidth(),
+            1: FlexColumnWidth(),
+            2: FlexColumnWidth(),
+            3: FlexColumnWidth(),
+          },
+          defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+          children: [
+            TableRow(children: [
+              _yearCell('Year', header, right: false),
+              _yearCell('In file', header),
+              _yearCell('Kept', header),
+              _yearCell('Duplicates', header),
+            ]),
+            for (final row in rows)
+              TableRow(children: [
+                _yearCell('${row.year}', digits, right: false),
+                _yearCell('${row.candidatesInFile}', digits),
+                _yearCell('${row.keptAfterThinning}', digits),
+                _yearCell('${row.skippedAsDuplicate}', digits),
+              ]),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'In file = points the export contained for that year (before '
+          'thinning). Kept = imported rows. Duplicates = within 60 s / '
+          '25 m of a pin you already had.',
+          style: theme.textTheme.bodySmall
+              ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+        ),
+        if (empty.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          _note(
+            Icons.warning_amber_outlined,
+            'Thinned to nothing: ${empty.join(', ')} '
+            '${empty.length == 1 ? 'has' : 'have'} points in the file but '
+            'nothing kept and no duplicates. That should not happen — '
+            'please report it.',
+            color: Colors.amber,
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _yearCell(String text, TextStyle? style, {bool right = true}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Text(
+        text,
+        style: style,
+        textAlign: right ? TextAlign.right : TextAlign.left,
       ),
     );
   }
@@ -626,7 +716,8 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
               'This exact file added ${record.rowCount} ping'
               '${record.rowCount == 1 ? '' : 's'}. Re-importing it would '
               'only duplicate work, so it is refused. Export a fresh '
-              'Timeline for anything newer.',
+              'Timeline for anything newer — the preview below still '
+              'shows what this file contains, year by year.',
             ),
             const SizedBox(height: 12),
             OutlinedButton.icon(
@@ -740,6 +831,10 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
       ],
     );
   }
+
+  /// `3 Jan 2019` for an epoch-ms UTC instant, in local time.
+  String _formatDay(int tsUtcMs) => _dateFmt.format(
+      DateTime.fromMillisecondsSinceEpoch(tsUtcMs, isUtc: true).toLocal());
 
   String _formatRange(ImportProjection projection) {
     final min = projection.tsMinUtcMs;
@@ -864,11 +959,11 @@ class _TimelineImportsSheetState extends ConsumerState<_TimelineImportsSheet> {
     }
   }
 
-  /// Per-import photo fetch — the ONE path on which imported
-  /// coordinates are allowed to reach Wikimedia (CLAUDE.md gotcha 21).
-  /// Explicit, per import, behind a dialog that says exactly what gets
-  /// sent; nothing about an import does this on its own, and the
-  /// Settings backfill still skips every imported row.
+  /// Per-import photo fetch: explicit, per import, behind a dialog that
+  /// says exactly what gets sent. Nothing about an import does this on
+  /// its own (CLAUDE.md gotcha 21). Since 0.17.5 the Settings backfill
+  /// also covers imported pins, so this action is the *scoped* version —
+  /// one batch, with its own progress and count.
   Future<void> _photos(ImportRecord record) async {
     final id = record.id;
     if (id == null || _busyId != null) return;
@@ -955,6 +1050,12 @@ class _TimelineImportsSheetState extends ConsumerState<_TimelineImportsSheet> {
     if (navigator.mounted && progressRoute.isActive) {
       navigator.removeRoute(progressRoute);
     }
+    // The walk wrote `ping_photos` rows straight to SQLite; every cached
+    // photo read (the pin sheets' `pingPhotosProvider` family, the
+    // slideshow's own cache) still holds the pre-fetch answer until it
+    // is told otherwise. Runs even when the fetch was cancelled — the
+    // rows written before the Cancel are real.
+    if (mounted) invalidateAfterPhotoWrite(ref);
     // `progress` is deliberately NOT disposed — a popped route keeps
     // rebuilding through its exit transition and a
     // `ValueListenableBuilder` re-subscribing to a disposed notifier

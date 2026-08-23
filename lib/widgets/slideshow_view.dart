@@ -9,6 +9,7 @@ import '../db/database.dart';
 import '../db/ping_photo_dao.dart';
 import '../models/ping.dart';
 import '../models/ping_photo.dart';
+import '../providers/photos_provider.dart';
 import '../services/date_labels.dart';
 import '../services/failed_photo_uris.dart';
 import '../services/online_photo_service.dart';
@@ -109,6 +110,16 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
     }
   }
 
+  /// Re-read the visible window's photos after a bulk write. Overwrites
+  /// `_photoCache` in place rather than clearing it, so the current
+  /// frame keeps painting instead of flashing "Loading photos…"; the
+  /// precache ledger is dropped because a re-shuffle changes which URLs
+  /// the frames want.
+  void _reloadPhotos() {
+    _precached.clear();
+    unawaited(_prefetchVisibleWindow());
+  }
+
   Future<void> _prefetchVisibleWindow() async {
     if (_loadingAll) return;
     _loadingAll = true;
@@ -204,6 +215,12 @@ class _SlideshowViewState extends ConsumerState<SlideshowView> {
 
   @override
   Widget build(BuildContext context) {
+    // `_photoCache` is the one photo read that isn't a provider, and it
+    // is only rebuilt when the visible window changes — which a
+    // backfill / re-shuffle / per-import fetch doesn't do. Without this
+    // the slideshow kept saying "No photos for …" until the map was
+    // rebuilt, even though the rows had just landed.
+    ref.listen(photoLibraryRevisionProvider, (_, __) => _reloadPhotos());
     if (!widget.hasAnyFixes || widget.visibleFixes.isEmpty) {
       return const _CenteredMessage(
         icon: Icons.image_outlined,

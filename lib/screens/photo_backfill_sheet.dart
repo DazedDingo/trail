@@ -1,7 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../providers/photos_provider.dart';
 import '../services/photo_backfill_service.dart';
 
 /// Bottom sheet that drives the photo-backfill walk. Opens from
@@ -13,7 +15,12 @@ import '../services/photo_backfill_service.dart';
 /// pings (mid-fetch HTTP requests complete; we don't try to abort
 /// them, just drop the result).
 class PhotoBackfillSheet extends StatefulWidget {
-  const PhotoBackfillSheet({super.key});
+  /// Injection seam for the widget tests — production always builds its
+  /// own (the service opens the shared DB itself).
+  @visibleForTesting
+  final PhotoBackfillService? service;
+
+  const PhotoBackfillSheet({super.key, this.service});
 
   /// Showtime helper — handles the modal scaffolding so call sites
   /// stay one-liner.
@@ -35,19 +42,47 @@ class _PhotoBackfillSheetState extends State<PhotoBackfillSheet> {
   StreamSubscription<PhotoBackfillProgress>? _sub;
   Completer<void>? _cancel;
 
+  /// Captured in [initState] (eagerly — the first read can be in
+  /// `dispose`, where the element is already defunct): the walk writes
+  /// `ping_photos` rows behind the back of every provider that already
+  /// read them, and the refresh has to happen even when the user swipes
+  /// the sheet away mid-run.
+  late final ProviderContainer _container;
+
+  /// True once photos have landed and the refresh is still owed.
+  bool _refreshOwed = false;
+
+  PhotoBackfillService _service() => widget.service ?? PhotoBackfillService();
+
+  @override
+  void initState() {
+    super.initState();
+    _container = ProviderScope.containerOf(context, listen: false);
+  }
+
   bool get _running =>
       _progress != null &&
       !_progress!.finished &&
       _cancel != null &&
       !_cancel!.isCompleted;
 
-  void _start() => _consume(PhotoBackfillService().run(cancel: _cancel = Completer<void>()));
+  void _start() =>
+      _consume(_service().run(cancel: _cancel = Completer<void>()));
 
+  // Re-shuffle DELETES every wikimedia row before re-attaching, so it
+  // owes the refresh from the first event, not just when photos land —
+  // otherwise an open pin sheet keeps painting rows that no longer
+  // exist.
   void _reshuffle() => _consume(
-        PhotoBackfillService().reshuffle(cancel: _cancel = Completer<void>()),
+        _service().reshuffle(cancel: _cancel = Completer<void>()),
+        refreshOwed: true,
       );
 
-  void _consume(Stream<PhotoBackfillProgress> stream) {
+  void _consume(
+    Stream<PhotoBackfillProgress> stream, {
+    bool refreshOwed = false,
+  }) {
+    _refreshOwed = refreshOwed;
     setState(() => _progress = const PhotoBackfillProgress(
           processed: 0,
           total: 0,
@@ -55,8 +90,19 @@ class _PhotoBackfillSheetState extends State<PhotoBackfillSheet> {
         ));
     _sub?.cancel();
     _sub = stream.listen((p) {
+      if (p.photosAdded > 0) _refreshOwed = true;
+      if (p.finished) _refreshPhotoReads();
       if (mounted) setState(() => _progress = p);
     });
+  }
+
+  /// Drop every cached photo read so the pin sheets and the slideshow
+  /// pick up what the walk just wrote. Without this the backfill looked
+  /// like a no-op until the app was restarted.
+  void _refreshPhotoReads() {
+    if (!_refreshOwed) return;
+    _refreshOwed = false;
+    invalidateAfterPhotoWriteIn(_container);
   }
 
   void _stop() {
@@ -69,6 +115,8 @@ class _PhotoBackfillSheetState extends State<PhotoBackfillSheet> {
   void dispose() {
     _sub?.cancel();
     _stop();
+    // Swiped away mid-walk: the rows written so far are still real.
+    _refreshPhotoReads();
     super.dispose();
   }
 
@@ -89,7 +137,10 @@ class _PhotoBackfillSheetState extends State<PhotoBackfillSheet> {
             'Walks every past ping with no Wikimedia photos yet and '
             'fetches up to 5 each. Throttled (~1/sec) so the API '
             'doesn\'t treat us like a scraper. Leaks each ping\'s '
-            'lat/lon to Wikimedia — same as the auto-fetch toggle.',
+            'lat/lon to Wikimedia — same as the auto-fetch toggle. '
+            'Imported Timeline pins are included in this manual run, '
+            'so their coordinates go to Wikimedia too; imports still '
+            'never fetch on their own.',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: scheme.onSurfaceVariant,
                 ),
@@ -189,6 +240,14 @@ class _ProgressBlock extends StatelessWidget {
     final cacheNote = p.cellCacheHits > 0
         ? ' · ${p.cellCacheHits} from cache'
         : '';
+    // Count split — the manual backfill now covers imported pins
+    // (0.17.5), and the user is entitled to see how much of the walk
+    // that is before the coordinates go out.
+    final scopeLine = p.total == 0
+        ? null
+        : '${p.total} ping${p.total == 1 ? '' : 's'} without photos'
+            '${p.importedTotal > 0 ? ' — ${p.importedTotal} of them '
+                'imported' : ''}';
     final statusLine = p.error != null
         ? 'Stopped: ${p.error}'
         : p.finished
@@ -221,6 +280,13 @@ class _ProgressBlock extends StatelessWidget {
                 style: TextStyle(color: scheme.primary)),
           ],
         ),
+        if (scopeLine != null)
+          Text(
+            scopeLine,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+          ),
       ],
     );
   }

@@ -8,7 +8,9 @@ import 'package:sqlite3/open.dart';
 
 import 'package:trail/db/database.dart';
 import 'package:trail/db/ping_dao.dart';
+import 'package:trail/db/ping_photo_dao.dart';
 import 'package:trail/models/ping.dart';
+import 'package:trail/models/ping_photo.dart';
 import 'package:trail/services/online_photo_service.dart';
 import 'package:trail/services/photo_backfill_service.dart';
 
@@ -242,10 +244,12 @@ void main() {
     });
   });
 
-  // The default walk must never send an imported coordinate to
-  // Wikimedia (CLAUDE.md gotcha 21); `onlyImportId` is the single,
-  // user-confirmed exception and must reach that import and nothing
-  // else. Real (ffi) DB + a recording stand-in for Wikimedia.
+  // 0.17.5, commander 2026-08-23 ("make sure they work on imported ones
+  // too"): the manual backfill sheet now covers imported pins as well —
+  // it is a user tap whose subtitle says the coordinates go out. The
+  // automatic paths still never fetch for an import (gotcha 21), and
+  // `onlyImportId` still scopes the walk to one batch. Real (ffi) DB +
+  // a recording stand-in for Wikimedia.
   group('PhotoBackfillService.run', () {
     late Database db;
     late PingDao dao;
@@ -303,14 +307,97 @@ void main() {
       await db.close();
     });
 
-    test('the default walk never touches an imported row', () async {
+    test('the default walk covers imported rows too (0.17.5 — the '
+        'commander asked for photos on imported pins)', () async {
       final events = await service.run().toList();
 
       expect(events.last.finished, isTrue);
       expect(events.last.error, isNull);
-      expect(events.last.total, 1, reason: 'only the one own ping');
+      expect(events.last.total, 5,
+          reason: 'the own ping + three from import 1 + one from import 2');
+      // 52.1001 shares a cell with 52.1, so four lookups for five pings.
+      expect(online.asked.map((a) => a.lat).toList(),
+          [51.5, 52.1, 52.2, 53.3]);
+      expect(events.last.cellCacheHits, 1);
+      expect(
+        await pingIdsWithPhotos(),
+        [ownPingId, ...importOneIds, importTwoId]..sort(),
+      );
+    });
+
+    test('the default walk reports how many of the total are imported',
+        () async {
+      final events = await service.run().toList();
+
+      expect(events.first.total, 5);
+      expect(events.first.importedTotal, 4);
+      expect(events.last.importedTotal, 4,
+          reason: 'the split rides every event so the sheet can show it');
+    });
+
+    test('importedTotal is 0 when nothing imported is left to do',
+        () async {
+      // Give every imported row a wikimedia photo up front.
+      for (final id in [...importOneIds, importTwoId]) {
+        await db.insert('ping_photos', {
+          'ping_id': id,
+          'uri': 'https://example.invalid/existing.jpg',
+          'source': 'wikimedia',
+          'fetched_at': DateTime.utc(2026, 5, 1).millisecondsSinceEpoch,
+          'ordinal': 0,
+        });
+      }
+
+      final events = await service.run().toList();
+
+      expect(events.last.total, 1);
+      expect(events.last.importedTotal, 0);
       expect(online.asked, [(lat: 51.5, lon: -0.1)]);
-      expect(await pingIdsWithPhotos(), [ownPingId]);
+    });
+
+    test('an imported ping that already has a wikimedia row is skipped by '
+        'the default walk', () async {
+      await db.insert('ping_photos', {
+        'ping_id': importOneIds.first,
+        'uri': 'https://example.invalid/existing.jpg',
+        'source': 'wikimedia',
+        'fetched_at': DateTime.utc(2026, 5, 1).millisecondsSinceEpoch,
+        'ordinal': 0,
+      });
+
+      final events = await service.run().toList();
+
+      expect(events.last.total, 4);
+      expect(events.last.importedTotal, 3);
+      expect(online.asked.map((a) => a.lat).toList(),
+          [51.5, 52.2, 52.1001, 53.3]);
+    });
+
+    test('a user-attached photo does not stop the default walk from '
+        'fetching for an imported pin', () async {
+      await db.insert('ping_photos', {
+        'ping_id': importTwoId,
+        'uri': 'file:///tmp/mine.jpg',
+        'source': 'user_camera',
+        'fetched_at': DateTime.utc(2026, 5, 1).millisecondsSinceEpoch,
+        'ordinal': 0,
+      });
+
+      final events = await service.run().toList();
+
+      expect(events.last.total, 5);
+      expect(online.asked.map((a) => a.lat).toList(), contains(53.3));
+    });
+
+    test('no fixes at all → finishes at zero without fetching', () async {
+      await db.delete('pings');
+
+      final events = await service.run().toList();
+
+      expect(events.last.total, 0);
+      expect(events.last.importedTotal, 0);
+      expect(events.last.finished, isTrue);
+      expect(online.asked, isEmpty);
     });
 
     test('onlyImportId touches that import and nothing else', () async {
@@ -361,6 +448,82 @@ void main() {
       expect(events.last.finished, isTrue);
       expect(online.asked, isEmpty);
       expect(await pingIdsWithPhotos(), isEmpty);
+    });
+  });
+
+  // The reported bug was "pictures don't display on pins" — so pin
+  // photos have to be readable back through the exact calls the pin
+  // sheet (`byPingId`) and the slideshow (`byPingIds`) make, for
+  // imported rows as much as for own ones.
+  group('imported pins, read back the way the UI reads them', () {
+    late Database db;
+    late PingDao dao;
+    late PingPhotoDao photoDao;
+    late List<int> importedIds;
+
+    setUp(() async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      db = await _openMemDb();
+      TrailDatabase.useSharedForTest(db);
+      dao = PingDao(db);
+      photoDao = PingPhotoDao(db);
+      await dao.insertImportedBatch(
+        [_row(52.1, -1.1, minute: 1), _row(52.2, -1.2, minute: 2)],
+        importId: 7,
+      );
+      final rows = await db.query('pings',
+          columns: ['id', 'source', 'import_id'], orderBy: 'id ASC');
+      expect(rows.map((r) => r['source']).toSet(), {'import'});
+      expect(rows.map((r) => (r['import_id'] as num).toInt()).toSet(), {7});
+      importedIds = [for (final r in rows) (r['id'] as num).toInt()];
+    });
+
+    tearDown(() async {
+      TrailDatabase.resetSharedForTest();
+      await db.close();
+    });
+
+    test('insertAll rows on imported pings come back from byPingIds '
+        '(the slideshow batch read)', () async {
+      await photoDao.insertAll([
+        for (final id in importedIds)
+          PingPhoto(
+            pingId: id,
+            uri: 'https://example.invalid/$id.jpg',
+            source: PingPhotoSource.wikimedia,
+            attribution: 'Someone',
+            license: 'CC BY-SA 4.0',
+            fetchedAt: DateTime.utc(2026, 5, 17),
+            ordinal: 0,
+          ),
+      ]);
+
+      final byPing = await photoDao.byPingIds(importedIds);
+
+      expect(byPing.keys.toSet(), importedIds.toSet());
+      for (final id in importedIds) {
+        expect(byPing[id], hasLength(1));
+      }
+    });
+
+    test('a default backfill fills both the gallery read and the '
+        'slideshow read for imported pins', () async {
+      final online = _RecordingPhotoService();
+      final service =
+          PhotoBackfillService(onlineService: online, throttle: Duration.zero);
+
+      final events = await service.run().toList();
+
+      expect(events.last.total, 2);
+      expect(events.last.importedTotal, 2);
+      for (final id in importedIds) {
+        // Gallery path.
+        expect(await photoDao.byPingId(id), isNotEmpty);
+      }
+      // Slideshow path.
+      final byPing = await photoDao.byPingIds(importedIds);
+      expect(byPing.keys.toSet(), importedIds.toSet());
     });
   });
 

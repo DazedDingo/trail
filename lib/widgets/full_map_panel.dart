@@ -1012,30 +1012,18 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
         return;
       }
       if (!_heatmapMounted) {
-        final tertHex = scheme.tertiary.toHexStringRGB();
         final tertR = (scheme.tertiary.r * 255).round();
         final tertG = (scheme.tertiary.g * 255).round();
         final tertB = (scheme.tertiary.b * 255).round();
         // Same source as the pins — no second upload. The layer gets its
         // own copy of the time filter (addHeatmapLayer has no `filter`
-        // parameter in 0.26.0, so it is applied right after).
+        // parameter in 0.26.0, so it is applied right after). See
+        // buildHeatmapProperties for why the ramp uses expression-form
+        // colours, not CSS strings (maplibre_gl 0.27.0 regression).
         await c.addHeatmapLayer(
           _pinsSrc,
           _heatmapLayerId,
-          HeatmapLayerProperties(
-            heatmapRadius: 30,
-            heatmapIntensity: 1,
-            heatmapOpacity: 0.7,
-            heatmapColor: [
-              'interpolate',
-              ['linear'],
-              ['heatmap-density'],
-              0.0, 'rgba($tertR,$tertG,$tertB,0)',
-              0.2, 'rgba($tertR,$tertG,$tertB,0.4)',
-              0.6, tertHex,
-              1.0, '#ffffff',
-            ],
-          ),
+          buildHeatmapProperties(r: tertR, g: tertG, b: tertB),
         );
         _heatmapMounted = true;
       }

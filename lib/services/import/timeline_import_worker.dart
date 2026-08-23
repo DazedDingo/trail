@@ -17,7 +17,8 @@
 /// worker -> main : {type: 'ready',    port}
 ///                  {type: 'progress', bytes, total, counts}      (<= 10 Hz)
 ///                  {type: 'range',    tsMin, tsMax, candidates}
-///                  {type: 'preview',  projection, counts, frequentPlaces}
+///                  {type: 'preview',  projection, counts, frequentPlaces,
+///                                     byYear, fileTsMin, fileTsMax}
 ///                  {type: 'batch',    rows: [[ts,lat,lon,acc,alt,speed,note]]}
 ///                  {type: 'done',     rows, cancelled}
 ///                  {type: 'error',    message}
@@ -25,6 +26,13 @@
 ///
 /// After `preview` the worker keeps the kept-candidate list in memory,
 /// so `commit` streams it straight out without re-reading the file.
+///
+/// `byYear` is the per-year audit the preview card renders — one row
+/// `[year, inFile, kept, duplicates, path, visits, activities, raw,
+/// firstMs, lastMs]`, newest year first (see [yearBreakdown]) — and
+/// `fileTsMin`/`fileTsMax` are the first/last candidate in the WHOLE
+/// file, before thinning, which is how the screen can say "the export
+/// covers 2019–2026" even for the years it kept nothing from.
 library;
 
 import 'dart:async';
@@ -170,6 +178,13 @@ class _ImportWorker {
       final result = dedupeAgainstExisting(thinned, existing);
       final kept = result.kept;
       _kept = kept;
+      // Computed here, where all three lists exist: the file's
+      // candidates, the thinning survivors and the dedupe survivors.
+      final byYear = yearBreakdown(
+        candidates: candidates,
+        keptBeforeDedupe: thinned,
+        kept: kept,
+      );
       _send(<String, Object?>{
         'type': 'preview',
         'projection': <String, Object?>{
@@ -179,6 +194,24 @@ class _ImportWorker {
           'tsMin': kept.isEmpty ? null : kept.first.tsUtcMs,
           'tsMax': kept.isEmpty ? null : kept.last.tsUtcMs,
         },
+        // `candidates` is sorted, so first/last is the file's own range.
+        'fileTsMin': candidates.isEmpty ? null : candidates.first.tsUtcMs,
+        'fileTsMax': candidates.isEmpty ? null : candidates.last.tsUtcMs,
+        'byYear': <List<Object?>>[
+          for (final row in byYear)
+            <Object?>[
+              row.year,
+              row.candidatesInFile,
+              row.keptAfterThinning,
+              row.skippedAsDuplicate,
+              row.pathPoints,
+              row.visits,
+              row.activities,
+              row.rawPositions,
+              row.firstTsUtcMs,
+              row.lastTsUtcMs,
+            ],
+        ],
         'counts': counts.toJson(),
         'frequentPlaces': <Map<String, Object?>>[
           for (final p in places)

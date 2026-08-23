@@ -49,9 +49,14 @@ class ImportException implements Exception {
   String toString() => message;
 }
 
-/// Thrown by [TimelineImportService.preview] when this exact file has
+/// Thrown by [TimelineImportService.commit] when this exact file has
 /// already been imported (`imports.file_hash` hit). Carries the previous
 /// record so the screen can offer "Undo that import".
+///
+/// [TimelineImportService.preview] deliberately does NOT throw it: the
+/// dry run still parses the file and reports
+/// [ImportPreview.alreadyImported], so the user can see what the export
+/// actually contained (per year) even for a file they cannot re-import.
 class AlreadyImportedException implements Exception {
   const AlreadyImportedException(this.record);
   final ImportRecord record;
@@ -102,6 +107,9 @@ class ImportPreview {
     required this.projection,
     required this.counts,
     required this.frequentPlaces,
+    this.byYear = const <ImportYearRow>[],
+    this.fileRange,
+    this.alreadyImported,
   });
 
   final String path;
@@ -111,6 +119,21 @@ class ImportPreview {
   final ImportProjection projection;
   final ImportCounts counts;
   final List<ImportFrequentPlace> frequentPlaces;
+
+  /// Per-year audit of the file, newest year first: what the export
+  /// contained, what thinning kept, what the dedupe skipped. This is how
+  /// "I don't see 2024" gets answered without guessing.
+  final List<ImportYearRow> byYear;
+
+  /// First/last candidate in the whole file, before thinning — distinct
+  /// from [ImportProjection]'s range, which covers the *kept* rows only.
+  /// Null when the file produced no candidates at all.
+  final ({int firstUtcMs, int lastUtcMs})? fileRange;
+
+  /// The previous import of this exact file (`imports.file_hash` hit),
+  /// or null when it is new. Non-null previews are read-only:
+  /// [TimelineImportService.commit] refuses them.
+  final ImportRecord? alreadyImported;
 }
 
 /// Outcome of [TimelineImportService.commit].
@@ -178,6 +201,9 @@ class TimelineImportService {
   String _hash = '';
   ImportPreset _preset = ImportPreset.normal;
 
+  /// The `imports` row matching the file being previewed, if any.
+  ImportRecord? _alreadyImported;
+
   int? _importId;
   int _inserted = 0;
   int _expectedRows = 0;
@@ -191,12 +217,18 @@ class TimelineImportService {
 
   // --- public API --------------------------------------------------------
 
-  /// Dry-run: hash the file, refuse a re-import, then parse + thin +
-  /// dedupe it in the worker and report what would happen.
+  /// Dry-run: hash the file, then parse + thin + dedupe it in the worker
+  /// and report what would happen.
   ///
-  /// Throws [AlreadyImportedException] when this file's hash is already
-  /// in `imports`, and [ImportException] for anything else (unreadable
-  /// file, malformed document, cancel).
+  /// A file that has already been imported is still parsed and still
+  /// previewed — [ImportPreview.alreadyImported] carries the previous
+  /// record and [commit] is the step that refuses it. The preview is the
+  /// only place the user can see what an export contained per year, and
+  /// that question ("why is 2024 missing?") is usually asked about a
+  /// file that is already in.
+  ///
+  /// Throws [ImportException] for anything else (unreadable file,
+  /// malformed document, cancel).
   Future<ImportPreview> preview(
     String path,
     ImportPreset preset, {
@@ -213,8 +245,7 @@ class TimelineImportService {
       throw ImportException(
           'Could not read the file: ${e.osError?.message ?? e.message}');
     }
-    final previous = await _imports.byHash(hash);
-    if (previous != null) throw AlreadyImportedException(previous);
+    _alreadyImported = await _imports.byHash(hash);
 
     final worker = await _ensureWorker();
     _path = path;
@@ -234,6 +265,10 @@ class TimelineImportService {
 
   /// Writes the previewed rows. All-or-nothing: on cancel or failure the
   /// rows and the bookkeeping record are removed again.
+  ///
+  /// Throws [AlreadyImportedException] when the preview came from a file
+  /// Trail has already imported — the re-import guard lives here now
+  /// that [preview] answers instead of refusing.
   Future<ImportResult> commit(
     ImportPreview preview, {
     void Function(ImportProgress)? onProgress,
@@ -242,6 +277,8 @@ class TimelineImportService {
     if (_commitCompleter != null) {
       throw const ImportException('An import is already running');
     }
+    final already = preview.alreadyImported;
+    if (already != null) throw AlreadyImportedException(already);
     final worker = await _ensureWorker();
     final int importId;
     try {
@@ -396,6 +433,9 @@ class TimelineImportService {
         tsMaxUtcMs: (projection['tsMax'] as num?)?.toInt(),
       ),
       counts: _countsFrom(raw['counts']) ?? ImportCounts(),
+      byYear: _yearsFrom(raw['byYear']),
+      fileRange: _rangeFrom(raw['fileTsMin'], raw['fileTsMax']),
+      alreadyImported: _alreadyImported,
       frequentPlaces: <ImportFrequentPlace>[
         for (final place in (raw['frequentPlaces'] as List? ?? const []))
           if (place is Map)
@@ -565,6 +605,33 @@ class TimelineImportService {
         error: message,
       ));
     }
+  }
+
+  /// `byYear` rows from the worker: `[year, inFile, kept, duplicates,
+  /// path, visits, activities, raw, firstMs, lastMs]`.
+  List<ImportYearRow> _yearsFrom(Object? raw) {
+    if (raw is! List) return const <ImportYearRow>[];
+    return <ImportYearRow>[
+      for (final row in raw)
+        if (row is List && row.length >= 10)
+          ImportYearRow(
+            year: (row[0] as num).toInt(),
+            candidatesInFile: (row[1] as num).toInt(),
+            keptAfterThinning: (row[2] as num).toInt(),
+            skippedAsDuplicate: (row[3] as num).toInt(),
+            pathPoints: (row[4] as num).toInt(),
+            visits: (row[5] as num).toInt(),
+            activities: (row[6] as num).toInt(),
+            rawPositions: (row[7] as num).toInt(),
+            firstTsUtcMs: (row[8] as num).toInt(),
+            lastTsUtcMs: (row[9] as num).toInt(),
+          ),
+    ];
+  }
+
+  ({int firstUtcMs, int lastUtcMs})? _rangeFrom(Object? min, Object? max) {
+    if (min is! num || max is! num) return null;
+    return (firstUtcMs: min.toInt(), lastUtcMs: max.toInt());
   }
 
   ImportCounts? _countsFrom(Object? raw) {

@@ -643,6 +643,78 @@ void main() {
     });
   });
 
+  group('yearBreakdown', () {
+    // kBaseTs is 2023-11-14; +60 days lands in mid-January 2024, far
+    // enough from either New Year to be the same calendar year in every
+    // host time zone.
+    int days(int d) => mins(d * 24 * 60);
+
+    test('splits the same pipeline the worker runs, year by year', () {
+      final candidates = [
+        path(0),
+        path(mins(20), metres: 500),
+        path(days(60)),
+        path(days(60) + mins(20), metres: 500),
+      ];
+      final existing = [fix(days(60) + secs(20), metres: 3)];
+
+      final thinned = thinCandidates(candidates, ImportPreset.normal);
+      final deduped = dedupeAgainstExisting(thinned, existing);
+      final rows = yearBreakdown(
+        candidates: candidates,
+        keptBeforeDedupe: thinned,
+        kept: deduped.kept,
+      );
+
+      expect(rows.map((r) => r.year).toList(), <int>[2024, 2023]);
+      expect(rows.first.candidatesInFile, 2);
+      expect(rows.first.keptAfterThinning, 1);
+      expect(rows.first.skippedAsDuplicate, 1);
+      expect(rows.last.candidatesInFile, 2);
+      expect(rows.last.keptAfterThinning, 2);
+      expect(rows.last.skippedAsDuplicate, 0);
+    });
+
+    test('the per-year totals add up to the projection', () {
+      final candidates = [
+        path(0),
+        raw(secs(30)), // groups with the first point
+        visit(mins(30)),
+        visit(mins(90), end: true),
+        path(days(200), metres: 900),
+        activity(days(200) + mins(30), end: true),
+      ];
+      final existing = [fix(mins(30) + secs(10), metres: 5)];
+
+      final thinned = thinCandidates(candidates, ImportPreset.normal);
+      final deduped = dedupeAgainstExisting(thinned, existing);
+      final rows = yearBreakdown(
+        candidates: candidates,
+        keptBeforeDedupe: thinned,
+        kept: deduped.kept,
+      );
+      final projection =
+          projectImport(candidates, ImportPreset.normal, existing);
+
+      var inFile = 0;
+      var kept = 0;
+      var duplicates = 0;
+      for (final row in rows) {
+        inFile += row.candidatesInFile;
+        kept += row.keptAfterThinning;
+        duplicates += row.skippedAsDuplicate;
+        expect(
+          row.pathPoints + row.visits + row.activities + row.rawPositions,
+          row.candidatesInFile,
+          reason: 'kinds must add up for ${row.year}',
+        );
+      }
+      expect(inFile, projection.candidates);
+      expect(kept, projection.kept);
+      expect(duplicates, projection.duplicates);
+    });
+  });
+
   group('performance', () {
     test('200 000 candidates thin and dedupe in under 1.5 s', () {
       final rnd = math.Random(7);
