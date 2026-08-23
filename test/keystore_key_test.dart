@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:trail/db/keystore_key.dart';
 import 'package:trail/services/passphrase_service.dart';
 
@@ -62,9 +63,14 @@ void main() {
       const MethodChannel(_channelName),
       fake.handle,
     );
+    // Default every test to "no DB on disk" — the production probe goes
+    // through path_provider, which is unavailable here. Individual tests
+    // override it to exercise the guard.
+    KeystoreKey.setDbFileExistsForTest(() async => false);
   });
 
   tearDown(() {
+    KeystoreKey.setDbFileExistsForTest(null);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
       const MethodChannel(_channelName),
@@ -285,6 +291,100 @@ void main() {
       expect(result, isNotNull);
       expect(result, isNotEmpty);
       expect(fake.current(), result);
+    });
+  });
+
+  group('KeystoreKey.getOrCreate — DB-present guard', () {
+    // The data-safety net for the flutter_secure_storage 9 → 10 → 11
+    // migration: if the store comes back empty but trail.db is still on
+    // disk, minting a fresh random key would make the user's whole log
+    // permanently unreadable AND hide that anything went wrong.
+    late Directory tempDir;
+    late File dbFile;
+
+    setUp(() async {
+      tempDir = await Directory.systemTemp.createTemp('trail_keystore_dbfile_');
+      dbFile = File(p.join(tempDir.path, 'trail.db'));
+      KeystoreKey.setDbFileExistsForTest(() => dbFile.exists());
+    });
+
+    tearDown(() async {
+      if (tempDir.existsSync()) await tempDir.delete(recursive: true);
+    });
+
+    test('fresh install (no DB file) still creates a key', () async {
+      expect(dbFile.existsSync(), isFalse);
+      final key = await KeystoreKey.getOrCreate();
+      expect(key, isNotNull);
+      expect(fake.current(), key);
+    });
+
+    test('DB present + empty storage throws KeyMissingException', () async {
+      await dbFile.writeAsString('not really SQLCipher, but it exists');
+      await expectLater(
+        KeystoreKey.getOrCreate(),
+        throwsA(isA<KeyMissingException>()),
+      );
+    });
+
+    test('DB present + empty storage writes NOTHING', () async {
+      await dbFile.writeAsString('x');
+      await expectLater(
+        KeystoreKey.getOrCreate(),
+        throwsA(isA<KeyMissingException>()),
+      );
+      expect(fake.calls.any((c) => c.method == 'write'), isFalse,
+          reason: 'a mint here would orphan the log forever');
+      expect(fake.calls.any((c) => c.method == 'delete'), isFalse);
+      expect(fake.current(), isNull);
+      expect(dbFile.existsSync(), isTrue, reason: 'the log is never touched');
+    });
+
+    test('DB present + key stored returns the key, no throw', () async {
+      await dbFile.writeAsString('x');
+      fake.preset('the-real-key');
+      expect(await KeystoreKey.getOrCreate(), 'the-real-key');
+    });
+
+    test('DB present + salt file keeps the passphrase null path (no throw)',
+        () async {
+      // Passphrase mode is checked BEFORE the DB guard: there the user
+      // has a real way back in, so /unlock wins over /recover.
+      await dbFile.writeAsString('x');
+      PassphraseService.setSaltDirForTest(tempDir);
+      addTearDown(() => PassphraseService.setSaltDirForTest(null));
+      await PassphraseService.generateAndPersistSalt();
+      expect(await KeystoreKey.getOrCreate(), isNull);
+      expect(fake.calls.any((c) => c.method == 'write'), isFalse);
+    });
+
+    test('after the DB is set aside, creation is allowed again', () async {
+      await dbFile.writeAsString('x');
+      await expectLater(
+        KeystoreKey.getOrCreate(),
+        throwsA(isA<KeyMissingException>()),
+      );
+      await dbFile.rename(p.join(tempDir.path, 'trail.db.locked-20260822-1435'));
+      final key = await KeystoreKey.getOrCreate();
+      expect(key, isNotNull);
+      expect(fake.current(), key);
+    });
+  });
+
+  group('KeystoreKey.dbFileExists', () {
+    test('reflects the injected probe', () async {
+      KeystoreKey.setDbFileExistsForTest(() async => true);
+      expect(await KeystoreKey.dbFileExists(), isTrue);
+      KeystoreKey.setDbFileExistsForTest(() async => false);
+      expect(await KeystoreKey.dbFileExists(), isFalse);
+    });
+
+    test('null resets to the production probe, which is false off-device',
+        () async {
+      // path_provider is not registered under `flutter test`; the default
+      // probe swallows that and answers "cannot prove a DB exists".
+      KeystoreKey.setDbFileExistsForTest(null);
+      expect(await KeystoreKey.dbFileExists(), isFalse);
     });
   });
 }

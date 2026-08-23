@@ -12,13 +12,15 @@ import 'services/failed_photo_uris.dart';
 import 'services/memory_pressure.dart';
 import 'services/notification_service.dart';
 import 'services/scheduler/workmanager_scheduler.dart';
+import 'services/secure_storage_migration.dart';
 
 /// Entry point for Trail.
 ///
 /// `main` stays on the critical path only for what the router's
 /// `redirect` rule must know synchronously on the very first frame: the
-/// onboarding flag and the post-restore "needs unlock" probe. They run
-/// concurrently via [Future.wait]. Everything else — the WorkManager
+/// onboarding flag and the startup key state ("needs unlock" /
+/// "key missing"). Both futures are started before either is awaited, so
+/// they still overlap. Everything else — the WorkManager
 /// dispatcher registration, the notification channels, the failed-photo
 /// denylist — is deferred to a post-first-frame callback
 /// ([_initDeferredServices]). Before 0.14.1 all five awaits ran serially
@@ -39,18 +41,22 @@ void main() async {
   // CoverageService, which gates on the user's toggles, the network
   // label and its own 10-minute throttle before it does anything.
   WidgetsBinding.instance.addObserver(_coverageResume);
-  // The two router gates, concurrently. `computeNeedsUnlock` detects the
-  // post-restore case: auto-backup has put the encrypted DB + salt back
-  // in place, but the Keystore-bound secure storage is empty (Android
-  // wipes per-app Keystore aliases on uninstall). In that case we must
-  // route to /unlock so the user can re-enter their passphrase rather
-  // than let providers hit PassphraseNeededException one by one.
-  final gates = await Future.wait<bool>([
-    OnboardingGate.isComplete(),
-    computeNeedsUnlock(),
-  ]);
-  final onboarded = gates[0];
-  final needsUnlock = gates[1];
+  // The two router gates, concurrently — still two awaits, no more
+  // (gotcha 30). `computeStartupKeyState` folds the old
+  // `computeNeedsUnlock` probe and the "key is gone entirely" probe into
+  // one pass over the same two reads, so both providers below come from
+  // a single value:
+  //   - needsUnlock: auto-backup has put the encrypted DB + salt back in
+  //     place, but the Keystore-bound secure storage is empty (Android
+  //     wipes per-app Keystore aliases on uninstall) → /unlock.
+  //   - keyMissing: a trail.db exists with neither key nor salt → the
+  //     /recover screen, because minting a fresh key here would orphan
+  //     the user's whole log.
+  // Both beat letting providers hit their exceptions one by one.
+  final onboardedFuture = OnboardingGate.isComplete();
+  final keyStateFuture = computeStartupKeyState();
+  final onboarded = await onboardedFuture;
+  final keyState = await keyStateFuture;
   // Registered *before* `runApp` so it runs right after the first frame
   // is rasterised — ahead of any post-frame callback a screen registers
   // from its own `initState` (the lock screen's auto-unlock, for one).
@@ -61,7 +67,10 @@ void main() async {
     ProviderScope(
       overrides: [
         onboardingCompleteProvider.overrideWith((_) => onboarded),
-        needsUnlockProvider.overrideWith((_) => needsUnlock),
+        needsUnlockProvider
+            .overrideWith((_) => keyState == StartupKeyState.needsUnlock),
+        keyMissingProvider
+            .overrideWith((_) => keyState == StartupKeyState.keyMissing),
       ],
       child: const TrailApp(),
     ),
@@ -85,6 +94,11 @@ void main() async {
 ///     the background worker built up (Phase C). Reads the network
 ///     label, then no-ops unless the feature is on, a server is
 ///     configured, and the connection is one the user allowed.
+///   - [SecureStorageMigration.verifyAndRewrite] re-writes every Trail
+///     secret through `flutter_secure_storage` 10.x's new ciphers and
+///     records the success marker release B will require. Safe to run
+///     alongside the DB open: it only reads and re-writes secure storage,
+///     and writing an identical value back is a no-op for every consumer.
 ///   - [MapLibreMap.preWarm] builds the native renderer's shared
 ///     resources (maplibre_gl 0.27.0) before any map is mounted, so the
 ///     first `/map` visit doesn't pay for it. Fire-and-forget by design;
@@ -97,6 +111,10 @@ void _initDeferredServices() {
   unawaited(_guarded('map detail', _coverageResume.run));
   unawaited(_guarded('notifications', NotificationService.initialize));
   unawaited(_guarded('failed-photo denylist', FailedPhotoUris.preload));
+  unawaited(_guarded(
+    'secure storage migration',
+    () => SecureStorageMigration.verifyAndRewrite(),
+  ));
   unawaited(MapLibreMap.preWarm().catchError((Object e) {
     debugPrint('preWarm failed: $e');
   }));

@@ -17,9 +17,13 @@ android {
 
     defaultConfig {
         applicationId = "com.dazeddingo.trail"
-        // workmanager + flutter_local_notifications + flutter_secure_storage
-        // all need at least API 23 in practice.
-        minSdk = 23
+        // API 24 explicitly. Flutter 3.41+'s MinSdkVersionMigration used to
+        // rewrite the old `23` in the working copy on every build (including
+        // CI), so the shipped APKs were already effectively 24 — the
+        // committed 23 was nominal and only ever caused diff noise.
+        // flutter_secure_storage 11 (release B of the 9 → 10 → 11 migration)
+        // makes 24 a hard floor anyway.
+        minSdk = 24
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -55,7 +59,7 @@ android {
 
 dependencies {
     // flutter_local_notifications uses java.time APIs — core library
-    // desugaring lets them work on minSdk 23.
+    // desugaring lets them work below API 26.
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.2")
 
     // androidx.work is no longer exported transitively by workmanager 0.9.x

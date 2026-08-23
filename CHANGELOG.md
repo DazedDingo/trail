@@ -4,6 +4,20 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.17.3+105] — 2026-08-23
+
+### Changed
+- **Secure storage moved to a new cipher — step 1 of 2.** The library that keeps your database key, onboarding flag, panic settings and server tokens (`flutter_secure_storage`) is updated from 9 to 10. On first launch it migrates every secret from the deprecated Jetpack store to the new cipher with crash-safe backup copies, and Trail then verifies each one is readable, re-saves it, and records a marker. **Open the app once after installing this version** — the next update (step 2) can only read the new format and will refuse to start without that marker.
+- Minimum Android version is now 7.0 (API 24) — it effectively already was.
+
+### Added
+- **A guard against losing your log.** Trail will no longer create a fresh database key while an encrypted log already exists on the phone (previously a missing key — after a restore, or a failed storage update — silently produced a new key and an unreadable database). Instead you get a recovery screen: *Try again*, *Use backup passphrase* (if you enabled cloud backup), or *Start a new log*, which moves the old file aside as `trail.db.locked-<date>` rather than deleting it. Diagnostics shows the migration status and any locked-aside logs.
+
+- **Playback up to 4096×** (1024× and 4096× added after 256×) — a million fixes scrub past in about 90 seconds; the speed chip cycles back to 0.25× after 4096×.
+
+### Fixed
+- The new storage library defaults to *wiping all secrets on any decryption error*; Trail explicitly turns that off.
+
 ## [0.17.2+104] — 2026-08-23
 
 ### Changed

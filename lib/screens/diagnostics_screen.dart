@@ -7,6 +7,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../db/database.dart';
 import '../services/scheduler/worker_run_log.dart';
+import '../services/secure_storage_migration.dart';
 import '../widgets/help_button.dart';
 
 /// Deep-diagnostics surface — not linked from the home screen, only
@@ -19,10 +20,16 @@ import '../widgets/help_button.dart';
 ///   2. **DB integrity check** — `PRAGMA integrity_check` run against
 ///      the encrypted DB. Button-gated because it can take several
 ///      seconds on a busy trail.
-///   3. **Worker run log** — last 20 WorkManager dispatcher runs with
+///   3. **Secure storage** — whether the `flutter_secure_storage` 10.x
+///      rewrite has been verified on this device, and how many of the
+///      known secrets it found (see `secure_storage_migration.dart`).
+///   4. **Locked-aside logs** — any `trail.db.locked-*` file left by the
+///      `/recover` screen's "Start a new log", with its size. Only shown
+///      when at least one exists.
+///   5. **Worker run log** — last 20 WorkManager dispatcher runs with
 ///      task, outcome, and note. Mirrors the exact-alarm events on the
 ///      Settings screen but for the WorkManager pipeline.
-///   4. **Copy all** — bundles every signal into one blob for pasting
+///   6. **Copy all** — bundles every signal into one blob for pasting
 ///      into a bug report.
 class DiagnosticsScreen extends ConsumerStatefulWidget {
   const DiagnosticsScreen({super.key});
@@ -36,6 +43,8 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
     with WidgetsBindingObserver {
   Map<String, PermissionStatus> _perms = const {};
   List<WorkerRun> _runs = const [];
+  String _secureStorageLine = SecureStorageMigration.describeMarker(null);
+  List<LockedLog> _lockedLogs = const [];
   bool _loading = true;
   String? _integrityResult;
   bool _integrityRunning = false;
@@ -68,6 +77,8 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
       Permission.notification.status,
       Permission.scheduleExactAlarm.status,
       WorkerRunLog.recent(),
+      SecureStorageMigration.readMarker(),
+      TrailDatabase.lockedAsideLogs(),
     ]);
     if (!mounted) return;
     setState(() {
@@ -79,6 +90,10 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
         'Exact alarms': results[4] as PermissionStatus,
       };
       _runs = results[5] as List<WorkerRun>;
+      _secureStorageLine = SecureStorageMigration.describeMarker(
+        results[6] as MigrationMarker?,
+      );
+      _lockedLogs = results[7] as List<LockedLog>;
       _loading = false;
     });
   }
@@ -118,6 +133,18 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
     buf
       ..writeln('')
       ..writeln('DB integrity: ${_integrityResult ?? "not run"}')
+      ..writeln('')
+      ..writeln(_secureStorageLine)
+      ..writeln('')
+      ..writeln('Locked-aside logs:');
+    if (_lockedLogs.isEmpty) {
+      buf.writeln('  (none)');
+    } else {
+      for (final log in _lockedLogs) {
+        buf.writeln('  ${log.name} · ${_formatBytes(log.bytes)}');
+      }
+    }
+    buf
       ..writeln('')
       ..writeln('Worker runs (newest first):');
     if (_runs.isEmpty) {
@@ -227,6 +254,29 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
                   onTap: _integrityRunning ? null : _runIntegrity,
                 ),
                 const Divider(),
+                const _SectionHeader('Secure storage'),
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.vpn_key_outlined),
+                  title: Text(_secureStorageLine),
+                  subtitle: const Text(
+                    'Trail re-writes every stored secret through the '
+                    'current cipher after the first frame; this line is '
+                    'the record that it succeeded.',
+                  ),
+                ),
+                if (_lockedLogs.isNotEmpty) ...[
+                  const Divider(),
+                  const _SectionHeader('Locked-aside logs'),
+                  for (final log in _lockedLogs)
+                    ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.lock_outline),
+                      title: Text(log.name),
+                      trailing: Text(_formatBytes(log.bytes)),
+                    ),
+                ],
+                const Divider(),
                 const _SectionHeader('Worker runs (last 20)'),
                 if (_runs.isEmpty)
                   const Padding(
@@ -243,6 +293,16 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
               ],
             ),
     );
+  }
+
+  /// `1.2 MB`, binary units, one decimal above KB. Local to diagnostics —
+  /// nothing else in the app renders file sizes yet.
+  static String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 
   String _label(PermissionStatus s) {

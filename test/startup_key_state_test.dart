@@ -1,0 +1,168 @@
+import 'dart:io';
+
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:trail/db/keystore_key.dart';
+import 'package:trail/providers/backup_provider.dart';
+import 'package:trail/services/passphrase_service.dart';
+
+/// `computeStartupKeyState` is the one probe `main()` runs before the
+/// first frame; the router turns its answer into `/lock`, `/unlock` or
+/// `/recover`. Getting it wrong either locks a healthy user out or —
+/// worse — lets `KeystoreKey.getOrCreate` mint a key over a log it can
+/// no longer read.
+///
+/// Same MethodChannel fake as `keystore_key_test.dart`.
+const _channelName = 'plugins.it_nomads.com/flutter_secure_storage';
+const _storageKey = 'trail_db_passphrase_v1';
+
+class _FakeSecureStorage {
+  final Map<String, String> _store = {};
+
+  Future<Object?> handle(MethodCall call) async {
+    final args = (call.arguments as Map?)?.cast<String, Object?>() ?? const {};
+    final key = args['key'] as String?;
+    switch (call.method) {
+      case 'read':
+        return _store[key];
+      case 'write':
+        _store[key!] = args['value'] as String;
+        return null;
+      case 'delete':
+        _store.remove(key);
+        return null;
+      case 'containsKey':
+        return _store.containsKey(key);
+      case 'readAll':
+        return Map<String, String>.from(_store);
+      case 'deleteAll':
+        _store.clear();
+        return null;
+      default:
+        return null;
+    }
+  }
+
+  void presetKey(String value) => _store[_storageKey] = value;
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late _FakeSecureStorage fake;
+  late Directory tempDir;
+  late File dbFile;
+
+  setUp(() async {
+    fake = _FakeSecureStorage();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      const MethodChannel(_channelName),
+      fake.handle,
+    );
+    tempDir = await Directory.systemTemp.createTemp('trail_startup_key_');
+    dbFile = File('${tempDir.path}/trail.db');
+    PassphraseService.setSaltDirForTest(tempDir);
+    KeystoreKey.setDbFileExistsForTest(() => dbFile.exists());
+  });
+
+  tearDown(() async {
+    KeystoreKey.setDbFileExistsForTest(null);
+    PassphraseService.setSaltDirForTest(null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      const MethodChannel(_channelName),
+      null,
+    );
+    if (tempDir.existsSync()) await tempDir.delete(recursive: true);
+  });
+
+  group('computeStartupKeyState', () {
+    test('fresh install (nothing anywhere) → ok', () async {
+      expect(await computeStartupKeyState(), StartupKeyState.ok);
+    });
+
+    test('key stored, no DB yet → ok', () async {
+      fake.presetKey('k');
+      expect(await computeStartupKeyState(), StartupKeyState.ok);
+    });
+
+    test('key stored + DB on disk → ok (the normal launch)', () async {
+      fake.presetKey('k');
+      await dbFile.writeAsString('db');
+      expect(await computeStartupKeyState(), StartupKeyState.ok);
+    });
+
+    test('key stored + salt present → ok, never asks for the passphrase',
+        () async {
+      fake.presetKey('derived');
+      await PassphraseService.generateAndPersistSalt();
+      await dbFile.writeAsString('db');
+      expect(await computeStartupKeyState(), StartupKeyState.ok);
+    });
+
+    test('salt present + no key → needsUnlock (auto-backup restore)',
+        () async {
+      await PassphraseService.generateAndPersistSalt();
+      await dbFile.writeAsString('db');
+      expect(await computeStartupKeyState(), StartupKeyState.needsUnlock);
+    });
+
+    test('salt present + no key + no DB yet → still needsUnlock', () async {
+      // Salt restored ahead of the DB: the user must supply the
+      // passphrase before anything creates a DB with a random key.
+      await PassphraseService.generateAndPersistSalt();
+      expect(await computeStartupKeyState(), StartupKeyState.needsUnlock);
+    });
+
+    test('DB present, no key, no salt → keyMissing', () async {
+      await dbFile.writeAsString('db');
+      expect(await computeStartupKeyState(), StartupKeyState.keyMissing);
+    });
+
+    test('empty-string key is treated as no key → keyMissing', () async {
+      fake.presetKey('');
+      await dbFile.writeAsString('db');
+      expect(await computeStartupKeyState(), StartupKeyState.keyMissing);
+    });
+
+    test('probing never creates a key or a DB', () async {
+      await dbFile.writeAsString('db');
+      await computeStartupKeyState();
+      expect(fake._store, isEmpty);
+      expect(await dbFile.readAsString(), 'db');
+    });
+
+    test('after the DB is set aside, the state goes back to ok', () async {
+      await dbFile.writeAsString('db');
+      expect(await computeStartupKeyState(), StartupKeyState.keyMissing);
+      await dbFile.rename('${tempDir.path}/trail.db.locked-20260822-1435');
+      expect(await computeStartupKeyState(), StartupKeyState.ok);
+    });
+  });
+
+  group('computeNeedsUnlock is unchanged', () {
+    test('false with no salt, whatever else is on disk', () async {
+      await dbFile.writeAsString('db');
+      expect(await computeNeedsUnlock(), isFalse);
+    });
+
+    test('true with a salt and no key', () async {
+      await PassphraseService.generateAndPersistSalt();
+      expect(await computeNeedsUnlock(), isTrue);
+    });
+
+    test('false with a salt and a key', () async {
+      await PassphraseService.generateAndPersistSalt();
+      fake.presetKey('derived');
+      expect(await computeNeedsUnlock(), isFalse);
+    });
+
+    test('agrees with computeStartupKeyState on the needsUnlock arm',
+        () async {
+      await PassphraseService.generateAndPersistSalt();
+      expect(await computeNeedsUnlock(), isTrue);
+      expect(await computeStartupKeyState(), StartupKeyState.needsUnlock);
+    });
+  });
+}

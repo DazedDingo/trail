@@ -45,7 +45,7 @@ class MapScreen extends ConsumerWidget {
                 body:
                     'Drag the slider to scrub through history; the trail '
                     'redraws live. Play / Pause auto-advances at 0.25× → '
-                    '256× speeds. The HUD top-left shows the current and '
+                    '4096× speeds. The HUD top-left shows the current and '
                     'previous fix timestamps with the gap between them.',
               ),
               HelpSection(

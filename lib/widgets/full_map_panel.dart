@@ -1332,7 +1332,8 @@ class _MapHostState extends State<_MapHost> {
 ///
 /// 64× and 256× were added once Google Timeline imports put years of
 /// fixes behind one slider — at 16× a 50 000-pin trail still takes half
-/// an hour to play. Above ~10× the timer interval is pinned to
+/// an hour to play. 1024× and 4096× followed for the same reason at an
+/// even larger scale. Above ~10× the timer interval is pinned to
 /// [playbackInterval]'s 33 ms floor, so the extra speed comes from
 /// [playbackStepsPerTick] advancing several indices per tick rather
 /// than from a faster timer (the earlier cycle changed the label and
@@ -1347,12 +1348,14 @@ const List<double> kPlaybackSpeeds = [
   16.0,
   64.0,
   256.0,
+  1024.0,
+  4096.0,
 ];
 
 /// Returns the next speed in [kPlaybackSpeeds] after [current], wrapping
-/// past 256× back to 0.25×. Tolerates a [current] that isn't in the cycle
-/// (e.g. a persisted value from a future build with more speeds) by
-/// snapping to the closest cycle entry first.
+/// past 4096× back to 0.25×. Tolerates a [current] that isn't in the
+/// cycle (e.g. a persisted value from a future build with more speeds)
+/// by snapping to the closest cycle entry first.
 double nextPlaybackSpeed(double current) {
   var bestIdx = 0;
   var bestDelta = double.infinity;

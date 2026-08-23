@@ -1,13 +1,31 @@
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:trail/services/map/pin_geojson.dart';
 import 'package:trail/widgets/full_map_panel.dart';
 
 void main() {
   group('kPlaybackSpeeds', () {
     test(
-        'exposes the 0.25, 0.5, 1, 2, 4, 8, 16, 64, 256 cycle in '
-        'slow→fast order', () {
-      expect(kPlaybackSpeeds,
-          [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 64.0, 256.0]);
+        'exposes the 0.25, 0.5, 1, 2, 4, 8, 16, 64, 256, 1024, 4096 cycle '
+        'in slow→fast order', () {
+      expect(kPlaybackSpeeds, [
+        0.25,
+        0.5,
+        1.0,
+        2.0,
+        4.0,
+        8.0,
+        16.0,
+        64.0,
+        256.0,
+        1024.0,
+        4096.0,
+      ]);
+    });
+
+    test('cycle holds exactly 11 entries', () {
+      expect(kPlaybackSpeeds.length, 11);
     });
 
     test('is strictly ascending', () {
@@ -27,10 +45,12 @@ void main() {
       expect(nextPlaybackSpeed(8.0), 16.0);
       expect(nextPlaybackSpeed(16.0), 64.0);
       expect(nextPlaybackSpeed(64.0), 256.0);
+      expect(nextPlaybackSpeed(256.0), 1024.0);
+      expect(nextPlaybackSpeed(1024.0), 4096.0);
     });
 
-    test('wraps past 256× back to 0.25×', () {
-      expect(nextPlaybackSpeed(256.0), 0.25);
+    test('wraps past 4096× back to 0.25×', () {
+      expect(nextPlaybackSpeed(4096.0), 0.25);
     });
 
     test('snaps off-cycle inputs to the closest cycle entry first', () {
@@ -40,8 +60,10 @@ void main() {
       expect(nextPlaybackSpeed(14.0), 64.0);
       // Equidistant between 8 and 16 → first-match wins (8) → next is 16
       expect(nextPlaybackSpeed(12.0), 16.0);
-      // Beyond the new top of the cycle → snaps to 256 → wraps
-      expect(nextPlaybackSpeed(1000.0), 0.25);
+      // 700 is closer to 1024 than to 256 → next is 4096
+      expect(nextPlaybackSpeed(700.0), 4096.0);
+      // Beyond the new top of the cycle → snaps to 4096 → wraps
+      expect(nextPlaybackSpeed(1000000.0), 0.25);
     });
 
     test('one full lap of the cycle returns to the slowest speed', () {
@@ -128,6 +150,16 @@ void main() {
       expect(playbackStepsPerTick(baseStep, 256.0), 24);
     });
 
+    test('1024× advances 97 fixes per tick (≈ 2939 fixes/s)', () {
+      // 350 / 1024 = 0.3418 ms → 33 / 0.3418 = 96.55 → 97.
+      expect(playbackStepsPerTick(baseStep, 1024.0), 97);
+    });
+
+    test('4096× advances 386 fixes per tick (≈ 11 697 fixes/s)', () {
+      // 350 / 4096 = 0.0854 ms → 33 / 0.0854 = 386.19 → 386.
+      expect(playbackStepsPerTick(baseStep, 4096.0), 386);
+    });
+
     test('faster speeds never advance fewer fixes than slower ones', () {
       var previous = 0;
       for (final s in kPlaybackSpeeds) {
@@ -209,6 +241,20 @@ void main() {
       expect(p.interval, const Duration(milliseconds: 33));
     });
 
+    test('1024× — 97 steps every 33 ms', () {
+      // 97 × 350 / 1024 = 33.15 → 33 ms.
+      final p = playbackTickPlan(baseStep, 1024.0);
+      expect(p.steps, 97);
+      expect(p.interval, const Duration(milliseconds: 33));
+    });
+
+    test('4096× — 386 steps every 33 ms', () {
+      // 386 × 350 / 4096 = 32.98 → 33 ms.
+      final p = playbackTickPlan(baseStep, 4096.0);
+      expect(p.steps, 386);
+      expect(p.interval, const Duration(milliseconds: 33));
+    });
+
     test('the effective pace is the nominal speed, within 2%', () {
       // One step per base step is 1× by definition: 1000 / 350 fixes/s.
       const unitRate = 1000 / 350;
@@ -271,6 +317,23 @@ void main() {
           (steps: 1, interval: const Duration(milliseconds: 350)));
       expect(playbackTickPlan(Duration.zero, 256.0).steps, 1);
     });
+
+    test(
+        'end-of-list clamp: a 1024×/4096× step size never overshoots or '
+        'skips the final index', () {
+      // `_stepFrom` in the panel wraps exactly this primitive
+      // (`stepIndex`) with `plan.steps` as the delta — a short trail
+      // near the end of playback must land ON the last fix, not run
+      // off the end of the list or skip past it.
+      final ts = Int64List.fromList(List<int>.generate(10, (i) => i * 1000));
+      for (final speed in [1024.0, 4096.0]) {
+        final steps = playbackStepsPerTick(baseStep, speed);
+        expect(stepIndex(ts, ts[5], steps), ts.length - 1, reason: '$speed×');
+        // Already sitting on the last index: clamps in place rather
+        // than throwing or wrapping around to the front.
+        expect(stepIndex(ts, ts.last, steps), ts.length - 1, reason: '$speed×');
+      }
+    });
   });
 
   group('formatPlaybackSpeedLabel', () {
@@ -280,6 +343,8 @@ void main() {
       expect(formatPlaybackSpeedLabel(16.0), '16×');
       expect(formatPlaybackSpeedLabel(64.0), '64×');
       expect(formatPlaybackSpeedLabel(256.0), '256×');
+      expect(formatPlaybackSpeedLabel(1024.0), '1024×');
+      expect(formatPlaybackSpeedLabel(4096.0), '4096×');
     });
 
     test('0.5 renders as 0.5×, not 0.50×', () {

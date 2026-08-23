@@ -1,9 +1,35 @@
+import 'dart:io';
+
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
 import 'keystore_key.dart';
+
+/// One `trail.db.locked-*` file left behind by
+/// [TrailDatabase.setAsideForRecovery], with its size on disk.
+typedef LockedLog = ({String name, int bytes});
+
+/// The name [TrailDatabase.setAsideForRecovery] moves the current DB to:
+/// `trail.db.locked-20260822-1435`. Pure so the naming contract can be
+/// asserted without touching the filesystem (CLAUDE.md gotcha 18); [at]
+/// is used as given (callers pass local time, which is what the user
+/// sees in a file manager).
+String lockedDbName(DateTime at) {
+  String two(int v) => v.toString().padLeft(2, '0');
+  final stamp = '${at.year.toString().padLeft(4, '0')}'
+      '${two(at.month)}${two(at.day)}-${two(at.hour)}${two(at.minute)}';
+  return '${TrailDatabase.dbFileName}.locked-$stamp';
+}
+
+/// Whether [name] is one of the set-aside logs [lockedDbName] produces.
+/// Deliberately does not match the `-wal` / `-shm` siblings — the
+/// diagnostics list shows one line per log, not three.
+bool isLockedDbName(String name) =>
+    name.startsWith('${TrailDatabase.dbFileName}.locked-') &&
+    !name.endsWith('-wal') &&
+    !name.endsWith('-shm');
 
 /// Thrown when the app starts up and the on-disk DB is encrypted with a
 /// passphrase that isn't yet available in this install — i.e. the
@@ -29,7 +55,9 @@ class PassphraseNeededException implements Exception {
 ///    [open]. That isolate cannot share handles with the UI isolate because
 ///    they live in separate Dart VMs.
 class TrailDatabase {
-  static const _fileName = 'trail.db';
+  /// Public so [lockedDbName] / [isLockedDbName] can build and match the
+  /// set-aside names off the one source of truth.
+  static const dbFileName = 'trail.db';
   // v2 (0.12.0): adds `pings.comment` (for the "How is it?" reply-attach
   // flow) and a new `ping_photos` table (for online auto-fetched + user-
   // supplied photos, many-per-ping). Migration is additive; the existing
@@ -65,7 +93,7 @@ class TrailDatabase {
   /// duplicating the path logic.
   static Future<String> dbPath() async {
     final dir = await getApplicationDocumentsDirectory();
-    return p.join(dir.path, _fileName);
+    return p.join(dir.path, dbFileName);
   }
 
   /// Open (or create) the encrypted DB. Caller owns the returned handle and
@@ -75,7 +103,9 @@ class TrailDatabase {
   /// Throws [PassphraseNeededException] when passphrase mode is active
   /// (salt file present) but no key is stored in secure storage yet — i.e.
   /// the auto-backup restore path before the user has re-entered their
-  /// passphrase.
+  /// passphrase. Throws [KeyMissingException] when a DB file exists but
+  /// there is neither a key nor a salt to re-derive one — the recovery
+  /// screen (`/recover`) owns that case.
   static Future<Database> open() async {
     final passphrase = await KeystoreKey.getOrCreate();
     if (passphrase == null) throw const PassphraseNeededException();
@@ -150,6 +180,55 @@ class TrailDatabase {
       // Handle may already be closed, or its open Future may have failed
       // with PassphraseNeededException — either way there's nothing to
       // close and swallowing is safe.
+    }
+  }
+
+  /// Moves the current `trail.db` (and its `-wal` / `-shm` siblings)
+  /// aside as `trail.db.locked-<yyyyMMdd-HHmm>` so [open] is free to
+  /// create a fresh, empty log. **Nothing is deleted** — the encrypted
+  /// bytes stay on the phone, so a user who later recovers their key (or
+  /// hands the file to a developer) can still get the history back.
+  ///
+  /// Returns the new file name, or `null` when there was no DB to move.
+  /// Used by the `/recover` screen's "Start a new log" action; the shared
+  /// handle is dropped first so no open file descriptor survives the
+  /// rename.
+  static Future<String?> setAsideForRecovery({DateTime? now}) async {
+    final path = await dbPath();
+    final file = File(path);
+    if (!await file.exists()) return null;
+    await invalidateShared();
+    final dir = p.dirname(path);
+    final name = lockedDbName(now ?? DateTime.now());
+    await file.rename(p.join(dir, name));
+    for (final suffix in const ['-wal', '-shm']) {
+      final sibling = File('$path$suffix');
+      if (await sibling.exists()) {
+        await sibling.rename(p.join(dir, '$name$suffix'));
+      }
+    }
+    return name;
+  }
+
+  /// The set-aside logs still on disk, newest name first. Surfaced on the
+  /// diagnostics screen so a "Start a new log" recovery never becomes an
+  /// invisible pile of megabytes.
+  static Future<List<LockedLog>> lockedAsideLogs() async {
+    try {
+      final dir = Directory(p.dirname(await dbPath()));
+      if (!await dir.exists()) return const [];
+      final out = <LockedLog>[];
+      await for (final entity in dir.list(followLinks: false)) {
+        if (entity is! File) continue;
+        final name = p.basename(entity.path);
+        if (!isLockedDbName(name)) continue;
+        out.add((name: name, bytes: await entity.length()));
+      }
+      out.sort((a, b) => b.name.compareTo(a.name));
+      return out;
+    } catch (_) {
+      // Diagnostics must never throw on a storage hiccup.
+      return const [];
     }
   }
 
