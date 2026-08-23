@@ -4,6 +4,11 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.17.1+103] — 2026-08-23
+
+### Changed
+- **Build toolchain:** Gradle 9.3.1 and Kotlin 2.3.20 (from 8.14 / 2.2.20). No app changes — this release exists so the new toolchain gets its own build rather than overwriting 0.17.0's files. Android Gradle Plugin stays at 8.11.1 for now: six of the app's plugins still apply the Kotlin plugin themselves, which AGP 9 refuses.
+
 ## [0.17.0+102] — 2026-08-23
 
 ### Added

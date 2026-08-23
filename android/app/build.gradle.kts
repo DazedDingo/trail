@@ -16,10 +16,6 @@ android {
         isCoreLibraryDesugaringEnabled = true
     }
 
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
-    }
-
     defaultConfig {
         applicationId = "com.dazeddingo.trail"
         // workmanager + flutter_local_notifications + flutter_secure_storage
@@ -102,6 +98,12 @@ configurations.all {
             useVersion("13.0.3-pre0")
             because("Trying upstream pre-release before HTTP-server workaround")
         }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
 }
 
