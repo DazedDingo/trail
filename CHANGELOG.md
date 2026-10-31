@@ -4,11 +4,28 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.18.1+114] — 2026-10-31
+
+Housekeeping release: every dependency moves to the newest version that
+does not change an API, after 68 days without an update. Two of them fix
+things that could affect you.
+
+### Fixed
+- **Background pings are more reliable on Android 16.** A scheduled ping could fail about thirty seconds after starting if the phone was slow to boot Trail's background isolate — exactly the conditions a sleeping phone creates. Fixed upstream in the scheduler library.
+- **Map renderer picks up a round of upstream fixes**, including one for crashes while a map is on screen and a fix for a tile being fetched twice after a redirect.
+
+### Changed
+- Updated: the map renderer, scheduler, encrypted-database driver, file picker, sharing, battery, image picker, preferences, path and URL helpers, and the crypto and version-info libraries. No behaviour in Trail changed, and nothing in the app's own code needed editing.
+
+### Note
+- The test-only database driver is deliberately held back. Its new major version stops loading SQLite the way Trail's tests do, which would mean reworking fourteen test files; that is worth doing on its own, not inside a routine update.
+
 ## [0.18.0+113] — 2026-10-31
 
 ### Changed
 - **The storage plugin that broke the app in August is gone for good.** Trail's secrets have lived in its own Keystore-backed store since 0.17.9; the old plugin was kept on for one release so it could hand over anything written by earlier versions. That handover has now happened, so the dependency — and the crypto library it dragged in — is removed. Nothing to do on your side: a phone that has run 0.17.10 already completed the one-time read.
 - **Startup does one less thing before the first screen.** With no old store to consult, the launch path drops a lookup that was allowed up to three seconds per secret, and the last code that could ever re-create the old plugin's keys is gone with it.
+- **The download is 816 KB smaller** (43.7 MB on arm64, down from 44.5 MB) — the removed plugin pulled in Google's Tink crypto library, which had to be exempted from code shrinking wholesale because it resolves classes by name at runtime.
 
 ### Fixed
 - **The "Update needed first" recovery screen no longer sends you down a road that destroys data.** It appeared when Trail could not read its database key, and it advised installing v0.17.3 first. That advice cannot work: an older build has a lower Android version code, so the phone refuses the upgrade and makes you uninstall — which deletes the encrypted log. That diagnosis was only ever about the old storage plugin, so with the plugin gone the case now shows the ordinary recovery screen, including the backup-passphrase option.
