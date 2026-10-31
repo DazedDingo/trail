@@ -4,6 +4,14 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.20.0+116] — 2026-10-31
+
+### Changed
+- **Navigation library brought up to date** (four major versions). None of its breaking changes apply to Trail: its routes are all lower-case so the switch to case-sensitive URLs changes nothing, and it uses neither the nested-shell routing nor the code-generated typed routes that the other changes affect. All 1935 tests pass, including the ones that check the startup gate sends you to the lock screen, the unlock screen or the recovery screen from every possible state.
+
+### Note
+- Navigation is the kind of thing that fails loudly rather than quietly — if a screen did not open, you would see it immediately. Still worth opening a few screens from Settings after installing.
+
 ## [0.19.0+115] — 2026-10-31
 
 First of the bigger library updates — the five whose new major versions
