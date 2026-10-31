@@ -91,9 +91,11 @@ class PingsProvider : ContentProvider() {
         val db = (o as Opened.Ok).db
         try {
             var latest: Long? = null
+            // "Latest" means latest LIVE fix, like PingDao.latestSuccessful():
+            // Timeline imports (source='import') are old breadcrumbs, never "now".
             db.rawQuery(
                 "SELECT MAX(ts_utc) FROM pings WHERE lat IS NOT NULL AND lon IS NOT NULL " +
-                    "AND source != 'no_fix'",
+                    "AND source != 'no_fix' AND source != 'import'",
                 arrayOf<String>(),
             ).use { c -> if (c.moveToFirst() && !c.isNull(0)) latest = c.getLong(0) }
             return statusCursor("ok", "", latest)
@@ -116,6 +118,11 @@ class PingsProvider : ContentProvider() {
         if (o is Opened.Fail) return out
         val db = (o as Opened.Ok).db
         try {
+            // "lat IS NOT NULL AND lon IS NOT NULL" must stay byte-identical to
+            // PingDao.fixPredicate so SQLite can use the partial covering index
+            // idx_pings_ts_fix (implication is proven syntactically — CLAUDE.md
+            // gotcha 28; nothing pins this Kotlin copy, so keep it in sync).
+            // Imports are excluded unless includeImported=1 (gotcha 34).
             val sql = StringBuilder(
                 "SELECT id, ts_utc, lat, lon, accuracy, source FROM pings " +
                     "WHERE lat IS NOT NULL AND lon IS NOT NULL AND source != 'no_fix' " +
@@ -155,7 +162,45 @@ class PingsProvider : ContentProvider() {
 
     // --- Read-only passphrase decrypt (mirrors SecureStore.read) ---------
 
+    /**
+     * Mirrors `KeystoreKey.read()` (lib/db/keystore_key.dart): secure store
+     * first, then Trail's escrow (gotcha 38) when the store is empty OR
+     * throws — the commander's phone opens its log via the escrow since the
+     * August Keystore incident. Both reads are strictly read-only: a missing
+     * alias or a failed decrypt gives up (null / throw ⇒ `locked`), never
+     * generates or deletes anything (gotchas 38–39).
+     */
     private fun readPassphrase(ctx: Context): String? {
+        val primary = try {
+            readFromSecureStore(ctx)
+        } catch (t: Throwable) {
+            null
+        }
+        if (!primary.isNullOrEmpty()) return primary
+        return readFromEscrow(ctx)
+    }
+
+    /** Read path of `KeyEscrowStore.load` (trail_secure_store), minus any generation. */
+    private fun readFromEscrow(ctx: Context): String? {
+        val blob = ctx.getSharedPreferences(ESCROW_PREFS, Context.MODE_PRIVATE)
+            .getString(ESCROW_KEY_BLOB, null) ?: return null
+        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        val key = (ks.getEntry(ESCROW_ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey
+            ?: return null
+        val parts = blob.split(':')
+        if (parts.size != 3 || parts[2] != ESCROW_FORMAT) {
+            throw IllegalStateException("unrecognised escrow blob format")
+        }
+        val iv = Base64.decode(parts[0], Base64.NO_WRAP)
+        val ct = Base64.decode(parts[1], Base64.NO_WRAP)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(TAG_BITS, iv))
+        // KeyEscrow (Dart) stores utf8.encode(key) — decode the same way.
+        val s = String(cipher.doFinal(ct), Charsets.UTF_8)
+        return s.ifEmpty { null }
+    }
+
+    private fun readFromSecureStore(ctx: Context): String? {
         val blob = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(PASSPHRASE_KEY, null) ?: return null
         val raw = Base64.decode(blob, Base64.NO_WRAP)
@@ -195,6 +240,10 @@ class PingsProvider : ContentProvider() {
         private const val PREFS = "trail_secure_store"
         private const val PASSPHRASE_KEY = "trail_db_passphrase_v1"
         private const val ALIAS = "com.dazeddingo.trail.secure_store.v1"
+        private const val ESCROW_PREFS = "trail_key_escrow"
+        private const val ESCROW_KEY_BLOB = "db_key"
+        private const val ESCROW_ALIAS = "com.dazeddingo.trail.db_key_escrow.v1"
+        private const val ESCROW_FORMAT = "v1"
         private const val TAG_BITS = 128
         private const val IV_BYTES = 12
         private const val DEFAULT_LIMIT = 5000

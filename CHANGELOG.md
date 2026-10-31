@@ -4,6 +4,14 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.20.1+117] — 2026-10-31
+
+### Added
+- **Weekend Picker can now see where you've been.** Weekend Picker, the other app, can read your GPS fixes from Trail, so it can tell when you've already visited one of your saved places and stop suggesting it for a while. Only apps signed with the same key as Trail can ask, which in practice means Weekend Picker. It can only *read* positions (time, place, accuracy, and whether a ping was live or imported). It can't change or delete anything, and it never sees your emergency contacts, notes or photos. If Trail is locked, it gets nothing.
+
+### Note
+- Nothing changes inside Trail itself. The new link sits idle until Weekend Picker 0.7.0 starts using it.
+
 ## [0.20.0+116] — 2026-10-31
 
 ### Changed
