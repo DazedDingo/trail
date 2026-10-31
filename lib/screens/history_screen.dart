@@ -140,7 +140,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final years = ref.watch(pingYearsProvider).valueOrNull ?? const <int>[];
+    final years = ref.watch(pingYearsProvider).value ?? const <int>[];
     final showYears = shouldShowYearChips(years, DateTime.now().year);
     return Scaffold(
       appBar: AppBar(

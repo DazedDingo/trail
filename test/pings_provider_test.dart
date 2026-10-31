@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart' show DateTimeRange;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart' show ProviderBase;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:geocoding/geocoding.dart' show Placemark;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -18,6 +19,30 @@ import 'package:trail/services/geocoding_service.dart';
 /// Provider-level wiring for the pings reads. Runs against an in-memory
 /// `sqflite_common_ffi` DB injected through `TrailDatabase.useSharedForTest`
 /// so the real providers (not the DAO) are what's under test.
+///
+/// Riverpod 3 removed `ProviderContainer.getAllProviderElements()`, which
+/// the disposal assertions below used to enumerate what is still alive.
+/// [_LiveProviders] rebuilds that probe from the observer hooks instead —
+/// `didAddProvider` / `didDisposeProvider` are the events the old check was
+/// really standing in for, so this is a more direct test of the same
+/// contract (CLAUDE.md gotcha 29: a range member is released when nothing
+/// watches it, `allPingsProvider` is not, and a resolved geocode label is
+/// kept alive past its last listener).
+final class _LiveProviders extends ProviderObserver {
+  final Set<ProviderBase<Object?>> _live = <ProviderBase<Object?>>{};
+
+  Iterable<ProviderBase<Object?>> get live => _live;
+
+  @override
+  void didAddProvider(ProviderObserverContext context, Object? value) {
+    _live.add(context.provider);
+  }
+
+  @override
+  void didDisposeProvider(ProviderObserverContext context) {
+    _live.remove(context.provider);
+  }
+}
 ///
 /// Same libsqlite3 loader workaround as `ping_dao_test.dart` — must be a
 /// top-level function (CLAUDE.md gotcha 8).
@@ -111,12 +136,14 @@ void main() {
   group('pings providers against an injected shared DB', () {
     late Database db;
     late ProviderContainer container;
+    late _LiveProviders observer;
 
     setUp(() async {
       SharedPreferences.setMockInitialValues({});
       db = await _openMemDb();
       TrailDatabase.useSharedForTest(db);
-      container = ProviderContainer();
+      observer = _LiveProviders();
+      container = ProviderContainer(observers: [observer]);
       final dao = PingDao(db);
       await dao.insert(_fix(DateTime(2026, 1, 1, 12), 51.1));
       await dao.insert(_noFix(DateTime(2026, 1, 1, 16)));
@@ -181,8 +208,7 @@ void main() {
       final sub = container.listen(member, (_, __) {});
       await container.read(member.future);
       await container.read(allPingsProvider.future);
-      Iterable<ProviderBase<Object?>> alive() =>
-          container.getAllProviderElements().map((e) => e.origin);
+      Iterable<ProviderBase<Object?>> alive() => observer.live;
       expect(alive(), contains(member));
 
       sub.close();
@@ -234,19 +260,26 @@ void main() {
   });
 
   group('approxLocationProvider', () {
+    final observers = <ProviderContainer, _LiveProviders>{};
+
     ProviderContainer withLookup(
       Future<List<Placemark>> Function(double, double) lookup,
     ) {
-      final c = ProviderContainer(overrides: [
-        geocodingServiceProvider
-            .overrideWithValue(GeocodingService(lookup: lookup)),
-      ]);
+      final observer = _LiveProviders();
+      final c = ProviderContainer(
+        observers: [observer],
+        overrides: [
+          geocodingServiceProvider
+              .overrideWithValue(GeocodingService(lookup: lookup)),
+        ],
+      );
+      observers[c] = observer;
       addTearDown(c.dispose);
       return c;
     }
 
     Iterable<ProviderBase<Object?>> alive(ProviderContainer c) =>
-        c.getAllProviderElements().map((e) => e.origin);
+        observers[c]!.live;
 
     test('jittered coordinates in one cell are ONE member and one lookup',
         () async {

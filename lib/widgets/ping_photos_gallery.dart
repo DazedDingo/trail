@@ -123,7 +123,7 @@ class _PingPhotosGalleryState extends ConsumerState<PingPhotosGallery> {
   @override
   Widget build(BuildContext context) {
     final async = ref.watch(pingPhotosProvider(widget.pingId));
-    final raw = async.valueOrNull ?? const <PingPhoto>[];
+    final raw = async.value ?? const <PingPhoto>[];
     // Hide tiles whose every candidate URL is denylisted. Uses the
     // same render-aware URL the tile actually paints, so the failure
     // key the error callback registered matches the key we check

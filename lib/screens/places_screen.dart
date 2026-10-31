@@ -50,7 +50,7 @@ class _PlacesScreenState extends ConsumerState<PlacesScreen> {
             for (final p in places)
               p.key: ref
                   .watch(approxLocationProvider(geocodeKey(p.lat, p.lon)))
-                  .valueOrNull,
+                  .value,
           };
           final sorted = sortPlaces(mergeByLabel(places, labels), _sort);
           return Column(

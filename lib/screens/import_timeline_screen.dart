@@ -326,7 +326,7 @@ class _ImportTimelineScreenState extends ConsumerState<ImportTimelineScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final backupOn = ref.watch(backupEnabledProvider).valueOrNull ?? false;
+    final backupOn = ref.watch(backupEnabledProvider).value ?? false;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Import Google Timeline'),

@@ -33,7 +33,7 @@ class StatsScreen extends ConsumerWidget {
     final pingsAsync = ref.watch(allPingsProvider);
     final homeAsync = ref.watch(homeLocationProvider);
     final includeImports =
-        ref.watch(statsIncludeImportsProvider).valueOrNull ?? false;
+        ref.watch(statsIncludeImportsProvider).value ?? false;
 
     return Scaffold(
       appBar: AppBar(

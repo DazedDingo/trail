@@ -36,7 +36,7 @@ class _BboxPickerScreenState extends ConsumerState<BboxPickerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final tileServer = ref.watch(tileServerProvider).valueOrNull;
+    final tileServer = ref.watch(tileServerProvider).value;
     final tileServerPort = tileServer?.port;
 
     if (tileServerPort != _tileServerPort || !_styleRequested) {

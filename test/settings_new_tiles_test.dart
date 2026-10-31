@@ -37,7 +37,7 @@ class _HowIsItProbe extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(howIsItFrequencyProvider);
-    final current = async.valueOrNull ?? HowIsItFrequency.off;
+    final current = async.value ?? HowIsItFrequency.off;
     return ListTile(
       leading: const Icon(Icons.chat_bubble_outline),
       title: const Text('"How is it?" prompts'),
@@ -72,7 +72,7 @@ class _AutoPhotosProbe extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(autoPhotosEnabledProvider);
-    final on = async.valueOrNull ?? true;
+    final on = async.value ?? true;
     return SwitchListTile(
       secondary: const Icon(Icons.image_search_outlined),
       title: const Text('Auto-fetch photos from Wikimedia'),

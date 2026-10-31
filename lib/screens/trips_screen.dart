@@ -21,7 +21,7 @@ class TripsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final trips = ref.watch(tripsProvider);
-    final hasHome = ref.watch(homeLocationProvider).valueOrNull != null;
+    final hasHome = ref.watch(homeLocationProvider).value != null;
     final scheme = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(title: const Text('Trips')),

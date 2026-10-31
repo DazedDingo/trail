@@ -229,17 +229,17 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
   Widget build(BuildContext context) {
     final pingsAsync = ref.watch(pingsByRangeProvider(_dateFilter));
     final served =
-        ref.watch(servedArchivesProvider).valueOrNull ?? const <TilesRegion>[];
+        ref.watch(servedArchivesProvider).value ?? const <TilesRegion>[];
     final sentinelActive = served
         .any((r) => r.path == TilesService.diagnosticRemoteSentinel);
     final tileServerAsync = ref.watch(tileServerProvider);
-    final tileServer = tileServerAsync.valueOrNull;
+    final tileServer = tileServerAsync.value;
     final tileServerPort = tileServer?.port;
     final liveDotState = ref.watch(liveLocationDotEnabledProvider);
     final liveDotOn = liveDotState.asData?.value ?? true;
     // Year chips for the filter panel. Two integers out of the index;
     // an unresolved/failed read just renders the panel without the row.
-    final years = ref.watch(pingYearsProvider).valueOrNull ?? const <int>[];
+    final years = ref.watch(pingYearsProvider).value ?? const <int>[];
 
     // A map exists whenever the loopback is up (one or more archives) or
     // the remote-demo diagnostic is on. The port IS the archive-set
@@ -263,7 +263,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
       _forgetController();
     }
 
-    final pings = pingsAsync.valueOrNull;
+    final pings = pingsAsync.value;
     if (pings != null && !identical(pings, _lastPings)) {
       _lastPings = pings;
       _snap = buildPinSnapshot(pings);
@@ -288,7 +288,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
     if (!mapAvailable && tileServerAsync.isLoading) {
       // The loopback is still binding (cold start, or an archive set
       // that just changed). Don't flash "install an archive" at a user
-      // who has one — `valueOrNull` keeps the previous port across a
+      // who has one — `value` (nullable since Riverpod 3) keeps the previous port across a
       // refresh, so this only ever shows on the very first resolve.
       child = const Center(child: CircularProgressIndicator());
     } else if (!mapAvailable) {
@@ -569,7 +569,7 @@ class _FullMapPanelState extends ConsumerState<FullMapPanel> {
             snap.cols.lats[shownAtBuild - 1], snap.cols.lons[shownAtBuild - 1])
         : const LatLng(54, -2); // GB centroid fallback
     final showLiveDot =
-        ref.watch(liveLocationDotEnabledProvider).valueOrNull ?? true;
+        ref.watch(liveLocationDotEnabledProvider).value ?? true;
 
     return Stack(
       children: [

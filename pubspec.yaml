@@ -1,7 +1,7 @@
 name: trail
 description: "Trail — personal-safety GPS logger. Offline, encrypted, 4h-cadence background pings."
 publish_to: 'none'
-version: 0.20.1+117
+version: 0.21.0+118
 
 environment:
   sdk: ^3.5.0
@@ -11,7 +11,7 @@ dependencies:
     sdk: flutter
 
   # State / routing — match watchnext + groceries-app conventions
-  flutter_riverpod: ^2.5.1
+  flutter_riverpod: ^3.4.3
   go_router: ^18.1.2
 
   # Location + scheduling

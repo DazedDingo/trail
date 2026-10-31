@@ -1,4 +1,6 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart';
 
 import '../db/database.dart';
 import '../db/ping_photo_dao.dart';
@@ -51,8 +53,31 @@ void invalidateAfterPhotoWrite(WidgetRef ref) =>
 /// Same refresh from a teardown path. `State.dispose` runs after the
 /// element is defunct, and `WidgetRef` throws once that happens, so the
 /// caller captures the container in `initState` and passes it here.
-void invalidateAfterPhotoWriteIn(ProviderContainer container) =>
-    _invalidatePhotoReads(container.invalidate);
+///
+/// **Deferred by one microtask, deliberately (Riverpod 3).** `invalidate`
+/// now routes through the scheduler, which calls `setState` on the
+/// enclosing `UncontrolledProviderScope`. `State.dispose` runs inside
+/// `BuildOwner.lockState` (via `finalizeTree`), where marking anything as
+/// needing build throws "setState() or markNeedsBuild() called when
+/// widget tree was locked" — so the pre-3 code that invalidated straight
+/// from `dispose` now blows up on the swipe-away path. A microtask lands
+/// after the lock is released. The container outlives the widget, but not
+/// necessarily the test or the app, hence the [ProviderContainer.disposed]
+/// guard below: invalidating a disposed container throws in Riverpod 3,
+/// and `ProviderContainer.disposed` lives on an `@internal` extension, so
+/// catching is the only guard available through the public API.
+void invalidateAfterPhotoWriteIn(ProviderContainer container) {
+  Future.microtask(() {
+    try {
+      _invalidatePhotoReads(container.invalidate);
+    } catch (e) {
+      // The container was torn down before the microtask ran — app exit,
+      // or a test's tearDown. Nothing is caching photo reads any more, so
+      // there is genuinely nothing to refresh; this is not a swallowed bug.
+      debugPrint('photo read invalidation skipped (container gone): $e');
+    }
+  });
+}
 
 void _invalidatePhotoReads(void Function(ProviderOrFamily) invalidate) {
   invalidate(pingPhotosProvider);

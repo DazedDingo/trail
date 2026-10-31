@@ -102,8 +102,8 @@ class _RegionsScreenState extends ConsumerState<RegionsScreen> {
   Widget build(BuildContext context) {
     final regions = ref.watch(installedRegionsProvider);
     final active = ref.watch(activeRegionProvider);
-    final tileServer = ref.watch(tileServerProvider).valueOrNull;
-    final installed = regions.valueOrNull ?? const <TilesRegion>[];
+    final tileServer = ref.watch(tileServerProvider).value;
+    final installed = regions.value ?? const <TilesRegion>[];
     final coveragePacks =
         installed.where((r) => r.role == TileRole.coverage).length;
 
@@ -228,7 +228,7 @@ class _RegionsScreenState extends ConsumerState<RegionsScreen> {
               error: (err, _) => Center(child: Text('Error: $err')),
               data: (list) {
                 if (list.isEmpty) return const _EmptyState();
-                final activeRegion = active.valueOrNull;
+                final activeRegion = active.value;
                 return ListView.separated(
                   padding: const EdgeInsets.all(16),
                   itemCount: list.length + 1,

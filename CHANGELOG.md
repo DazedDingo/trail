@@ -4,6 +4,25 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.21.0+118] — 2026-10-31
+
+The state-handling library Trail is built on (Riverpod) moves up a major
+version. Almost all of it is invisible, but it changed four behaviours
+underneath, and one of them was a live bug.
+
+### Fixed
+- **Photos now refresh when you swipe the backfill sheet away mid-walk.** The sheet refreshes every cached photo read as it closes, so pins show what the walk just found. Under the new library that refresh ran at a moment Flutter forbids it and threw instead, meaning a swipe-away could leave pins looking unchanged until the next restart — the same symptom as the old "pictures don't display on pins" report. The refresh now waits a beat and lands properly.
+
+### Changed
+- **Failed reads retry themselves now.** If a database or place-name lookup fails transiently, the library retries up to ten times with a widening gap (a fifth of a second, doubling to about six). Genuine programming errors are not retried, so nothing loops forever. Previously a transient failure stayed on screen until something invalidated it.
+- **Repeated identical values no longer wake up the screens watching them.** Harmless on its own and slightly less work, but it is why the slideshow's refresh signal is built the way it is — see the note below.
+
+### Added
+- Two tests pinning the refresh signal the slideshow listens to, because the new update filtering means a seemingly harmless simplification of it would silently stop photos reloading after a backfill, with nothing failing.
+
+### Note
+- No feature behaviour changed and all 1937 tests pass, including the ones that check which cached map data is released and which is kept — the memory behaviour the multi-year map depends on. Worth a look on the phone all the same: open the map over a few years, scroll History, run a photo backfill and swipe it away, and check the slideshow still picks up new photos.
+
 ## [0.20.1+117] — 2026-10-31
 
 ### Added

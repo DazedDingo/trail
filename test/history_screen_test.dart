@@ -24,15 +24,15 @@ Ping _fix(DateTime local, {PingSource source = PingSource.scheduled}) => Ping(
 /// Serves canned pages per year so "Load more" can be exercised without
 /// seeding 200 rows.
 class _FakeYearNotifier extends HistoryYearNotifier {
-  _FakeYearNotifier(this.pagesByYear);
+  _FakeYearNotifier(super.year, this.pagesByYear);
 
   final Map<int, List<List<Ping>>> pagesByYear;
   int _index = 0;
 
   @override
-  Future<HistoryYearPage> build(int arg) async {
+  Future<HistoryYearPage> build() async {
     _index = 0;
-    final pages = pagesByYear[arg] ?? const <List<Ping>>[];
+    final pages = pagesByYear[year] ?? const <List<Ping>>[];
     if (pages.isEmpty) {
       return const HistoryYearPage(pings: [], hasMore: false);
     }
@@ -41,9 +41,9 @@ class _FakeYearNotifier extends HistoryYearNotifier {
 
   @override
   Future<void> loadMore() async {
-    final current = state.valueOrNull;
+    final current = state.value;
     if (current == null || !current.hasMore) return;
-    final pages = pagesByYear[arg]!;
+    final pages = pagesByYear[year]!;
     _index++;
     state = AsyncData(
       HistoryYearPage(
@@ -70,7 +70,10 @@ Future<void> _pump(
         ),
         historyPingsProvider.overrideWith((_) async => recent),
         pingYearsProvider.overrideWith((_) async => years),
-        historyYearProvider.overrideWith(() => _FakeYearNotifier(yearPages)),
+        // `overrideWith2` is Riverpod 3's arg-aware family override;
+        // the old arg-less `overrideWith` is deprecated for class families.
+        historyYearProvider
+            .overrideWith2((year) => _FakeYearNotifier(year, yearPages)),
       ],
       child: const MaterialApp(home: HistoryScreen()),
     ),

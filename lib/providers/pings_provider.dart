@@ -191,15 +191,24 @@ class HistoryYearPage {
 /// `autoDispose`: leaving the screen releases every page the user
 /// scrolled through; coming back re-reads page 1 (which also means a
 /// ping written while away shows up without an explicit invalidate).
-final historyYearProvider = AsyncNotifierProvider.autoDispose
-    .family<HistoryYearNotifier, HistoryYearPage, int>(
+final historyYearProvider =
+    AsyncNotifierProvider.family<HistoryYearNotifier, HistoryYearPage, int>(
   HistoryYearNotifier.new,
+  isAutoDispose: true,
 );
 
-class HistoryYearNotifier
-    extends AutoDisposeFamilyAsyncNotifier<HistoryYearPage, int> {
+/// Riverpod 3 fused the AutoDispose/Family notifier hierarchies into one
+/// [AsyncNotifier]: `isAutoDispose` moves to the provider, `build` takes
+/// no argument, and the family argument arrives through the constructor
+/// (the family's create function is `HistoryYearNotifier Function(int)`).
+/// Hence [year] rather than the old inherited `arg`.
+class HistoryYearNotifier extends AsyncNotifier<HistoryYearPage> {
+  HistoryYearNotifier(this.year);
+
+  final int year;
+
   @override
-  Future<HistoryYearPage> build(int arg) async {
+  Future<HistoryYearPage> build() async {
     final rows = await _fetch(before: null);
     return HistoryYearPage(
       pings: rows,
@@ -209,7 +218,7 @@ class HistoryYearNotifier
 
   Future<List<Ping>> _fetch({required int? before}) async {
     final db = await TrailDatabase.shared();
-    final bounds = historyYearUtcBoundsMs(arg);
+    final bounds = historyYearUtcBoundsMs(year);
     return PingDao(db).pageByRange(
       startUtcMs: bounds.startMs,
       endUtcMs: bounds.endMs,
@@ -221,7 +230,7 @@ class HistoryYearNotifier
   /// Appends the next page. No-op when there is nothing more, when one
   /// is already in flight, or before the first page has resolved.
   Future<void> loadMore() async {
-    final current = state.valueOrNull;
+    final current = state.value;
     if (current == null ||
         !current.hasMore ||
         current.loadingMore ||

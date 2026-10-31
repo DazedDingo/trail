@@ -1332,7 +1332,7 @@ class _HowIsItTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(howIsItFrequencyProvider);
-    final current = async.valueOrNull ?? HowIsItFrequency.off;
+    final current = async.value ?? HowIsItFrequency.off;
     return ListTile(
       leading: const Icon(Icons.chat_bubble_outline),
       title: const Text('"How is it?" prompts'),
@@ -1375,7 +1375,7 @@ class _AutoPhotosTile extends ConsumerWidget {
     final async = ref.watch(autoPhotosEnabledProvider);
     // Default ON — `AutoPhotoService.isEnabled` returns true when the
     // key is absent, so the loading state matches the install default.
-    final on = async.valueOrNull ?? true;
+    final on = async.value ?? true;
     return SwitchListTile(
       secondary: const Icon(Icons.image_search_outlined),
       title: const Text('Auto-fetch photos from Wikimedia'),
@@ -1508,7 +1508,7 @@ class _StatsIncludeImportsTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(statsIncludeImportsProvider);
-    final on = async.valueOrNull ?? false;
+    final on = async.value ?? false;
     return SwitchListTile(
       secondary: const Icon(Icons.history_outlined),
       title: const Text('Include imported history in Stats'),

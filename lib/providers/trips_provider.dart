@@ -12,8 +12,8 @@ import 'pings_provider.dart';
 /// O(n) pass runs in a millisecond). If the cost ever shows up in
 /// profiling, swap to a memo keyed on ping count + home identity.
 final tripsProvider = Provider<List<Trip>>((ref) {
-  final pings = ref.watch(allPingsProvider).valueOrNull;
-  final home = ref.watch(homeLocationProvider).valueOrNull;
+  final pings = ref.watch(allPingsProvider).value;
+  final home = ref.watch(homeLocationProvider).value;
   if (pings == null || home == null) return const [];
   return StatsService.detectTrips(pings, home);
 });
