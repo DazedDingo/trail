@@ -96,6 +96,12 @@ dependencies {
     // needs Trail-specific tooling — the previous TRLENC01 format
     // required a Python decrypt script and was friction.
     implementation("net.lingala.zip4j:zip4j:2.11.5")
+
+    // PingsProvider opens trail.db directly with the SQLCipher Java API.
+    // sqflite_sqlcipher 3.4.1 already pulls these (implementation scope,
+    // hidden from the app module); same versions declared here.
+    implementation("net.zetetic:sqlcipher-android:4.10.0@aar")
+    implementation("androidx.sqlite:sqlite:2.5.2")
 }
 
 // Pin the maplibre-native Android SDK to the latest pre-release on top

@@ -80,6 +80,12 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"
         android:minSdkVersion="33"/>
 
+    <!-- Weekend Picker read access to GPS fixes (PingsProvider). Signature
+         level: only apps signed with Trail's key can be granted it. -->
+    <permission
+        android:name="com.dazeddingo.trail.permission.READ_PINGS"
+        android:protectionLevel="signature"/>
+
     <application
         android:label="Trail"
         android:name="${applicationName}"
@@ -174,6 +180,14 @@
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED"/>
             </intent-filter>
         </receiver>
+
+        <!-- Read-only fixes export for Weekend Picker. exported=true but
+             guarded by the signature readPermission above; writes throw. -->
+        <provider
+            android:name=".PingsProvider"
+            android:authorities="com.dazeddingo.trail.pings"
+            android:exported="true"
+            android:readPermission="com.dazeddingo.trail.permission.READ_PINGS"/>
 
         <meta-data
             android:name="flutterEmbedding"
