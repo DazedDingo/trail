@@ -19,7 +19,23 @@ const startupGateTimeout = Duration(seconds: 15);
 
 /// SharedPreferences key holding the last startup failure, as
 /// `{at, stage, error, stack}`. Read by the diagnostics screen.
+///
+/// Never cleared, deliberately: a failure that happens once is exactly
+/// the one worth keeping, and a successful launch is no evidence the
+/// cause is gone. [staleStartupErrorAfter] is the other half of that
+/// decision.
 const lastStartupErrorKey = 'trail_last_startup_error_v1';
+
+/// How old the [lastStartupErrorKey] record has to be before
+/// [describeLastStartupError] calls it history rather than a live fault.
+///
+/// The price of never clearing the record is a diagnostics line that
+/// reads as current forever. In the 2026-08-23 Keystore incident every
+/// error in the pasted diagnostics turned out to be a stale record from
+/// an APK that had already been replaced, and real time went into
+/// chasing it. A week is the cut: inside it the record is plausibly the
+/// failure being reported, outside it almost never is.
+const staleStartupErrorAfter = Duration(days: 7);
 
 /// SharedPreferences key: `true` when the most recent [runStartupGates]
 /// call failed and has not yet succeeded again.
@@ -334,10 +350,39 @@ LastStartupError? parseLastStartupError(String? raw) {
 }
 
 /// Pure: the diagnostics-screen line for [error].
-String describeLastStartupError(LastStartupError? error) {
+///
+/// A record older than [staleStartupErrorAfter] is labelled stale in
+/// place, with its age — the record is never cleared, so without the
+/// marker a months-old failure from a bug that has since been fixed is
+/// indistinguishable from one that happened this morning. The marker is
+/// part of the string on purpose: the same line goes into the copied
+/// bug report, which is where the misreading happened.
+///
+/// [now] is injectable so the age boundary is unit-testable without
+/// clock games.
+String describeLastStartupError(LastStartupError? error, {DateTime? now}) {
   if (error == null) return 'Last startup error: none';
   final when = _startupErrorDateFormat.format(error.at.toLocal());
-  return 'Last startup error: $when · ${error.stage} · ${error.error}';
+  final line = 'Last startup error: $when · ${error.stage} · ${error.error}';
+  // Negative on a device whose clock has gone backwards — reads as
+  // fresh, which is the safe direction (never hide a live failure).
+  final age = (now ?? DateTime.now()).difference(error.at);
+  if (age < staleStartupErrorAfter) return line;
+  // Keystore text is named explicitly: those lines read as an emergency
+  // and were the ones that misled in the incident.
+  final blame =
+      classifyStartupFailure(error.error) == StartupFailureKind.keystore
+          ? 'probably a Keystore failure from an older version'
+          : 'probably from an older version';
+  return '$line (stale — ${_describeAge(age)} ago, $blame)';
+}
+
+/// `69 days` — a stale record's age, whole days. Nothing finer is
+/// useful: the question the marker answers is "could this be from the
+/// APK I am running?", and the threshold is a week.
+String _describeAge(Duration age) {
+  final days = age.inDays;
+  return days == 1 ? '1 day' : '$days days';
 }
 
 /// Pure: the first [maxLines] frames of [stack] — enough to name the

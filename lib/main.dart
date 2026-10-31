@@ -13,7 +13,6 @@ import 'services/failed_photo_uris.dart';
 import 'services/memory_pressure.dart';
 import 'services/notification_service.dart';
 import 'services/scheduler/workmanager_scheduler.dart';
-import 'services/secure_storage.dart';
 import 'services/secure_storage_migration.dart';
 import 'services/startup_gates.dart';
 
@@ -92,10 +91,6 @@ Future<void> _bootstrap() async {
   //   - keyMissing: a trail.db exists with neither key nor salt → the
   //     /recover screen, because minting a fresh key here would orphan
   //     the user's whole log.
-  //   - notMigrated: the same, plus release A's secure-storage marker is
-  //     absent → the /recover screen's "install 0.17.3 first" variant,
-  //     because flutter_secure_storage 11 cannot read a store the 10.x
-  //     rewrite never touched (it reads back empty, nothing is deleted).
   // Both beat letting providers hit their exceptions one by one.
   final outcome = await runStartupGates();
   if (!outcome.ok) {
@@ -141,7 +136,7 @@ void _onStartupZoneError(Object error, StackTrace stack) {
   _runTrailApp(StartupOutcome.failed(failure));
 }
 
-/// The one `runApp` call. On [StartupOutcome.ready] the four router
+/// The one `runApp` call. On [StartupOutcome.ready] the router
 /// gates come from the probe; on [StartupOutcome.failed]
 /// `startupFailureProvider` is set and `startupRedirect` parks every
 /// route on `/startup-failed`.
@@ -156,8 +151,6 @@ void _runTrailApp(StartupOutcome outcome) {
             .overrideWith((_) => keyState == StartupKeyState.needsUnlock),
         keyMissingProvider
             .overrideWith((_) => keyState == StartupKeyState.keyMissing),
-        notMigratedProvider
-            .overrideWith((_) => keyState == StartupKeyState.notMigrated),
         startupFailureProvider.overrideWith((_) => outcome.failure),
       ],
       child: const TrailApp(),
@@ -182,18 +175,16 @@ void _runTrailApp(StartupOutcome outcome) {
 ///     the background worker built up (Phase C). Reads the network
 ///     label, then no-ops unless the feature is on, a server is
 ///     configured, and the connection is one the user allowed.
-///   - The secure-storage pass, in two steps that must stay in this
-///     order. [MigratingSecureStore.migrateLegacySecrets] lifts any
-///     secret still sitting in `flutter_secure_storage` into Trail's own
-///     store — once per key, best-effort, and then it records
-///     `trail_secure_store_migrated_v1` and the old plugin is never
-///     called again (0.17.9). Only then does
-///     [SecureStorageMigration.verifyAndRewrite] read every key back and
-///     write it down again, which is what keeps the startup gate's marker
-///     in step with what is actually readable. Neither can throw out
-///     here — each key is tried in its own try/catch and a failure only
-///     withholds the marker. Safe to run alongside the DB open: writing
-///     an identical value back is a no-op for every consumer.
+///   - [SecureStorageMigration.verifyAndRewrite] reads every known secret
+///     back out of Trail's own store and writes it straight down again,
+///     which is what keeps the Diagnostics `migrated <date>` marker in
+///     step with what is actually readable. Cannot throw out here — each
+///     key is tried in its own try/catch and a failure only withholds the
+///     marker. Safe to run alongside the DB open: writing an identical
+///     value back is a no-op for every consumer. It used to run second,
+///     after a one-shot pass that lifted each secret out of
+///     `flutter_secure_storage`; that pass and that dependency are gone
+///     now that 0.17.10 has shipped and the migration is done.
 ///   - [MapLibreMap.preWarm] builds the native renderer's shared
 ///     resources (maplibre_gl 0.27.0) before any map is mounted, so the
 ///     first `/map` visit doesn't pay for it. Fire-and-forget by design;
@@ -206,8 +197,7 @@ void _initDeferredServices() {
   unawaited(_guarded('map detail', _coverageResume.run));
   unawaited(_guarded('notifications', NotificationService.initialize));
   unawaited(_guarded('failed-photo denylist', FailedPhotoUris.preload));
-  unawaited(_guarded('secure storage migration', () async {
-    await secureStorage.migrateLegacySecrets();
+  unawaited(_guarded('secure storage verify', () async {
     await SecureStorageMigration.verifyAndRewrite();
   }));
   unawaited(MapLibreMap.preWarm().catchError((Object e) {

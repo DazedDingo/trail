@@ -43,26 +43,6 @@
 -keep,allowobfuscation,allowshrinking class * extends com.google.gson.reflect.TypeToken
 
 # ---------------------------------------------------------------------------
-# flutter_secure_storage -> androidx.security:security-crypto -> Tink
-# ---------------------------------------------------------------------------
-# security-crypto's EncryptedSharedPreferences backs flutter_secure_storage,
-# which stores the panic-passphrase-derived SQLCipher key. Neither the
-# security-crypto AAR nor the tink-android jar ship a proguard.txt/
-# META-INF/proguard/*.pro that protects this: tink-android only bundles a
-# narrow rule for its shaded protobuf classes
-# (META-INF/proguard/protobuf.pro). Tink's KeyTemplates/KeysetHandle
-# machinery resolves proto message types from a `type_url` string embedded
-# in the serialized keyset via reflection, which R8 cannot trace statically.
-# The plugin's own example app works around this by disabling R8 full mode
-# (android.enableR8.fullMode=false in its gradle.properties) instead of
-# adding keep rules; we don't own gradle.properties here, and getting this
-# wrong would silently corrupt the panic-passphrase flow, so keep the
-# whole package instead of chasing individual classes.
--keep class com.google.crypto.tink.** { *; }
--keep interface com.google.crypto.tink.** { *; }
--dontwarn com.google.crypto.tink.**
-
-# ---------------------------------------------------------------------------
 # Our own Kotlin (com.dazeddingo.trail.*)
 # ---------------------------------------------------------------------------
 # All of MainActivity, the plugins (CellWifiPlugin, EncryptedZipPlugin,
@@ -76,3 +56,9 @@
 # and this removes an entire class of "which one of ours got stripped"
 # debugging if a future addition does add reflection.
 -keep class com.dazeddingo.trail.** { *; }
+
+# The local plugin package is a DIFFERENT package (underscore, not dot), so the
+# rule above does not cover it. R8 keeps it today through GeneratedPluginRegistrant's
+# direct `new TrailSecureStorePlugin()`; pin it anyway — this is the Keystore-backed
+# store that holds the SQLCipher key, and losing it bricks the user's whole log.
+-keep class com.dazeddingo.trail_secure_store.** { *; }

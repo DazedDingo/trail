@@ -14,7 +14,6 @@ import 'package:trail/providers/onboarding_provider.dart';
 import 'package:trail/services/key_escrow.dart';
 import 'package:trail/services/passphrase_recovery_service.dart';
 import 'package:trail/services/passphrase_service.dart';
-import 'package:trail/services/secure_storage.dart';
 import 'package:trail/services/secure_storage_migration.dart';
 import 'package:trail/services/secure_storage_rescue.dart';
 import 'package:trail/services/startup_gates.dart';
@@ -27,13 +26,12 @@ import 'package:trail/services/startup_gates.dart';
 /// right key and at a file of garbage for a wrong one, so the "wrong
 /// passphrase" branch is driven by SQLite's genuine `file is not a
 /// database` rather than a hand-written string.
-/// Trail's own store — where the flow re-seeds since 0.17.9.
+/// Trail's own store — where the flow re-seeds since 0.17.9. The old
+/// plugin's store is still what `rescue()` reads out from underneath and
+/// what `setAside()` rebuilds, but the app no longer links the library, so
+/// there is no second channel to fake: the diagnosis now comes from
+/// `KeystoreKey.lastSecureStorageError` and `SecureStorageRescue.status`.
 const _channelName = 'trail/secure_store';
-
-/// The legacy plugin. It is what breaks in the incident, what `rescue()`
-/// reads out from underneath, and what `setAside()` rebuilds; the flow
-/// itself must not touch it before the rescue has had its look.
-const _legacyChannelName = 'plugins.it_nomads.com/flutter_secure_storage';
 
 /// Same libsqlite3 loader workaround as `ping_dao_test.dart` — must be a
 /// top-level function (CLAUDE.md gotcha 8).
@@ -174,7 +172,6 @@ void main() {
   late List<String> events;
   late int secureCallsAtRescue;
   late _FakeSecureStorage secure;
-  late _FakeSecureStorage legacy;
   late _FakeEscrow escrow;
   late _FakeRescue rescue;
   late SharedPreferences prefs;
@@ -220,18 +217,13 @@ void main() {
     events = [];
     secureCallsAtRescue = -1;
     secure = _FakeSecureStorage(events);
-    legacy = _FakeSecureStorage(events);
     rescue = _FakeRescue(
       events,
       // setAside leaves a fresh, working plugin store behind — and
       // clears whatever was wrong with Trail's own store, for the one
       // test that models a write failing after a clean diagnosis.
-      onSetAside: () {
-        legacy.broken = false;
-        secure.broken = false;
-      },
-      onRescue: () =>
-          secureCallsAtRescue = secure.calls.length + legacy.calls.length,
+      onSetAside: () => secure.broken = false,
+      onRescue: () => secureCallsAtRescue = secure.calls.length,
     );
     escrow = _FakeEscrow(events);
     SharedPreferences.setMockInitialValues({});
@@ -241,12 +233,6 @@ void main() {
       const MethodChannel(_channelName),
       secure.handle,
     );
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(
-      const MethodChannel(_legacyChannelName),
-      legacy.handle,
-    );
-    secureStorage.resetForTest();
     KeyEscrow.setInstanceForTest(escrow);
     KeystoreKey.lastSecureStorageError = null;
     KeystoreKey.lastEscrowError = null;
@@ -275,12 +261,6 @@ void main() {
     KeystoreKey.lastReadSource = null;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(const MethodChannel(_channelName), null);
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(
-      const MethodChannel(_legacyChannelName),
-      null,
-    );
-    secureStorage.resetForTest();
     if (tempDir.existsSync()) await tempDir.delete(recursive: true);
   });
 
@@ -358,12 +338,11 @@ void main() {
     });
   });
 
-  group('the right passphrase, a broken plugin — the live incident', () {
+  group('the right passphrase, a broken store — the live incident', () {
     setUp(() {
-      legacy.broken = true;
       // What startup left behind: the onboarding/key read threw this
       // launch. That, not a speculative write, is what tells the flow the
-      // plugin is the broken part.
+      // store is the broken part.
       KeystoreKey.lastSecureStorageError =
           'PlatformException(Exception encountered, Failed to unwrap key)';
     });
@@ -382,14 +361,13 @@ void main() {
               'RSA pair that would orphan it');
     });
 
-    test('the plugin is not touched at all before the rescue reads it',
-        () async {
+    test('no store is written at all before the rescue has read the old '
+        'one', () async {
       await service().unlock(passphrase);
       expect(secureCallsAtRescue, 0,
-          reason: 'createRSAKeysIfNeeded runs on every call; one write '
-              'ahead of the rescue could orphan the wrapped AES key');
-      expect(legacy.calls, isEmpty,
-          reason: 'the flow never reaches for the legacy plugin at all');
+          reason: 'the old plugin ran createRSAKeysIfNeeded on every call, '
+              'so one write ahead of the rescue could orphan the wrapped '
+              'AES key it is about to read');
     });
 
     test('re-persists the DB key and the onboarding flag into the fresh '

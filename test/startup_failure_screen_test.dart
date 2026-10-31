@@ -361,7 +361,6 @@ void main() {
           reason: 'the re-probed flags replace the failed-startup defaults');
       expect(container.read(needsUnlockProvider), isFalse);
       expect(container.read(keyMissingProvider), isFalse);
-      expect(container.read(notMigratedProvider), isFalse);
       expect(find.text('lock stub'), findsOneWidget);
     });
 

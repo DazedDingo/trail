@@ -6,12 +6,15 @@ plugins {
 
 android {
     namespace = "com.dazeddingo.trail"
-    // 37, not `flutter.compileSdkVersion` (36 on Flutter 3.47.1):
-    // flutter_secure_storage 11 sets `compileSdk = 37` and publishes AAR
-    // metadata demanding the same of anything that depends on it, so a 36
-    // app fails `checkAarMetadata` outright. AGP 9.1.0 only *recommends*
-    // 36 (a warning, suppressed below); targetSdk stays on Flutter's
-    // value, so no runtime behaviour changes.
+    // 37, not `flutter.compileSdkVersion` (36 on Flutter 3.47.1). It is
+    // simply the current platform: compiling against the newest SDK is the
+    // normal Android posture, AGP 9.1.0 only *recommends* 36 (a warning,
+    // suppressed in gradle.properties), and targetSdk stays on Flutter's
+    // value so no runtime behaviour changes. Historically this was forced:
+    // flutter_secure_storage 11 set `compileSdk = 37` and published AAR
+    // metadata demanding the same of anything depending on it, so a 36 app
+    // failed `checkAarMetadata` outright. That dependency is gone; 37 stays
+    // because it works and going back buys nothing.
     compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
@@ -27,8 +30,9 @@ android {
         // rewrite the old `23` in the working copy on every build (including
         // CI), so the shipped APKs were already effectively 24 — the
         // committed 23 was nominal and only ever caused diff noise.
-        // flutter_secure_storage 11 (release B of the 9 → 10 → 11 migration)
-        // makes 24 a hard floor anyway.
+        // flutter_secure_storage 11 made 24 a hard floor while it was a
+        // dependency; it is gone now, but 24 is Flutter's own floor and
+        // every shipped APK has been 24 for releases, so it stays.
         minSdk = 24
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode

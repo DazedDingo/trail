@@ -173,6 +173,8 @@ docs/
 
 ## Plugin choices (Flutter 3.x)
 
+> **Historical — this is the original plan, not the shipped manifest.** `pubspec.yaml` is the current truth. Most notably `flutter_secure_storage` is gone: secrets moved to Trail's own `packages/trail_secure_store` in 0.17.9 and the dependency was removed in 0.18.0 (CLAUDE.md gotchas 37–39).
+
 - `geolocator` ^13
 - `workmanager` ^0.5
 - `sqflite_sqlcipher` ^3

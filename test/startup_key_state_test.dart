@@ -10,7 +10,6 @@ import 'package:trail/providers/backup_provider.dart';
 import 'package:trail/services/passphrase_service.dart';
 import 'package:trail/services/secure_storage_migration.dart';
 import 'package:trail/services/startup_gates.dart';
-import 'package:trail/services/secure_storage.dart';
 
 /// `computeStartupKeyState` is the one probe `main()` runs before the
 /// first frame; the router turns its answer into `/lock`, `/unlock` or
@@ -70,7 +69,6 @@ void main() {
 
   setUp(() async {
     fake = _FakeSecureStorage();
-    secureStorage.resetForTest();
     SharedPreferences.setMockInitialValues({});
     prefs = await SharedPreferences.getInstance();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -163,26 +161,30 @@ void main() {
     });
   });
 
-  group('the flutter_secure_storage 11 marker gate', () {
-    test('DB + no key + NO marker → notMigrated, not keyMissing', () async {
-      // The 11.x failure mode: the 9.2.4 values are still in the prefs
-      // file, they just read back null. Nothing has been lost, so the
-      // recovery screen must not offer to set the log aside.
+  group('the marker no longer changes the diagnosis (0.18.0)', () {
+    test('DB + no key + NO marker → keyMissing', () async {
+      // Until 0.18.0 this read as `notMigrated`, on the theory that the
+      // 9.2.4 values were sitting unread in the old prefs file. With
+      // flutter_secure_storage gone there is no such store to blame: no
+      // key and no salt means the key is genuinely unreadable, which is
+      // exactly what /recover's passphrase path exists for. The old
+      // answer sent the user to install 0.17.3 — a lower versionCode,
+      // so Android would have made them uninstall first and lose the log.
       await dbFile.writeAsString('db');
-      expect(await computeStartupKeyState(), StartupKeyState.notMigrated);
+      expect(await computeStartupKeyState(), StartupKeyState.keyMissing);
     });
 
-    test('DB + no key + marker → keyMissing (release A really ran)',
+    test('DB + no key + marker → keyMissing, exactly as without one',
         () async {
       await presetMarker();
       await dbFile.writeAsString('db');
       expect(await computeStartupKeyState(), StartupKeyState.keyMissing);
     });
 
-    test('a malformed marker counts as no marker → notMigrated', () async {
+    test('a malformed marker is not load-bearing either', () async {
       await prefs.setString(SecureStorageMigration.markerKey, '{oops');
       await dbFile.writeAsString('db');
-      expect(await computeStartupKeyState(), StartupKeyState.notMigrated);
+      expect(await computeStartupKeyState(), StartupKeyState.keyMissing);
     });
 
     test('no DB at all → ok even with no marker (clean first run)',
@@ -225,10 +227,10 @@ void main() {
       expect(fake._store, {'trail_db_passphrase_v1': 'k'});
     });
 
-    test('a notMigrated probe creates neither a key nor a marker',
+    test('a keyMissing probe creates neither a key nor a marker',
         () async {
       await dbFile.writeAsString('db');
-      expect(await computeStartupKeyState(), StartupKeyState.notMigrated);
+      expect(await computeStartupKeyState(), StartupKeyState.keyMissing);
       expect(fake._store, isEmpty);
       expect(prefs.getString(SecureStorageMigration.markerKey), isNull);
       expect(await dbFile.readAsString(), 'db');

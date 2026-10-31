@@ -76,7 +76,6 @@ void main() {
 
   setUp(() async {
     fake = _FakeSecureStorage();
-    secureStorage.resetForTest();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
       const MethodChannel(_channelName),

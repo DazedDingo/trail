@@ -143,10 +143,11 @@ class KeystoreKey {
   ///
   /// * a **throw** (an entry that will not decrypt; before 0.17.9, the
   ///   `flutter_secure_storage` 10 → 11 unwrap failure), and
-  /// * a **silent null**, which on the upgrade launch is also what a
-  ///   legacy store that refused to be read looks like
-  ///   (`MigratingSecureStore` records that separately) —
-  ///   indistinguishable on its own from "no key was ever stored".
+  /// * a **silent null**, indistinguishable on its own from "no key was
+  ///   ever stored" — and the shape the old plugin's failed reads used to
+  ///   arrive in (9.x data under 11.x ciphers read back empty, and the
+  ///   0.17.9/0.17.10 migration wrapper swallowed its own legacy-read
+  ///   failures into a null too).
   ///
   /// Both fall through to [KeyEscrow], Trail's own copy. A hit is
   /// best-effort written back into secure storage so the next launch is
@@ -240,10 +241,11 @@ class KeystoreKey {
   /// transparently.
   ///
   /// Escrow first on purpose. In the 2026-08-23 incident every
-  /// `flutter_secure_storage` call is a chance for its
+  /// `flutter_secure_storage` call was a chance for its
   /// `createRSAKeysIfNeeded` to regenerate the RSA pair and orphan the
-  /// store for good; the verified key must already be somewhere safe
-  /// before we poke it. A secure-storage write that throws is then
+  /// store for good; that library is gone, but the rule it taught stands —
+  /// a verified key belongs in a second home before anything else is
+  /// asked to take it. A secure-storage write that throws is then
   /// **swallowed** (logged, and recorded in [lastSecureStorageError] —
   /// which is also how `PassphraseRecoveryService` detects "the plugin is
   /// the broken part") as long as the escrow accepted the key. A

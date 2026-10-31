@@ -441,12 +441,18 @@ void main() {
     });
 
     test('the diagnostics line names the date, the stage and the error', () {
-      final line = describeLastStartupError(LastStartupError(
-        at: DateTime.utc(2026, 8, 23, 9, 14).toLocal(),
-        stage: 'encryption key state',
-        error: 'PlatformException(Failed to unwrap key)',
-        stack: '',
-      ));
+      final at = DateTime.utc(2026, 8, 23, 9, 14);
+      final line = describeLastStartupError(
+        LastStartupError(
+          at: at.toLocal(),
+          stage: 'encryption key state',
+          error: 'PlatformException(Failed to unwrap key)',
+          stack: '',
+        ),
+        // Pinned: with the real clock this record ages past
+        // `staleStartupErrorAfter` and picks up the stale marker.
+        now: at.add(const Duration(minutes: 30)),
+      );
       expect(line, startsWith('Last startup error: '));
       expect(line, contains('encryption key state'));
       expect(line, contains('Failed to unwrap key'));
@@ -467,6 +473,94 @@ void main() {
 
     test('reading never throws when the prefs backend is broken', () async {
       expect(await readLastStartupError(prefs: _ThrowingPrefs()), isNull);
+    });
+  });
+
+  group('describeLastStartupError — age labelling', () {
+    // The record is never cleared, by design. The 2026-08-23 incident is
+    // the cost of that: every Keystore error in the pasted diagnostics
+    // came from an APK that had already been replaced, and nothing on
+    // the line said so. Anything past `staleStartupErrorAfter` must say
+    // it is history.
+    final at = DateTime.utc(2026, 8, 23, 14, 2);
+
+    LastStartupError recorded({String error = 'StateError(nope)'}) =>
+        LastStartupError(
+          at: at,
+          stage: 'onboarding flag',
+          error: error,
+          stack: '',
+        );
+
+    test('a fresh record carries no stale marker', () {
+      final line = describeLastStartupError(
+        recorded(),
+        now: at.add(const Duration(hours: 3)),
+      );
+      expect(line, startsWith('Last startup error: '));
+      expect(line, contains(' · onboarding flag · '));
+      expect(line, contains('StateError(nope)'));
+      expect(line, isNot(contains('stale')));
+    });
+
+    test('a record older than the threshold is marked stale, with its age',
+        () {
+      final line = describeLastStartupError(
+        recorded(),
+        now: at.add(staleStartupErrorAfter * 10),
+      );
+      // Everything the fresh line said, plus the age.
+      expect(line, startsWith('Last startup error: '));
+      expect(line, contains(' · onboarding flag · '));
+      expect(line, contains('StateError(nope)'));
+      expect(line, contains('stale — 70 days ago'));
+      expect(line, contains('probably from an older version'));
+    });
+
+    test('the boundary is staleStartupErrorAfter, not a hard-coded 7', () {
+      final justInside = describeLastStartupError(
+        recorded(),
+        now: at.add(staleStartupErrorAfter - const Duration(milliseconds: 1)),
+      );
+      final atTheLine = describeLastStartupError(
+        recorded(),
+        now: at.add(staleStartupErrorAfter),
+      );
+      expect(justInside, isNot(contains('stale')));
+      expect(atTheLine, contains('stale'));
+    });
+
+    test('a stale Keystore record names the Keystore in the hint', () {
+      // The incident's exact shape: a keystore line that reads like an
+      // emergency months after the fix shipped.
+      final line = describeLastStartupError(
+        recorded(error: 'PlatformException(Failed to unwrap key, null, null)'),
+        now: at.add(const Duration(days: 69)),
+      );
+      expect(line, contains('Failed to unwrap key'));
+      expect(line,
+          contains('stale — 69 days ago, probably a Keystore failure from an '
+              'older version'));
+    });
+
+    test('a record dated in the future never reads as stale', () {
+      // Clock skew: a negative age must not fall through to the stale
+      // branch — the safe direction is to keep showing it as current.
+      expect(
+        describeLastStartupError(
+          recorded(),
+          now: at.subtract(const Duration(days: 30)),
+        ),
+        isNot(contains('stale')),
+      );
+    });
+
+    test('null is still exactly "none", whatever the clock says', () {
+      expect(describeLastStartupError(null), 'Last startup error: none');
+      expect(
+        describeLastStartupError(null, now: at.add(const Duration(days: 400))),
+        'Last startup error: none',
+      );
     });
   });
 }

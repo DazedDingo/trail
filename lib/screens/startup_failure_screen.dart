@@ -113,8 +113,6 @@ class _StartupFailureScreenState extends ConsumerState<StartupFailureScreen> {
         outcome.keyState == StartupKeyState.needsUnlock;
     ref.read(keyMissingProvider.notifier).state =
         outcome.keyState == StartupKeyState.keyMissing;
-    ref.read(notMigratedProvider.notifier).state =
-        outcome.keyState == StartupKeyState.notMigrated;
     ref.read(startupFailureProvider.notifier).state = null;
     context.go('/lock');
   }

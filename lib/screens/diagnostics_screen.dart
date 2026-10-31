@@ -25,13 +25,17 @@ import '../widgets/secure_storage_rescue_tile.dart';
 ///   2. **DB integrity check** — `PRAGMA integrity_check` run against
 ///      the encrypted DB. Button-gated because it can take several
 ///      seconds on a busy trail.
-///   3. **Secure storage** — whether the `flutter_secure_storage` 10.x
-///      rewrite has been verified on this device, and how many of the
-///      known secrets it found (see `secure_storage_migration.dart`).
+///   3. **Secure storage** — whether the verify-and-rewrite pass over
+///      every known secret has succeeded on this device, and how many
+///      of them it found (see `secure_storage_migration.dart`). Secrets
+///      live in Trail's own `trail_secure_store` since 0.17.9;
+///      `flutter_secure_storage` is only the legacy store the migration
+///      shim reads once per key.
 ///   4. **Last startup error** — the persisted record of the most recent
 ///      time `main()` could not reach the first frame
 ///      (`trail_last_startup_error_v1`, written by `startup_gates.dart`).
-///      "none" on a healthy install.
+///      "none" on a healthy install. Never cleared, so the line marks
+///      itself stale past `staleStartupErrorAfter`.
 ///   5. **Locked-aside logs** — any `trail.db.locked-*` file left by the
 ///      `/recover` screen's "Start a new log", with its size. Only shown
 ///      when at least one exists.
@@ -314,7 +318,10 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen>
                   subtitle: const Text(
                     'The last time Trail could not reach its first '
                     'screen. Recorded even when the app recovered on the '
-                    'next launch.',
+                    'next launch, and never cleared — so an entry marked '
+                    '"stale" is over a week old and is almost certainly '
+                    'from a version you have already replaced, not a '
+                    'fault happening now.',
                   ),
                 ),
                 if (_workerPaused)

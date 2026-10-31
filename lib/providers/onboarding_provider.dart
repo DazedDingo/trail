@@ -26,36 +26,37 @@ class OnboardingGate {
 
   /// Whether onboarding has been completed on this install.
   ///
-  /// A missing key (`null`) is a genuine "no" — that is a first run.
-  ///
-  /// A *thrown* read is not, and since 0.17.8 it is no longer fatal
-  /// either. It used to propagate, on the reasoning that reporting "not
-  /// onboarded" would walk a user with years of history back through the
-  /// first-run flow; `runStartupGates` then turned it into
-  /// `/startup-failed`. In the 2026-08-23 incident that is exactly what
-  /// happened — the very first thing startup asks for is this flag, and
-  /// `flutter_secure_storage` 11 threw on it at every launch, so the
-  /// user never got past the crash screen to the passphrase they *do*
-  /// have. Two independent fallbacks answer it instead:
+  /// A `'1'` in the store is the hot answer, and the only one that writes
+  /// nothing. Every other outcome — a `null`, an unexpected value, or a
+  /// *thrown* read — falls through to two independent fallbacks rather
+  /// than being reported as a first run:
   ///
   ///   1. [mirrorKey] in SharedPreferences, and
   ///   2. an existing encrypted `trail.db` — a log on disk is proof that
   ///      onboarding happened, whatever the Keystore says.
   ///
-  /// **A legacy read that failed counts as a throw (0.17.9.)** On the
-  /// upgrade launch the flag is not in Trail's own store yet, so the
-  /// answer comes from `flutter_secure_storage` — and
-  /// `MigratingSecureStore` swallows that plugin's failures rather than
-  /// letting every call site handle them. Without this branch a phone
-  /// whose legacy store refuses to open would read `null`, i.e. "first
-  /// run", and be walked back through onboarding: the exact outcome the
-  /// fallbacks exist to prevent. [MigratingSecureStore.legacyFailedFor]
-  /// is what separates "no such secret" from "I could not look".
+  /// A throw used to propagate instead, on the reasoning that reporting
+  /// "not onboarded" would walk a user with years of history back through
+  /// the first-run flow; `runStartupGates` then turned it into
+  /// `/startup-failed`. In the 2026-08-23 incident that is exactly what
+  /// happened — the very first thing startup asks for is this flag, and
+  /// `flutter_secure_storage` 11 threw on it at every launch, so the user
+  /// never got past the crash screen to the passphrase they *do* have.
+  /// Hence the fallbacks (0.17.8).
   ///
-  /// Anything the fallbacks answer `true` is written back into the new
-  /// store (and the mirror) — otherwise the next launch, with the
-  /// migration marker now set and the legacy store off-limits, would ask
-  /// the same question and get a plain `null`.
+  /// A plain `null` now takes the same route. Until 0.17.10 it
+  /// short-circuited to `false` unless the one-shot legacy migration had
+  /// recorded a failure for this key, because on an upgrade launch a null
+  /// could still mean "`flutter_secure_storage` refused to be read". With
+  /// that library gone there is one store, it reports an unreadable entry
+  /// by *throwing*, and consulting the fallbacks on a null costs one prefs
+  /// read and one `stat` — on a genuine first run both answer "no" anyway,
+  /// and on a store that quietly lost the flag the DB on disk is the right
+  /// answer.
+  ///
+  /// Anything the fallbacks answer `true` is written back into the store
+  /// (and the mirror) — otherwise the next launch would ask the same
+  /// question and get the same `null`.
   ///
   /// Only when neither fallback can vouch for it does the read come back
   /// `false`. Nothing is lost by that: the key-state gate
@@ -65,9 +66,6 @@ class OnboardingGate {
   static Future<bool> isComplete() async {
     try {
       if (await secureStorage.read(key: storageKey) == '1') return true;
-      if (!secureStorage.legacyFailedFor(storageKey)) return false;
-      debugPrint('[OnboardingGate] legacy store unreadable: '
-          '${secureStorage.lastLegacyError}');
     } catch (e) {
       debugPrint('[OnboardingGate] secure storage read failed: $e');
     }

@@ -4,6 +4,19 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.18.0+113] — 2026-10-31
+
+### Changed
+- **The storage plugin that broke the app in August is gone for good.** Trail's secrets have lived in its own Keystore-backed store since 0.17.9; the old plugin was kept on for one release so it could hand over anything written by earlier versions. That handover has now happened, so the dependency — and the crypto library it dragged in — is removed. Nothing to do on your side: a phone that has run 0.17.10 already completed the one-time read.
+- **Startup does one less thing before the first screen.** With no old store to consult, the launch path drops a lookup that was allowed up to three seconds per secret, and the last code that could ever re-create the old plugin's keys is gone with it.
+
+### Fixed
+- **The "Update needed first" recovery screen no longer sends you down a road that destroys data.** It appeared when Trail could not read its database key, and it advised installing v0.17.3 first. That advice cannot work: an older build has a lower Android version code, so the phone refuses the upgrade and makes you uninstall — which deletes the encrypted log. That diagnosis was only ever about the old storage plugin, so with the plugin gone the case now shows the ordinary recovery screen, including the backup-passphrase option.
+- **Diagnostics no longer presents a months-old startup error as a current fault.** The "Last startup error" line is kept on purpose and never cleared, but an entry older than a week is now labelled as stale and probably from an earlier version. In August a dump full of Keystore errors turned out to be entirely historical, which cost real time to work out.
+
+### Note
+- **Two settings may still need re-entering if you have not already done so:** the GitHub token (Settings → Offline map → only needed for building regions from inside the app) and your panic preferences. Both were casualties of the August Keystore failure, not of this release — your database key and map-detail server token are unaffected.
+
 ## [0.17.10+112] — 2026-08-23
 
 ### Fixed

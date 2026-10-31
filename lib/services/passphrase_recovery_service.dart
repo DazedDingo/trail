@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:trail_secure_store/trail_secure_store.dart'
+    show TrailSecureStore;
 
 import '../db/database.dart';
 import '../db/keystore_key.dart';
@@ -12,7 +14,6 @@ import 'passphrase_service.dart';
 import 'secure_storage.dart';
 import 'secure_storage_migration.dart';
 import 'secure_storage_rescue.dart';
-import 'secure_store_migration.dart';
 import 'startup_gates.dart';
 
 /// SharedPreferences key holding the last [SecureStorageRescueSummary].
@@ -209,13 +210,16 @@ class PassphraseRecoveryResult {
 /// 2. **Verify** it by actually opening `trail.db`
 ///    ([TrailDatabase.openWithKeyForVerification]). A wrong passphrase
 ///    stops here with nothing written anywhere.
-/// 3. **Escrow it, and only it** — `KeyEscrow.store`, no secure-storage
-///    call yet. Every `flutter_secure_storage` call is another run of the
-///    plugin's `createRSAKeysIfNeeded`, which regenerates the RSA pair
-///    the moment Android reports the alias missing (gotcha 38) — and that
-///    would orphan the very wrapped AES key step 5 is about to read. So
-///    the plugin is not touched at all until the rescue has had its look.
-/// 4. **Diagnose**: is the plugin broken? Either the startup read already
+/// 3. **Escrow it, and only it** — `KeyEscrow.store`, no secure-store
+///    write yet. The original reason was that every
+///    `flutter_secure_storage` call is another run of the plugin's
+///    `createRSAKeysIfNeeded`, which regenerates the RSA pair the moment
+///    Android reports the alias missing (gotcha 38) — orphaning the very
+///    wrapped AES key step 5 is about to read. The app no longer links
+///    that library at all, so the hazard is now confined to steps 5–6;
+///    the order stays because it is the one that keeps a verified key in
+///    a second home before anything destructive runs.
+/// 4. **Diagnose**: is the store broken? Either the startup read already
 ///    failed ([KeystoreKey.lastSecureStorageError]) or
 ///    [SecureStorageRescue.status] shows a wrapped key whose Keystore
 ///    alias is gone. A healthy store skips to [KeystoreKey.persist] and
@@ -234,7 +238,7 @@ class PassphraseRecoveryService {
   PassphraseRecoveryService({
     Future<void> Function(String key)? verifyKey,
     SecureStorageRescue? rescue,
-    MigratingSecureStore? storage,
+    TrailSecureStore? storage,
     SharedPreferences? prefs,
     DateTime Function()? now,
   })  : _verifyKey = verifyKey ?? TrailDatabase.openWithKeyForVerification,
@@ -245,7 +249,7 @@ class PassphraseRecoveryService {
 
   final Future<void> Function(String key) _verifyKey;
   final SecureStorageRescue _rescue;
-  final MigratingSecureStore _storage;
+  final TrailSecureStore _storage;
   final SharedPreferences? _prefs;
   final DateTime Function() _now;
 
@@ -345,26 +349,27 @@ class PassphraseRecoveryService {
     return PassphraseRecoveryResult.unlocked(rescue: summary);
   }
 
-  /// Is `flutter_secure_storage` itself the broken part?
+  /// Is the secret store itself the broken part — and is the old
+  /// `flutter_secure_storage` store still holding secrets worth rescuing?
   ///
-  /// Three independent tells, none of which writes anything:
+  /// Two independent tells, neither of which writes anything:
   ///
-  ///   * [MigratingSecureStore.lastLegacyError] — the one-shot migration
-  ///     read of the legacy store failed this launch. Since 0.17.9 that
-  ///     is the *primary* signal: the app's own reads now go to Trail's
-  ///     store, so a broken `flutter_secure_storage` no longer announces
-  ///     itself by taking startup down;
   ///   * [KeystoreKey.lastSecureStorageError] — the DB-key read or write
   ///     threw this launch, or
   ///   * [SecureStorageRescue.status] reports a wrapped AES key sitting in
   ///     the legacy store with no Keystore alias left to unwrap it, which
   ///     is the same dead end one launch earlier.
   ///
+  /// A third tell lived here until 0.17.10: the one-shot legacy migration
+  /// recording that its single `flutter_secure_storage` read had failed.
+  /// The library is gone now, so nothing on a normal launch touches that
+  /// store at all — the two tells above are what is left, and the rescue
+  /// path below still reads the old store's *files* natively.
+  ///
   /// A `status` the channel cannot answer (no handler, off-device) reads
   /// as "not broken" — the healthy path then just calls
   /// [KeystoreKey.persist] and finds out for itself.
   Future<bool> _pluginLooksBroken() async {
-    if (_storage.lastLegacyError != null) return true;
     if (KeystoreKey.lastSecureStorageError != null) return true;
     final status = await _rescue.status();
     return status.wrappedKeyPresent && !status.aliasExists;

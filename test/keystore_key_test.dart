@@ -7,18 +7,18 @@ import 'package:path/path.dart' as p;
 import 'package:trail/db/keystore_key.dart';
 import 'package:trail/services/key_escrow.dart';
 import 'package:trail/services/passphrase_service.dart';
-import 'package:trail/services/secure_storage.dart';
 
 /// [KeystoreKey] reads through the shared `secureStorage`, which since
 /// 0.17.9 is Trail's own `TrailSecureStore` (channel `trail/secure_store`,
-/// `packages/trail_secure_store`) behind the one-shot legacy migration.
-/// There is no DI seam in the class, so we fake the platform channel
-/// directly — the same trick as before, one channel name along.
+/// `packages/trail_secure_store`). There is no DI seam in the class, so we
+/// fake the platform channel directly — the same trick as before, one
+/// channel name along.
 ///
-/// The legacy `flutter_secure_storage` channel is deliberately left
-/// unmocked: in production it is consulted at most once per key, and a
-/// `MissingPluginException` from it is exactly the "could not look"
-/// outcome the wrapper swallows.
+/// One channel is all it takes now. Through 0.17.10 the store was wrapped
+/// in a one-shot legacy migration, and this file deliberately left the old
+/// `flutter_secure_storage` channel unmocked so its `MissingPluginException`
+/// would exercise the wrapper's "could not look" swallow. Both are gone:
+/// every read below goes to the fake and nowhere else.
 const _channelName = 'trail/secure_store';
 const _storageKey = 'trail_db_passphrase_v1';
 
@@ -86,7 +86,6 @@ void main() {
 
   setUp(() async {
     fake = _FakeSecureStorage();
-    secureStorage.resetForTest();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
       const MethodChannel(_channelName),
@@ -219,8 +218,8 @@ void main() {
     });
 
     test('is a no-op when there is nothing to delete', () async {
-      // flutter_secure_storage's delete is idempotent; we mirror that so the
-      // "reset DB" recovery flow never throws on an already-empty store.
+      // `TrailSecureStore.delete` is idempotent (as the old plugin's was),
+      // so the "reset DB" recovery flow never throws on an empty store.
       await KeystoreKey.reset();
       expect(fake.current(), isNull);
     });
@@ -332,9 +331,9 @@ void main() {
   });
 
   group('KeystoreKey.getOrCreate — DB-present guard', () {
-    // The data-safety net for the flutter_secure_storage 9 → 10 → 11
-    // migration: if the store comes back empty but trail.db is still on
-    // disk, minting a fresh random key would make the user's whole log
+    // Written for the flutter_secure_storage 9 → 10 → 11 migration and
+    // still the rule: if the store comes back empty but trail.db is still
+    // on disk, minting a fresh random key would make the user's whole log
     // permanently unreadable AND hide that anything went wrong.
     late Directory tempDir;
     late File dbFile;
@@ -524,7 +523,7 @@ void main() {
           if (call.method == 'read') {
             throw PlatformException(
               code: 'Exception encountered',
-              message: 'accessing FlutterSecureStorage',
+              message: 'KeyStoreException UNKNOWN_ERROR (-1000)',
             );
           }
           return null;
