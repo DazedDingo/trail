@@ -4,6 +4,26 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [0.19.0+115] — 2026-10-31
+
+First of the bigger library updates — the five whose new major versions
+turned out not to change anything Trail relies on. The riskier ones
+(notifications, permissions, biometrics, GPS, routing, state handling)
+are still to come, each on its own.
+
+### Added
+- **The passphrase key derivation is now pinned to a fixed, externally computed answer.** Passphrase mode is what rescued the encrypted log during the August Keystore failure, and until now the tests only proved the derivation was consistent with itself — so a crypto-library change could have silently made every existing passphrase stop opening its own database, with no test failing. Three new tests check the derived key byte-for-byte against values computed independently in Python, and pin the iteration count and key length that those values depend on. If that test ever fails, the expected values must not be "fixed" — it means real data has become unreachable.
+
+### Changed
+- Crypto library updated (the one that turns your passphrase into the database key). Verified to produce **identical** output to the previous version before shipping, using the new pinned tests above.
+- File picker updated. Used when choosing a Timeline export to import and when installing a map region.
+- Photo loading and caching library updated — affects pin photos in the gallery and in picture mode.
+- Network-status library updated — used for the "only over Wi-Fi" rule when fetching map detail, and for the connection shown next to each ping.
+- Date and number formatting library updated.
+
+### Note
+- Nothing in Trail's own code needed changing for any of these, and all 1935 tests pass. But three of them only really run on a phone: picking files, loading photos, and reading the network state. Worth a quick check after installing — import a Timeline file, open a pin with photos, and confirm map detail still only downloads on Wi-Fi.
+
 ## [0.18.1+114] — 2026-10-31
 
 Housekeeping release: every dependency moves to the newest version that
