@@ -34,6 +34,11 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          # Pinned to the local toolchain (2026-11-25). Unpinned stable moved
+          # to 3.50.1, which deprecates package:flutter/material.dart
+          # (-> package:material_ui) and turned Weekend Picker's analyze
+          # red. Bump only together with the local SDK, deliberately.
+          flutter-version: 3.47.1
           cache: true
 
       - name: Verify pinned keystore is present
