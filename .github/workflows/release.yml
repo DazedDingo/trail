@@ -99,14 +99,18 @@ jobs:
         # reject it as a downgrade. If Trail ever needs to go back to a
         # single fat APK, the versionCode must be bumped past the highest
         # per-ABI value any user could already have installed.
-        run: flutter build apk --release --split-per-abi
+        #
+        # Since 2026-11-25 only arm64-v8a is built (commander: the 32-bit
+        # and emulator APKs were never used). --target-platform restricts
+        # the ABIs while --split-per-abi stays on, so the arm64 APK keeps
+        # its 2000 + build versionCode — the next step asserts that.
+        run: flutter build apk --release --split-per-abi --target-platform android-arm64
 
       - name: Verify APKs are signed with the expected keystore
         # If AGP sidesteps our pinned signingConfig for any reason, an APK's
         # cert SHA-1 will not match EXPECTED_SHA1 and this step fails. That
         # stops us from ever shipping a release that can't upgrade existing
-        # installs. --split-per-abi produces one APK per ABI, so loop over
-        # all of them — a mismatch on any single one must fail the build.
+        # installs. Only the arm64 APK is built now (see Build APK).
         run: |
           APKSIGNER=$(ls -t $ANDROID_HOME/build-tools/*/apksigner 2>/dev/null | head -1)
           if [ -z "$APKSIGNER" ]; then
@@ -115,9 +119,7 @@ jobs:
           fi
           echo "Using apksigner: $APKSIGNER"
           EXPECTED_COMPACT=$(echo "$EXPECTED_SHA1" | tr -d ':' | tr 'A-F' 'a-f')
-          for APK in build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
-                     build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk \
-                     build/app/outputs/flutter-apk/app-x86_64-release.apk; do
+          for APK in build/app/outputs/flutter-apk/app-arm64-v8a-release.apk; do
             echo "--- $APK ---"
             CERTS=$("$APKSIGNER" verify --print-certs "$APK")
             echo "$CERTS"
@@ -128,6 +130,17 @@ jobs:
             fi
             echo "✓ $APK signed with the pinned keystore."
           done
+          # Dropping --split-per-abi (or the ABI offset changing) would ship a
+          # versionCode below what phones already have = "downgrade" refusal.
+          AAPT2=$(ls -t $ANDROID_HOME/build-tools/*/aapt2 2>/dev/null | head -1)
+          BUILD=$(grep '^version:' pubspec.yaml | sed 's/.*+//')
+          EXPECTED_VC=$((2000 + BUILD))
+          ACTUAL_VC=$("$AAPT2" dump badging build/app/outputs/flutter-apk/app-arm64-v8a-release.apk | grep -o "versionCode='[0-9]*'" | grep -o '[0-9]*')
+          if [ "$ACTUAL_VC" != "$EXPECTED_VC" ]; then
+            echo "::error::arm64 versionCode is $ACTUAL_VC, expected $EXPECTED_VC (2000 + build) — existing installs would reject it."
+            exit 1
+          fi
+          echo "✓ arm64 versionCode $ACTUAL_VC"
 
       - name: Get version from pubspec
         id: version
@@ -176,8 +189,6 @@ jobs:
         run: |
           TAG=${{ steps.version.outputs.tag }}
           mv build/app/outputs/flutter-apk/app-arm64-v8a-release.apk build/app/outputs/flutter-apk/Trail-$TAG-arm64-v8a.apk
-          mv build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk build/app/outputs/flutter-apk/Trail-$TAG-armeabi-v7a.apk
-          mv build/app/outputs/flutter-apk/app-x86_64-release.apk build/app/outputs/flutter-apk/Trail-$TAG-x86_64.apk
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -187,6 +198,4 @@ jobs:
           body_path: release_notes.md
           files: |
             build/app/outputs/flutter-apk/Trail-${{ steps.version.outputs.tag }}-arm64-v8a.apk
-            build/app/outputs/flutter-apk/Trail-${{ steps.version.outputs.tag }}-armeabi-v7a.apk
-            build/app/outputs/flutter-apk/Trail-${{ steps.version.outputs.tag }}-x86_64.apk
           fail_on_unmatched_files: true

@@ -4,6 +4,12 @@ All notable changes to **Trail** are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with the Android `versionCode+build` suffix.
 
+## [Unreleased]
+
+### Changed
+- Releases now ship a single APK (`…-arm64-v8a.apk`, for any phone from the
+  last ~8 years). The 32-bit and emulator APKs are no longer built.
+
 ## [0.21.0+118] — 2026-10-31
 
 The state-handling library Trail is built on (Riverpod) moves up a major
